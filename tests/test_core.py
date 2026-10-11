@@ -197,3 +197,61 @@ def test_verified_artifacts_enforces_rollback(tmp_path):
     with pytest.raises(VerificationError, match="rollback"):
         with verified_artifacts(root, envelope, private.public_key(), min_release_seq=5):
             pass
+
+
+def test_audit_append_refuses_tampered_existing_journal(tmp_path):
+    journal = tmp_path / "audit.jsonl"
+    append_audit_event(journal, "test", "original")
+    event = json.loads(journal.read_text().splitlines()[0])
+    event["detail"] = "tampered"
+    journal.write_text(json.dumps(event) + "\\n")
+
+    with pytest.raises(VerificationError, match="hash mismatch"):
+        append_audit_event(journal, "test", "new event")
+
+
+@pytest.mark.parametrize("invalid_event_type", ["", None, 123])
+def test_audit_append_rejects_invalid_event_type(tmp_path, invalid_event_type):
+    with pytest.raises(VerificationError, match="event_type"):
+        append_audit_event(tmp_path / "audit.jsonl", invalid_event_type, "detail")
+
+
+def test_audit_append_rejects_non_string_detail(tmp_path):
+    with pytest.raises(VerificationError, match="detail"):
+        append_audit_event(tmp_path / "audit.jsonl", "test", {"unexpected": "object"})
+
+
+@pytest.mark.parametrize("json_value", ["[]", "null", '"text"', "42", "true"])
+def test_audit_verify_rejects_non_object_jsonl_records(tmp_path, json_value):
+    journal = tmp_path / "audit.jsonl"
+    journal.write_text(json_value + "\\n", encoding="utf-8")
+
+    with pytest.raises(VerificationError, match="JSON object"):
+        verify_audit_journal(journal)
+
+
+def test_audit_verify_rejects_boolean_sequence_number(tmp_path):
+    journal = tmp_path / "audit.jsonl"
+    event = {
+        "seq": True,
+        "event_type": "test",
+        "detail": "bad sequence",
+        "previous_hash": "0" * 64,
+    }
+    event["event_hash"] = hashlib.sha256(
+        json.dumps(event, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    journal.write_text(json.dumps(event) + "\\n", encoding="utf-8")
+
+    with pytest.raises(VerificationError, match="sequence mismatch"):
+        verify_audit_journal(journal)
+
+
+def test_audit_verify_rejects_symlink_journal(tmp_path):
+    target = tmp_path / "real.jsonl"
+    target.write_text("", encoding="utf-8")
+    link = tmp_path / "audit.jsonl"
+    link.symlink_to(target)
+
+    with pytest.raises(VerificationError, match="non-symlink"):
+        verify_audit_journal(link)

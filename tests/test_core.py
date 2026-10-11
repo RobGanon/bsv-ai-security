@@ -204,7 +204,7 @@ def test_audit_append_refuses_tampered_existing_journal(tmp_path):
     append_audit_event(journal, "test", "original")
     event = json.loads(journal.read_text().splitlines()[0])
     event["detail"] = "tampered"
-    journal.write_text(json.dumps(event) + "\\n")
+    journal.write_text(json.dumps(event) + "\n")
 
     with pytest.raises(VerificationError, match="hash mismatch"):
         append_audit_event(journal, "test", "new event")
@@ -224,7 +224,7 @@ def test_audit_append_rejects_non_string_detail(tmp_path):
 @pytest.mark.parametrize("json_value", ["[]", "null", '"text"', "42", "true"])
 def test_audit_verify_rejects_non_object_jsonl_records(tmp_path, json_value):
     journal = tmp_path / "audit.jsonl"
-    journal.write_text(json_value + "\\n", encoding="utf-8")
+    journal.write_text(json_value + "\n", encoding="utf-8")
 
     with pytest.raises(VerificationError, match="JSON object"):
         verify_audit_journal(journal)
@@ -241,7 +241,7 @@ def test_audit_verify_rejects_boolean_sequence_number(tmp_path):
     event["event_hash"] = hashlib.sha256(
         json.dumps(event, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    journal.write_text(json.dumps(event) + "\\n", encoding="utf-8")
+    journal.write_text(json.dumps(event) + "\n", encoding="utf-8")
 
     with pytest.raises(VerificationError, match="sequence mismatch"):
         verify_audit_journal(journal)

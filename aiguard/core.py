@@ -347,18 +347,27 @@ def _safe_relative_path(raw: str) -> Path:
 
 
 def append_audit_event(journal: Path, event_type: str, detail: str) -> dict:
+    """Append an event only when the existing journal is valid.
+
+    This prevents the normal append path from silently extending a journal
+    whose earlier events have already been modified or truncated.
+    """
+    if not isinstance(event_type, str) or not event_type:
+        raise VerificationError("event_type must be a non-empty string")
+    if not isinstance(detail, str):
+        raise VerificationError("detail must be a string")
+
     journal.parent.mkdir(parents=True, exist_ok=True)
-    previous = "0" * 64
-    if journal.exists() and journal.stat().st_size:
-        events = _read_jsonl(journal)
-        if events:
-            previous = events[-1].get("event_hash", "")
-            if not isinstance(previous, str) or not HEX_64.fullmatch(previous):
-                raise VerificationError("previous event hash malformed")
-    next_seq = 1
-    if journal.exists() and journal.stat().st_size:
-        prior = _read_jsonl(journal)
-        next_seq = prior[-1]["seq"] + 1 if prior else 1
+    prior: list[dict] = []
+    if journal.exists():
+        if not journal.is_file() or journal.is_symlink():
+            raise VerificationError("audit journal must be a regular non-symlink file")
+        if journal.stat().st_size:
+            prior = _read_jsonl(journal)
+            _verify_audit_events(prior)
+
+    previous = prior[-1]["event_hash"] if prior else "0" * 64
+    next_seq = prior[-1]["seq"] + 1 if prior else 1
     event = {
         "seq": next_seq,
         "event_type": event_type,
@@ -376,20 +385,31 @@ def append_audit_event(journal: Path, event_type: str, detail: str) -> dict:
 def verify_audit_journal(journal: Path) -> int:
     if not journal.exists():
         return 0
-    events = _read_jsonl(journal)
+    if journal.is_symlink() or not journal.is_file():
+        raise VerificationError("audit journal must be a regular non-symlink file")
+    return _verify_audit_events(_read_jsonl(journal))
+
+
+def _verify_audit_events(events: list[dict]) -> int:
     previous = "0" * 64
     expected_seq = 1
     for event in events:
         if not isinstance(event, dict) or "event_hash" not in event:
             raise VerificationError("malformed audit event")
         event_hash = event["event_hash"]
+        if not isinstance(event_hash, str) or not HEX_64.fullmatch(event_hash):
+            raise VerificationError(f"malformed audit event hash at sequence {expected_seq}")
         body = {k: v for k, v in event.items() if k != "event_hash"}
-        actual = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
+        try:
+            actual = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
+        except (TypeError, ValueError) as exc:
+            raise VerificationError(f"malformed audit event at sequence {expected_seq}") from exc
         if actual != event_hash:
             raise VerificationError(f"audit event hash mismatch at sequence {expected_seq}")
         if event.get("previous_hash") != previous:
             raise VerificationError(f"audit chain broken at sequence {expected_seq}")
-        if event.get("seq") != expected_seq:
+        seq = event.get("seq")
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq != expected_seq:
             raise VerificationError(f"audit sequence mismatch at sequence {expected_seq}")
         previous = event_hash
         expected_seq += 1
@@ -403,7 +423,10 @@ def _read_jsonl(path: Path) -> list[dict]:
             if not line.strip():
                 raise VerificationError(f"blank line in audit journal at line {line_no}")
             try:
-                events.append(json.loads(line))
+                event = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise VerificationError(f"invalid JSON at audit line {line_no}") from exc
+            if not isinstance(event, dict):
+                raise VerificationError(f"audit event must be a JSON object at line {line_no}")
+            events.append(event)
     return events

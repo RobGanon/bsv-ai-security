@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bsv-ai-security-phase1"
+version = "0.3.0"
+description = "Local AI artifact verification and tamper-evident audit prototype"
+requires-python = ">=3.10"
+dependencies = ["cryptography>=42.0"]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[project.scripts]
+aiguard = "aiguard.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

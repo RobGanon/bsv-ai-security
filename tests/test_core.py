@@ -255,3 +255,19 @@ def test_audit_verify_rejects_symlink_journal(tmp_path):
 
     with pytest.raises(VerificationError, match="non-symlink"):
         verify_audit_journal(link)
+
+
+def test_audit_verify_rejects_dangling_symlink_journal(tmp_path):
+    link = tmp_path / "audit.jsonl"
+    link.symlink_to(tmp_path / "missing.jsonl")
+
+    with pytest.raises(VerificationError, match="non-symlink"):
+        verify_audit_journal(link)
+
+
+def test_audit_append_rejects_dangling_symlink_journal(tmp_path):
+    link = tmp_path / "audit.jsonl"
+    link.symlink_to(tmp_path / "missing.jsonl")
+
+    with pytest.raises(VerificationError, match="non-symlink"):
+        append_audit_event(link, "test", "detail")

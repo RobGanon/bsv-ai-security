@@ -359,8 +359,10 @@ def append_audit_event(journal: Path, event_type: str, detail: str) -> dict:
 
     journal.parent.mkdir(parents=True, exist_ok=True)
     prior: list[dict] = []
+    if journal.is_symlink():
+        raise VerificationError("audit journal must be a regular non-symlink file")
     if journal.exists():
-        if not journal.is_file() or journal.is_symlink():
+        if not journal.is_file():
             raise VerificationError("audit journal must be a regular non-symlink file")
         if journal.stat().st_size:
             prior = _read_jsonl(journal)
@@ -383,9 +385,11 @@ def append_audit_event(journal: Path, event_type: str, detail: str) -> dict:
 
 
 def verify_audit_journal(journal: Path) -> int:
+    if journal.is_symlink():
+        raise VerificationError("audit journal must be a regular non-symlink file")
     if not journal.exists():
         return 0
-    if journal.is_symlink() or not journal.is_file():
+    if not journal.is_file():
         raise VerificationError("audit journal must be a regular non-symlink file")
     return _verify_audit_events(_read_jsonl(journal))
 

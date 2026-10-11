@@ -21,7 +21,15 @@ def test_provider_configuration_uses_testnet_and_redacts_token():
     assert config.network == "testnet"
     assert config.backend == "provider"
     assert "do-not-print-this-token" not in repr(config)
+    assert "provider.example" not in repr(config)
     assert "<redacted>" in repr(config)
+
+
+def test_provider_rejects_credentials_embedded_in_url():
+    with pytest.raises(PublishingConfigurationError, match="must not embed credentials"):
+        load_publishing_config({
+            "AIGUARD_BSV_PROVIDER_URL": "https://user:secret@provider.example/api",
+        })
 
 
 def test_mainnet_is_rejected():

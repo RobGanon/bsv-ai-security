@@ -30,16 +30,23 @@ class PublishingConfig:
     rpc_password: str | None = None
 
     def __repr__(self) -> str:
-        # Avoid leaking credentials if configuration is logged for debugging.
+        # URLs may contain tokens in query strings; never print endpoints.
         return (
             "PublishingConfig("
             f"network={self.network!r}, backend={self.backend!r}, "
-            f"endpoint={self.endpoint!r}, "
+            "endpoint='<configured>', "
             f"fee_rate_sat_per_byte={self.fee_rate_sat_per_byte!r}, "
             f"max_fee_sat={self.max_fee_sat!r}, "
             f"provider_token={'<redacted>' if self.provider_token else None!r}, "
             f"rpc_username={'<redacted>' if self.rpc_username else None!r}, "
             f"rpc_password={'<redacted>' if self.rpc_password else None!r})"
+        )
+
+
+def _reject_url_credentials(parsed, label: str) -> None:
+    if parsed.username is not None or parsed.password is not None:
+        raise PublishingConfigurationError(
+            f"{label} URL must not embed credentials; use environment secrets"
         )
 
 
@@ -73,6 +80,7 @@ def load_publishing_config(
             raise PublishingConfigurationError(
                 "provider endpoint must be an HTTPS URL"
             )
+        _reject_url_credentials(parsed, "provider")
     else:
         endpoint = env.get("AIGUARD_BSV_NODE_RPC_URL", "").strip()
         token = None
@@ -83,6 +91,7 @@ def load_publishing_config(
             raise PublishingConfigurationError(
                 "node RPC endpoint must be an HTTP(S) URL"
             )
+        _reject_url_credentials(parsed, "node RPC")
         if parsed.scheme == "http" and parsed.hostname not in {
             "localhost", "127.0.0.1", "::1"
         }:

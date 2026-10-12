@@ -18,7 +18,16 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-HEX_64 = re.compile(r"^[0-9a-f]{64}$")
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-Unix platforms
+    fcntl = None  # type: ignore[assignment]
+
+HEX_64 = re.compile(r"^[0-9a-fA-F]{64}$")
+
+# Limits for the local audit journal (Phase 1 DoS hardening).
+MAX_EVENT_DETAIL_BYTES = 4096
+MAX_JOURNAL_EVENTS = 1_000_000
 
 # O_NOFOLLOW makes open(2) fail on a trailing symlink instead of following it.
 # It is Unix-only; where unavailable the per-component symlink walk in
@@ -169,9 +178,9 @@ def _load_verified_payload(envelope: dict, public_key: Ed25519PublicKey) -> dict
 
 
 def _check_rollback_policy(payload: dict, min_release_seq: int | None) -> int:
-    """Validate release identity and enforce the caller's minimum sequence.
+    """Validate release identity and enforce the caller\'s minimum sequence.
 
-    Returns the manifest's release_seq. The caller supplies min_release_seq
+    Returns the manifest\'s release_seq. The caller supplies min_release_seq
     from its own trusted state (e.g. the highest sequence it has ever
     accepted, persisted in protected storage or anchored externally);
     without it, an older legitimately-signed manifest would verify fine,
@@ -214,6 +223,7 @@ def _validated_entries(root: Path, payload: dict) -> list[tuple[Path, str, int]]
         expected_size = item["size"]
         if not isinstance(expected_hash, str) or not HEX_64.fullmatch(expected_hash):
             raise VerificationError(f"invalid SHA-256 for {rel}")
+        expected_hash = expected_hash.lower()
         if not isinstance(expected_size, int) or isinstance(expected_size, bool) or expected_size < 0:
             raise VerificationError(f"invalid size for {rel}")
 
@@ -351,37 +361,69 @@ def append_audit_event(journal: Path, event_type: str, detail: str) -> dict:
 
     This prevents the normal append path from silently extending a journal
     whose earlier events have already been modified or truncated.
+
+    On platforms that support it, an exclusive advisory lock is held across
+    the verify-then-write critical section so concurrent writers cannot race.
     """
     if not isinstance(event_type, str) or not event_type:
         raise VerificationError("event_type must be a non-empty string")
     if not isinstance(detail, str):
         raise VerificationError("detail must be a string")
+    detail_bytes = detail.encode("utf-8")
+    if len(detail_bytes) > MAX_EVENT_DETAIL_BYTES:
+        raise VerificationError(
+            f"detail exceeds maximum of {MAX_EVENT_DETAIL_BYTES} UTF-8 bytes"
+        )
 
     journal.parent.mkdir(parents=True, exist_ok=True)
-    prior: list[dict] = []
     if journal.is_symlink():
         raise VerificationError("audit journal must be a regular non-symlink file")
-    if journal.exists():
-        if not journal.is_file():
+
+    # Open with create + append so we can lock the same FD used for writing.
+    flags = os.O_RDWR | os.O_CREAT | os.O_APPEND
+    fd = os.open(os.fspath(journal), flags, 0o644)
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+
+        # Re-check after acquiring the lock (symlink / non-regular race).
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode):
             raise VerificationError("audit journal must be a regular non-symlink file")
-        if journal.stat().st_size:
+
+        prior: list[dict] = []
+        size = os.fstat(fd).st_size
+        if size:
+            # Read existing content via a separate text handle on the same path
+            # (the locked FD is binary). The lock serialises concurrent writers.
             prior = _read_jsonl(journal)
             _verify_audit_events(prior)
 
-    previous = prior[-1]["event_hash"] if prior else "0" * 64
-    next_seq = prior[-1]["seq"] + 1 if prior else 1
-    event = {
-        "seq": next_seq,
-        "event_type": event_type,
-        "detail": detail,
-        "previous_hash": previous,
-    }
-    event["event_hash"] = hashlib.sha256(canonical_json_bytes(event)).hexdigest()
-    with journal.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    return event
+        if len(prior) >= MAX_JOURNAL_EVENTS:
+            raise VerificationError(
+                f"journal already contains the maximum of {MAX_JOURNAL_EVENTS} events"
+            )
+
+        previous = prior[-1]["event_hash"].lower() if prior else "0" * 64
+        next_seq = prior[-1]["seq"] + 1 if prior else 1
+        event = {
+            "seq": next_seq,
+            "event_type": event_type,
+            "detail": detail,
+            "previous_hash": previous,
+        }
+        event["event_hash"] = hashlib.sha256(canonical_json_bytes(event)).hexdigest()
+        line = json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
+        os.write(fd, line.encode("utf-8"))
+        os.fsync(fd)
+        return event
+    finally:
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        os.close(fd)
 
 
 def verify_audit_journal(journal: Path) -> int:
@@ -408,14 +450,16 @@ def _verify_audit_events(events: list[dict]) -> int:
             actual = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
         except (TypeError, ValueError) as exc:
             raise VerificationError(f"malformed audit event at sequence {expected_seq}") from exc
-        if actual != event_hash:
+        # Accept mixed-case stored hashes; always compare in lowercase.
+        if actual != event_hash.lower():
             raise VerificationError(f"audit event hash mismatch at sequence {expected_seq}")
-        if event.get("previous_hash") != previous:
+        prev = event.get("previous_hash")
+        if not isinstance(prev, str) or not HEX_64.fullmatch(prev) or prev.lower() != previous:
             raise VerificationError(f"audit chain broken at sequence {expected_seq}")
         seq = event.get("seq")
         if not isinstance(seq, int) or isinstance(seq, bool) or seq != expected_seq:
             raise VerificationError(f"audit sequence mismatch at sequence {expected_seq}")
-        previous = event_hash
+        previous = event_hash.lower()
         expected_seq += 1
     return len(events)
 

@@ -32,6 +32,9 @@ def encode_anchor_payload(
         raise VerificationError("head_hash must be 64 hexadecimal characters")
     if not isinstance(prev_txid, str) or not HEX_64.fullmatch(prev_txid):
         raise VerificationError("prev_txid must be 64 hexadecimal characters")
+    # Normalize to lowercase so core and anchor agree on representation.
+    head_hash = head_hash.lower()
+    prev_txid = prev_txid.lower()
     start_seq = _uint32(start_seq, "start_seq")
     end_seq = _uint32(end_seq, "end_seq")
     release_seq = _uint32(release_seq, "release_seq")
@@ -98,7 +101,7 @@ def create_anchor_payload(
         raise VerificationError("start_seq must identify an event in the journal")
     if end_seq > UINT32_MAX:
         raise VerificationError("journal sequence exceeds the protocol's uint32 limit")
-    head_hash = events[end_seq - 1]["event_hash"]
+    head_hash = events[end_seq - 1]["event_hash"].lower()
     payload = encode_anchor_payload(
         head_hash=head_hash,
         start_seq=start_seq,
@@ -122,8 +125,8 @@ def verify_journal_against_anchor(journal: Path, payload: bytes) -> dict[str, An
             f"journal truncation detected: anchor covers sequence {end_seq}, "
             f"journal has only {len(events)} event(s)"
         )
-    actual_head = events[end_seq - 1]["event_hash"]
-    if actual_head != fields["head_hash"]:
+    actual_head = events[end_seq - 1]["event_hash"].lower()
+    if actual_head != fields["head_hash"].lower():
         raise VerificationError(
             f"journal does not match anchor at sequence {end_seq}"
         )
@@ -134,6 +137,6 @@ def verify_journal_against_anchor(journal: Path, payload: bytes) -> dict[str, An
         "anchored_release_seq": fields["release_seq"],
         "journal_events": len(events),
         "head_hash": actual_head,
-        "prev_txid": fields["prev_txid"],
+        "prev_txid": fields["prev_txid"].lower(),
         "chain_inclusion_verified": False,
     }

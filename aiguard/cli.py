@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from .anchor import create_anchor_payload, verify_journal_against_anchor
 from .core import (
     VerificationError,
     append_audit_event,
@@ -63,6 +64,18 @@ def main(argv=None):
     p = sub.add_parser("audit-verify", help="verify the local audit hash chain")
     p.add_argument("--journal", required=True, type=Path)
 
+    p = sub.add_parser("anchor-payload", help="prepare unsigned BSV anchor payload bytes (no broadcast)")
+    p.add_argument("--journal", required=True, type=Path)
+    p.add_argument("--start-seq", required=True, type=int)
+    p.add_argument("--release-seq", required=True, type=int)
+    p.add_argument("--prev-txid", default="0" * 64)
+    p.add_argument("--output", required=True, type=Path)
+
+    p = sub.add_parser("anchor-verify", help="verify a journal against saved anchor payload bytes")
+    p.add_argument("--journal", required=True, type=Path)
+    p.add_argument("--payload", required=True, type=Path,
+                   help="JSON file produced by anchor-payload")
+
     args = parser.parse_args(argv)
     try:
         if args.command == "keygen":
@@ -89,6 +102,28 @@ def main(argv=None):
         elif args.command == "audit-verify":
             count = verify_audit_journal(args.journal)
             print(f"AUDIT OK: {count} event(s)")
+        elif args.command == "anchor-payload":
+            fields = create_anchor_payload(
+                args.journal,
+                start_seq=args.start_seq,
+                release_seq=args.release_seq,
+                prev_txid=args.prev_txid,
+            )
+            _write_json(args.output, fields)
+            print(f"Unsigned anchor payload prepared: {args.output}")
+            print("NOT BROADCAST: this file is not proof of an on-chain transaction.")
+        elif args.command == "anchor-verify":
+            fields = _read_json(args.payload)
+            payload_hex = fields.get("payload_hex") if isinstance(fields, dict) else None
+            if not isinstance(payload_hex, str):
+                raise VerificationError("payload JSON must contain a payload_hex string")
+            try:
+                payload_bytes = bytes.fromhex(payload_hex)
+            except ValueError as exc:
+                raise VerificationError("payload_hex is not valid hexadecimal") from exc
+            result = verify_journal_against_anchor(args.journal, payload_bytes)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            print("LOCAL CHECK ONLY: BSV transaction inclusion has not been verified.")
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

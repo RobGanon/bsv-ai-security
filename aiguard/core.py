@@ -11,6 +11,11 @@ import stat
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-Unix platforms
+    fcntl = None  # type: ignore[assignment]
+
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -347,10 +352,17 @@ def _safe_relative_path(raw: str) -> Path:
 
 
 def append_audit_event(journal: Path, event_type: str, detail: str) -> dict:
-    """Append an event only when the existing journal is valid.
+    """Append an event, holding an exclusive lock across read-verify-append.
 
-    This prevents the normal append path from silently extending a journal
-    whose earlier events have already been modified or truncated.
+    The journal is opened (creating it if needed) with O_NOFOLLOW so a
+    trailing symlink fails the open instead of being followed, confirmed by
+    fstat() to be a regular file, and exclusively locked with flock() for
+    the whole read-verify-append sequence. This closes the concurrent-writer
+    race where two processes read the same tail, compute the same next
+    sequence number, and permanently invalidate the journal. On platforms
+    without fcntl the lock is skipped (this prototype targets Linux).
+    Appending still refuses to extend a journal whose existing events fail
+    verification.
     """
     if not isinstance(event_type, str) or not event_type:
         raise VerificationError("event_type must be a non-empty string")
@@ -358,29 +370,52 @@ def append_audit_event(journal: Path, event_type: str, detail: str) -> dict:
         raise VerificationError("detail must be a string")
 
     journal.parent.mkdir(parents=True, exist_ok=True)
-    prior: list[dict] = []
-    if journal.is_symlink():
-        raise VerificationError("audit journal must be a regular non-symlink file")
-    if journal.exists():
-        if not journal.is_file():
-            raise VerificationError("audit journal must be a regular non-symlink file")
-        if journal.stat().st_size:
-            prior = _read_jsonl(journal)
-            _verify_audit_events(prior)
+    try:
+        fd = os.open(
+            os.fspath(journal), os.O_RDWR | os.O_CREAT | _O_NOFOLLOW, 0o666
+        )
+    except OSError as exc:
+        raise VerificationError(
+            f"audit journal must be a regular non-symlink file: {journal}"
+        ) from exc
+    try:
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError as exc:
+                raise VerificationError(
+                    f"cannot lock audit journal: {journal}"
+                ) from exc
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise VerificationError(
+                "audit journal must be a regular non-symlink file"
+            )
+        os.lseek(fd, 0, os.SEEK_SET)
+        with os.fdopen(os.dup(fd), "r", encoding="utf-8") as reader:
+            prior = _parse_jsonl(reader)
+        _verify_audit_events(prior)
 
-    previous = prior[-1]["event_hash"] if prior else "0" * 64
-    next_seq = prior[-1]["seq"] + 1 if prior else 1
-    event = {
-        "seq": next_seq,
-        "event_type": event_type,
-        "detail": detail,
-        "previous_hash": previous,
-    }
-    event["event_hash"] = hashlib.sha256(canonical_json_bytes(event)).hexdigest()
-    with journal.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+        previous = prior[-1]["event_hash"] if prior else "0" * 64
+        next_seq = prior[-1]["seq"] + 1 if prior else 1
+        event = {
+            "seq": next_seq,
+            "event_type": event_type,
+            "detail": detail,
+            "previous_hash": previous,
+        }
+        event["event_hash"] = hashlib.sha256(canonical_json_bytes(event)).hexdigest()
+        # Serialize with the same canonical form the hash was computed over
+        # (UTF-8, sorted keys, no whitespace, ensure_ascii=False), so the
+        # stored bytes match the hashed bytes for independent verifiers.
+        data = (canonical_json_bytes(event).decode("utf-8") + "\n").encode("utf-8")
+        os.lseek(fd, 0, os.SEEK_END)
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
     return event
 
 
@@ -421,16 +456,20 @@ def _verify_audit_events(events: list[dict]) -> int:
 
 
 def _read_jsonl(path: Path) -> list[dict]:
-    events = []
     with path.open("r", encoding="utf-8") as handle:
-        for line_no, line in enumerate(handle, 1):
-            if not line.strip():
-                raise VerificationError(f"blank line in audit journal at line {line_no}")
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise VerificationError(f"invalid JSON at audit line {line_no}") from exc
-            if not isinstance(event, dict):
-                raise VerificationError(f"audit event must be a JSON object at line {line_no}")
-            events.append(event)
+        return _parse_jsonl(handle)
+
+
+def _parse_jsonl(handle) -> list[dict]:
+    events = []
+    for line_no, line in enumerate(handle, 1):
+        if not line.strip():
+            raise VerificationError(f"blank line in audit journal at line {line_no}")
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise VerificationError(f"invalid JSON at audit line {line_no}") from exc
+        if not isinstance(event, dict):
+            raise VerificationError(f"audit event must be a JSON object at line {line_no}")
+        events.append(event)
     return events

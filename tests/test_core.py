@@ -271,3 +271,34 @@ def test_audit_append_rejects_dangling_symlink_journal(tmp_path):
 
     with pytest.raises(VerificationError, match="non-symlink"):
         append_audit_event(link, "test", "detail")
+
+
+def test_concurrent_appends_keep_journal_valid(tmp_path):
+    import threading
+
+    journal = tmp_path / "audit.jsonl"
+
+    def writer(n):
+        for i in range(25):
+            append_audit_event(journal, "test", f"writer-{n}-{i}")
+
+    threads = [threading.Thread(target=writer, args=(n,)) for n in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert verify_audit_journal(journal) == 100
+
+
+def test_appended_line_matches_canonical_hash_bytes(tmp_path):
+    from aiguard.core import canonical_json_bytes
+
+    journal = tmp_path / "audit.jsonl"
+    event = append_audit_event(journal, "test", "données ✓ 温度")
+    stored_line = journal.read_bytes().decode("utf-8").rstrip("\n")
+    # The stored line must use the canonical serialization (no \uXXXX
+    # escapes), so independent verifiers hashing raw bytes agree.
+    assert stored_line == canonical_json_bytes(event).decode("utf-8")
+    assert "\\u" not in stored_line
+    assert verify_audit_journal(journal) == 1

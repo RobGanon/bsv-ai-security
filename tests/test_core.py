@@ -313,3 +313,16 @@ def test_sequential_locked_appends_produce_valid_chain(tmp_path):
     for i in range(5):
         append_audit_event(journal, "test", f"event-{i}")
     assert verify_audit_journal(journal) == 5
+
+
+def test_appended_line_matches_canonical_hash_bytes(tmp_path):
+    from aiguard.core import canonical_json_bytes
+
+    journal = tmp_path / "audit.jsonl"
+    event = append_audit_event(journal, "test", "données ✓ 温度")
+    stored_line = journal.read_bytes().decode("utf-8").rstrip("\n")
+    # Stored bytes must equal the canonical hash-input bytes (no \uXXXX
+    # escapes), so independent verifiers hashing raw bytes agree.
+    assert stored_line == canonical_json_bytes(event).decode("utf-8")
+    assert "\\u" not in stored_line
+    assert verify_audit_journal(journal) == 1

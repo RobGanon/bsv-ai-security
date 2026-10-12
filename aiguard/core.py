@@ -380,8 +380,16 @@ def append_audit_event(journal: Path, event_type: str, detail: str) -> dict:
         raise VerificationError("audit journal must be a regular non-symlink file")
 
     # Open with create + append so we can lock the same FD used for writing.
-    flags = os.O_RDWR | os.O_CREAT | os.O_APPEND
-    fd = os.open(os.fspath(journal), flags, 0o644)
+    # O_NOFOLLOW makes the open itself fail on a trailing symlink instead of
+    # following it, closing the check-then-open race on the is_symlink()
+    # pre-check above for an attacker racing a parent-directory swap.
+    flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | _O_NOFOLLOW
+    try:
+        fd = os.open(os.fspath(journal), flags, 0o644)
+    except OSError as exc:
+        raise VerificationError(
+            "audit journal must be a regular non-symlink file"
+        ) from exc
     try:
         if fcntl is not None:
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -413,7 +421,10 @@ def append_audit_event(journal: Path, event_type: str, detail: str) -> dict:
             "previous_hash": previous,
         }
         event["event_hash"] = hashlib.sha256(canonical_json_bytes(event)).hexdigest()
-        line = json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
+        # Serialize with the same canonical form the hash was computed over
+        # (UTF-8, sorted keys, no whitespace, ensure_ascii=False), so the
+        # stored bytes match the hashed bytes for independent verifiers.
+        line = canonical_json_bytes(event).decode("utf-8") + "\n"
         os.write(fd, line.encode("utf-8"))
         os.fsync(fd)
         return event

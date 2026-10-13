@@ -356,6 +356,50 @@ def _safe_relative_path(raw: str) -> Path:
     return Path(*parts)
 
 
+MANIFEST_ACCEPTED_EVENT_TYPE = "manifest_accepted"
+
+UINT32_MAX = (1 << 32) - 1
+
+
+def _check_release_seq_uint32(value: Any, *, field: str = "release_seq") -> int:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 0 <= value <= UINT32_MAX
+    ):
+        raise VerificationError(
+            f"invalid {field}: must be an unsigned 32-bit integer"
+        )
+    return value
+
+
+def record_manifest_acceptance(
+    journal: Path, release_seq: int, release_id: str
+) -> dict:
+    """Record an operator's adoption of a release as a typed audit event.
+
+    Adoption is an explicit operator action, not something inferred from the
+    verify path: the operator has decided this release is the one to run,
+    and the acceptance event is what later anchors commit to. The
+    ``release_seq`` in an anchor payload is derived from these events
+    (see ``aiguard.anchor.create_anchor_payload``); it is never supplied
+    by the anchoring caller, so a publisher cannot anchor an arbitrary
+    checkpoint value.
+
+    The event detail is canonical JSON ``{"release_seq": N, "release_id":
+    "..."}``. The append goes through the normal locked
+    :func:`append_audit_event` path, so flock, O_NOFOLLOW, size limits, and
+    canonical serialization all apply.
+    """
+    release_seq = _check_release_seq_uint32(release_seq)
+    if not isinstance(release_id, str) or not release_id:
+        raise VerificationError("release_id must be a non-empty string")
+    detail = canonical_json_bytes(
+        {"release_seq": release_seq, "release_id": release_id}
+    ).decode("utf-8")
+    return append_audit_event(journal, MANIFEST_ACCEPTED_EVENT_TYPE, detail)
+
+
 def append_audit_event(journal: Path, event_type: str, detail: str) -> dict:
     """Append an event only when the existing journal is valid.
 

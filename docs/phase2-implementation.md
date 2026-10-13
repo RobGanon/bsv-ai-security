@@ -6,21 +6,32 @@ local journal comparison. It follows the 84-byte payload layout in
 
 ## Prepare an unsigned payload
 
-After appending audit events, run:
+After appending audit events, record the operator's adoption of a release,
+then prepare the payload:
 
 ```bash
 aiguard audit-verify --journal demo/audit.jsonl
+aiguard audit-manifest-accepted \
+  --journal demo/audit.jsonl \
+  --release-seq 3 \
+  --release-id demo-release-003
 aiguard anchor-payload \
   --journal demo/audit.jsonl \
   --start-seq 1 \
-  --release-seq 0 \
   --output demo/anchor-payload.json
 ```
 
-`start-seq` is the first event covered by this interval. `release-seq` is
-the highest accepted release sequence known to the caller (use 0 if none).
-For a later anchor, supply the previous confirmed anchor transaction ID using
-`--prev-txid`; do not guess or invent a transaction ID.
+`start-seq` is the first event covered by this interval. The anchored
+`release_seq` is **derived from the journal**, not supplied by the caller:
+it is `max(release_seq)` over `manifest_accepted` events with
+`seq <= end_seq`, where `end_seq` is the journal length at anchor time.
+A journal with no acceptance anchors `release_seq = 0`, meaning "no
+release adopted" (so the very first anchor is still usable). There is no
+caller override: any override would let a publisher anchor an arbitrary
+checkpoint value, which is the gap this derivation closes (issue #9).
+Backfilling an acceptance for an old release and re-anchoring is the
+operator's job. For a later anchor, supply the previous confirmed anchor
+transaction ID using `--prev-txid`; do not guess or invent a transaction ID.
 
 The output contains `payload_hex`, an 84-byte payload encoded as hex. This is
 only prepared data; it is not a signed transaction, broadcast, or on-chain

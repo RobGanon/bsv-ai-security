@@ -8,8 +8,11 @@ from typing import Any
 from .core import (
     MANIFEST_ACCEPTED_EVENT_TYPE,
     VerificationError,
+    _check_manifest_hash,
+    _load_verified_payload,
     _read_jsonl,
     _verify_audit_events,
+    manifest_hash as compute_manifest_hash,
 )
 
 MAGIC = b"AIGUARD1"
@@ -82,19 +85,85 @@ def decode_anchor_payload(payload: bytes) -> dict[str, Any]:
     }
 
 
-def _derive_release_seq(events: list[dict], end_seq: int) -> int:
-    """Derive the anchored ``release_seq`` from journal acceptance events.
+def _verified_manifest_map(manifests: Any, public_key: Any) -> dict[str, dict]:
+    """Verify each supplied manifest envelope and index it by its hash.
+
+    Every envelope's Ed25519 signature is verified against ``public_key``
+    via :func:`core._load_verified_payload`, so caller-supplied manifests
+    are safe: a publisher cannot smuggle in a forged manifest without
+    the signing key. Returns ``{manifest_hash: payload}`` where payload
+    is the verified manifest payload (with ``release_id`` /
+    ``release_seq`` validated). Manifests whose payload lacks valid
+    release identity are rejected.
+    """
+    if public_key is None or manifests is None:
+        raise VerificationError(
+            "cannot verify acceptance binding without manifests and a "
+            "trusted public key: supply the signed manifest envelopes and "
+            "the manifest-signing public key to check acceptances against"
+        )
+    manifest_list = list(manifests)
+    if not manifest_list:
+        raise VerificationError(
+            "cannot verify acceptance binding without manifests: "
+            "supply the signed manifest envelopes to check acceptances against"
+        )
+    by_hash: dict[str, dict] = {}
+    for envelope in manifest_list:
+        if not isinstance(envelope, dict):
+            raise VerificationError("manifest envelope must be a JSON object")
+        payload = _load_verified_payload(envelope, public_key)
+        release_id = payload.get("release_id")
+        if not isinstance(release_id, str) or not release_id:
+            raise VerificationError("invalid release_id in manifest")
+        release_seq = payload.get("release_seq")
+        if (
+            not isinstance(release_seq, int)
+            or isinstance(release_seq, bool)
+            or not 0 <= release_seq <= UINT32_MAX
+        ):
+            raise VerificationError("invalid release_seq in manifest")
+        by_hash[compute_manifest_hash(envelope)] = payload
+    return by_hash
+
+
+def _derive_release_seq(
+    events: list[dict],
+    end_seq: int,
+    manifests: Any = None,
+    public_key: Any = None,
+) -> int:
+    """Derive the anchored ``release_seq`` from bound journal acceptance events.
 
     Returns ``max(release_seq)`` over ``manifest_accepted`` events with
     ``seq <= end_seq``, or ``0`` ("no release adopted") when the covered
-    range contains no acceptance. Every acceptance detail in the covered
-    range is parsed and validated; a malformed detail (bad JSON, non-object,
-    missing/invalid ``release_seq`` or ``release_id``) raises
-    :class:`VerificationError` and anchoring fails closed. There is
-    intentionally no caller override: any override would reintroduce the
-    D2 gap this derivation closes.
+    range contains no acceptance. Every acceptance in the covered range
+    must be *bound* to a verified manifest:
+
+    - The detail must parse as a JSON object with ``release_seq``,
+      ``release_id``, and ``manifest_hash`` (64-hex).
+    - The ``manifest_hash`` must match a supplied manifest envelope
+      whose Ed25519 signature verifies against ``public_key``.
+    - The acceptance's ``release_id`` / ``release_seq`` must equal the
+      manifest's own fields, so an acceptance cannot be rebound to a
+      different release.
+
+    Fail-closed rules: a malformed detail, a legacy acceptance without
+    ``manifest_hash``, an acceptance whose hash matches no verified
+    manifest, a release-identity mismatch, or any acceptance present
+    without ``manifests`` + ``public_key`` to check it against all
+    raise :class:`VerificationError` and anchoring fails closed.
+
+    Legacy acceptances (pre-#11 detail without ``manifest_hash``) fail
+    closed rather than being silently counted or ignored: an unbound
+    acceptance is structurally identical to the forgery this binding
+    closes. Operators with pre-#11 journals start a fresh journal and
+    re-record bound acceptances.
+
+    There is intentionally no caller override: any override would
+    reintroduce the D2 gap the derivation closes.
     """
-    derived = 0
+    acceptances: list[tuple[int, dict]] = []
     for event in events:
         seq = event.get("seq")
         if (
@@ -122,6 +191,12 @@ def _derive_release_seq(events: list[dict], end_seq: int) -> int:
                 f"malformed manifest_accepted detail at sequence {seq}: "
                 "detail must be a JSON object"
             )
+        if "manifest_hash" not in parsed:
+            raise VerificationError(
+                f"legacy unbound manifest_accepted detail at sequence {seq}: "
+                "detail has no manifest_hash; pre-#11 acceptances fail closed "
+                "and must be re-recorded with a manifest binding"
+            )
         release_seq = _uint32(parsed.get("release_seq"), "release_seq")
         release_id = parsed.get("release_id")
         if not isinstance(release_id, str) or not release_id:
@@ -129,7 +204,34 @@ def _derive_release_seq(events: list[dict], end_seq: int) -> int:
                 f"malformed manifest_accepted detail at sequence {seq}: "
                 "release_id must be a non-empty string"
             )
-        derived = max(derived, release_seq)
+        manifest_hash_value = _check_manifest_hash(parsed.get("manifest_hash"))
+        acceptances.append((seq, {
+            "release_seq": release_seq,
+            "release_id": release_id,
+            "manifest_hash": manifest_hash_value,
+        }))
+    if not acceptances:
+        return 0
+    verified = _verified_manifest_map(manifests, public_key)
+    derived = 0
+    for seq, acceptance in acceptances:
+        manifest = verified.get(acceptance["manifest_hash"])
+        if manifest is None:
+            raise VerificationError(
+                f"unbound manifest_accepted detail at sequence {seq}: "
+                "manifest_hash matches no verified manifest; "
+                "forged acceptance for a nonexistent manifest is rejected"
+            )
+        if (
+            manifest.get("release_id") != acceptance["release_id"]
+            or manifest.get("release_seq") != acceptance["release_seq"]
+        ):
+            raise VerificationError(
+                f"manifest_accepted detail at sequence {seq}: "
+                "release identity does not match the bound manifest; "
+                "an acceptance cannot be rebound to a different release"
+            )
+        derived = max(derived, acceptance["release_seq"])
     return derived
 
 
@@ -138,14 +240,23 @@ def create_anchor_payload(
     *,
     start_seq: int,
     prev_txid: str = ZERO_TXID,
+    manifests: Any = None,
+    public_key: Any = None,
 ) -> dict[str, Any]:
     """Create an unsigned anchor payload from a verified local journal.
 
     The anchored ``release_seq`` is derived from the journal itself:
-    ``max(release_seq)`` over ``manifest_accepted`` events with
+    ``max(release_seq)`` over bound ``manifest_accepted`` events with
     ``seq <= end_seq`` (``0`` when the journal contains no acceptance,
     meaning "no release adopted"). It is never taken from the caller, so a
     publisher cannot anchor an arbitrary checkpoint value.
+
+    Binding (issue #11): when the covered range contains any acceptance,
+    ``manifests`` (the signed manifest envelopes to check acceptances
+    against) and ``public_key`` (the trusted manifest-signing key) are
+    required. Each acceptance's ``manifest_hash`` must match a manifest
+    whose signature verifies, with matching release identity; otherwise
+    anchoring fails closed. Journals with no acceptance need neither.
 
     This only prepares commitment bytes. It does not sign, broadcast, or prove
     inclusion of a Bitcoin SV transaction.
@@ -162,7 +273,7 @@ def create_anchor_payload(
         raise VerificationError("start_seq must identify an event in the journal")
     if end_seq > UINT32_MAX:
         raise VerificationError("journal sequence exceeds the protocol's uint32 limit")
-    release_seq = _derive_release_seq(events, end_seq)
+    release_seq = _derive_release_seq(events, end_seq, manifests, public_key)
     head_hash = events[end_seq - 1]["event_hash"].lower()
     payload = encode_anchor_payload(
         head_hash=head_hash,
@@ -174,8 +285,26 @@ def create_anchor_payload(
     return decode_anchor_payload(payload)
 
 
-def verify_journal_against_anchor(journal: Path, payload: bytes) -> dict[str, Any]:
-    """Check that a local journal contains the head committed by an anchor payload."""
+def verify_journal_against_anchor(
+    journal: Path,
+    payload: bytes,
+    manifests: Any = None,
+    public_key: Any = None,
+) -> dict[str, Any]:
+    """Check that a local journal contains the head committed by an anchor payload.
+
+    Always verifies the hash chain and that the event hash at the
+    anchored end sequence matches the payload's head hash, and detects a
+    missing or shortened journal.
+
+    When ``manifests`` and ``public_key`` are both supplied, additionally
+    re-derives the anchored ``release_seq`` from bound acceptances (same
+    fail-closed binding rules as creation) and requires it to equal the
+    payload's ``release_seq``. When either is omitted, the payload's
+    ``release_seq`` is returned as committed, without re-derivation —
+    the head-hash check alone does not prove the checkpoint was honestly
+    derived. Verifiers that need the full binding check must supply both.
+    """
     fields = decode_anchor_payload(payload)
     if journal.is_symlink() or not journal.exists() or not journal.is_file():
         raise VerificationError("journal missing or not a regular non-symlink file")
@@ -192,6 +321,18 @@ def verify_journal_against_anchor(journal: Path, payload: bytes) -> dict[str, An
         raise VerificationError(
             f"journal does not match anchor at sequence {end_seq}"
         )
+    if (manifests is None) != (public_key is None):
+        raise VerificationError(
+            "manifests and public_key must be supplied together for "
+            "binding re-verification"
+        )
+    if manifests is not None:
+        rederived = _derive_release_seq(events, end_seq, manifests, public_key)
+        if rederived != fields["release_seq"]:
+            raise VerificationError(
+                f"anchor release_seq {fields['release_seq']} does not match "
+                f"the journal-derived bound release_seq {rederived}"
+            )
     return {
         "verified": True,
         "anchored_start_seq": fields["start_seq"],

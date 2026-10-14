@@ -7,7 +7,11 @@ from aiguard.anchor import (
     encode_anchor_payload,
     verify_journal_against_anchor,
 )
-from aiguard.core import VerificationError, append_audit_event
+from aiguard.core import (
+    VerificationError,
+    append_audit_event,
+    record_manifest_acceptance,
+)
 
 
 def write_journal(path: Path, count: int = 3):
@@ -18,9 +22,10 @@ def write_journal(path: Path, count: int = 3):
 
 def test_payload_has_protocol_layout_and_round_trips(tmp_path):
     journal = write_journal(tmp_path / "audit.jsonl")
-    result = create_anchor_payload(journal, start_seq=1, release_seq=7)
+    record_manifest_acceptance(journal, 7, "release-7")
+    result = create_anchor_payload(journal, start_seq=1)
     assert result["start_seq"] == 1
-    assert result["end_seq"] == 3
+    assert result["end_seq"] == 4  # 3 test events + 1 acceptance event
     assert result["release_seq"] == 7
     assert len(result["head_hash"]) == 64
     assert len(result["prev_txid"]) == 64
@@ -31,7 +36,7 @@ def test_payload_has_protocol_layout_and_round_trips(tmp_path):
 
 def test_anchor_verification_accepts_unchanged_journal(tmp_path):
     journal = write_journal(tmp_path / "audit.jsonl")
-    result = create_anchor_payload(journal, start_seq=1, release_seq=1)
+    result = create_anchor_payload(journal, start_seq=1)
     payload = bytes.fromhex(result["payload_hex"])
     verified = verify_journal_against_anchor(journal, payload)
     assert verified["verified"] is True
@@ -40,7 +45,7 @@ def test_anchor_verification_accepts_unchanged_journal(tmp_path):
 
 def test_anchor_verification_rejects_modified_journal(tmp_path):
     journal = write_journal(tmp_path / "audit.jsonl")
-    result = create_anchor_payload(journal, start_seq=1, release_seq=1)
+    result = create_anchor_payload(journal, start_seq=1)
     payload = bytes.fromhex(result["payload_hex"])
     append_audit_event(journal, "test", "later event")
     # Tamper the first event
@@ -55,7 +60,7 @@ def test_anchor_verification_rejects_modified_journal(tmp_path):
 
 def test_anchor_verification_detects_truncated_tail(tmp_path):
     journal = write_journal(tmp_path / "audit.jsonl", count=4)
-    result = create_anchor_payload(journal, start_seq=1, release_seq=1)
+    result = create_anchor_payload(journal, start_seq=1)
     payload = bytes.fromhex(result["payload_hex"])
     lines = journal.read_text(encoding="utf-8").splitlines()[:2]
     journal.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -65,7 +70,7 @@ def test_anchor_verification_detects_truncated_tail(tmp_path):
 
 def test_anchor_verification_rejects_deleted_journal(tmp_path):
     journal = write_journal(tmp_path / "audit.jsonl")
-    result = create_anchor_payload(journal, start_seq=1, release_seq=1)
+    result = create_anchor_payload(journal, start_seq=1)
     payload = bytes.fromhex(result["payload_hex"])
     journal.unlink()
     with pytest.raises(VerificationError, match="missing"):
@@ -111,7 +116,7 @@ def test_create_payload_rejects_empty_journal(tmp_path):
     journal = tmp_path / "empty.jsonl"
     journal.write_text("", encoding="utf-8")
     with pytest.raises(VerificationError, match="empty"):
-        create_anchor_payload(journal, start_seq=1, release_seq=1)
+        create_anchor_payload(journal, start_seq=1)
 
 
 def test_encoder_accepts_uppercase_hex_and_stores_lowercase():

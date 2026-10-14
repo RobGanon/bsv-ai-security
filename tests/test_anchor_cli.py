@@ -14,7 +14,6 @@ def test_cli_anchor_payload_and_verify_round_trip(tmp_path, capsys):
         "anchor-payload",
         "--journal", str(journal),
         "--start-seq", "1",
-        "--release-seq", "0",
         "--output", str(payload_file),
     ]) == 0
     assert "NOT BROADCAST" in capsys.readouterr().out

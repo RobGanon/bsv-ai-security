@@ -13,6 +13,7 @@ from .core import (
     generate_keypair,
     load_private_key,
     load_public_key,
+    record_manifest_acceptance,
     sign_manifest,
     verify_audit_journal,
     verify_manifest,
@@ -64,10 +65,19 @@ def main(argv=None):
     p = sub.add_parser("audit-verify", help="verify the local audit hash chain")
     p.add_argument("--journal", required=True, type=Path)
 
+    p = sub.add_parser(
+        "audit-manifest-accepted",
+        help="record an operator's adoption of a release (journal-derived anchor checkpoint)",
+    )
+    p.add_argument("--journal", required=True, type=Path)
+    p.add_argument("--release-seq", required=True, type=int,
+                   help="release sequence being adopted; anchored release_seq is derived from these events")
+    p.add_argument("--release-id", required=True,
+                   help="release identifier being adopted")
+
     p = sub.add_parser("anchor-payload", help="prepare unsigned BSV anchor payload bytes (no broadcast)")
     p.add_argument("--journal", required=True, type=Path)
     p.add_argument("--start-seq", required=True, type=int)
-    p.add_argument("--release-seq", required=True, type=int)
     p.add_argument("--prev-txid", default="0" * 64)
     p.add_argument("--output", required=True, type=Path)
 
@@ -102,11 +112,15 @@ def main(argv=None):
         elif args.command == "audit-verify":
             count = verify_audit_journal(args.journal)
             print(f"AUDIT OK: {count} event(s)")
+        elif args.command == "audit-manifest-accepted":
+            event = record_manifest_acceptance(
+                args.journal, args.release_seq, args.release_id
+            )
+            print(f"Manifest acceptance recorded: seq={event['seq']} hash={event['event_hash']}")
         elif args.command == "anchor-payload":
             fields = create_anchor_payload(
                 args.journal,
                 start_seq=args.start_seq,
-                release_seq=args.release_seq,
                 prev_txid=args.prev_txid,
             )
             _write_json(args.output, fields)

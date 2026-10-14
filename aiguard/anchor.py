@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
 
-from .core import VerificationError, _read_jsonl, _verify_audit_events
+from .core import (
+    MANIFEST_ACCEPTED_EVENT_TYPE,
+    VerificationError,
+    _read_jsonl,
+    _verify_audit_events,
+)
 
 MAGIC = b"AIGUARD1"
 PAYLOAD_SIZE = 84
@@ -76,14 +82,70 @@ def decode_anchor_payload(payload: bytes) -> dict[str, Any]:
     }
 
 
+def _derive_release_seq(events: list[dict], end_seq: int) -> int:
+    """Derive the anchored ``release_seq`` from journal acceptance events.
+
+    Returns ``max(release_seq)`` over ``manifest_accepted`` events with
+    ``seq <= end_seq``, or ``0`` ("no release adopted") when the covered
+    range contains no acceptance. Every acceptance detail in the covered
+    range is parsed and validated; a malformed detail (bad JSON, non-object,
+    missing/invalid ``release_seq`` or ``release_id``) raises
+    :class:`VerificationError` and anchoring fails closed. There is
+    intentionally no caller override: any override would reintroduce the
+    D2 gap this derivation closes.
+    """
+    derived = 0
+    for event in events:
+        seq = event.get("seq")
+        if (
+            not isinstance(seq, int)
+            or isinstance(seq, bool)
+            or seq > end_seq
+            or event.get("event_type") != MANIFEST_ACCEPTED_EVENT_TYPE
+        ):
+            continue
+        detail = event.get("detail")
+        if not isinstance(detail, str):
+            raise VerificationError(
+                f"malformed manifest_accepted detail at sequence {seq}: "
+                "detail must be a JSON string"
+            )
+        try:
+            parsed = json.loads(detail)
+        except json.JSONDecodeError as exc:
+            raise VerificationError(
+                f"malformed manifest_accepted detail at sequence {seq}: "
+                "detail is not valid JSON"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise VerificationError(
+                f"malformed manifest_accepted detail at sequence {seq}: "
+                "detail must be a JSON object"
+            )
+        release_seq = _uint32(parsed.get("release_seq"), "release_seq")
+        release_id = parsed.get("release_id")
+        if not isinstance(release_id, str) or not release_id:
+            raise VerificationError(
+                f"malformed manifest_accepted detail at sequence {seq}: "
+                "release_id must be a non-empty string"
+            )
+        derived = max(derived, release_seq)
+    return derived
+
+
 def create_anchor_payload(
     journal: Path,
     *,
     start_seq: int,
-    release_seq: int,
     prev_txid: str = ZERO_TXID,
 ) -> dict[str, Any]:
     """Create an unsigned anchor payload from a verified local journal.
+
+    The anchored ``release_seq`` is derived from the journal itself:
+    ``max(release_seq)`` over ``manifest_accepted`` events with
+    ``seq <= end_seq`` (``0`` when the journal contains no acceptance,
+    meaning "no release adopted"). It is never taken from the caller, so a
+    publisher cannot anchor an arbitrary checkpoint value.
 
     This only prepares commitment bytes. It does not sign, broadcast, or prove
     inclusion of a Bitcoin SV transaction.
@@ -94,13 +156,13 @@ def create_anchor_payload(
     _verify_audit_events(events)
     end_seq = len(events)
     start_seq = _uint32(start_seq, "start_seq")
-    release_seq = _uint32(release_seq, "release_seq")
     if end_seq < 1:
         raise VerificationError("cannot anchor an empty journal")
     if start_seq < 1 or start_seq > end_seq:
         raise VerificationError("start_seq must identify an event in the journal")
     if end_seq > UINT32_MAX:
         raise VerificationError("journal sequence exceeds the protocol's uint32 limit")
+    release_seq = _derive_release_seq(events, end_seq)
     head_hash = events[end_seq - 1]["event_hash"].lower()
     payload = encode_anchor_payload(
         head_hash=head_hash,

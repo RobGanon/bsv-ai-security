@@ -5,7 +5,12 @@ import json
 import sys
 from pathlib import Path
 
-from .anchor import create_anchor_payload, verify_journal_against_anchor
+from .anchor import (
+    create_anchor_payload,
+    verify_anchor_chain,
+    verify_journal_against_anchor,
+    verify_journal_against_anchor_chain,
+)
 from .publisher import (
     Publisher,
     PublisherConfig,
@@ -105,6 +110,28 @@ def main(argv=None):
                    help="JSON file produced by anchor-payload")
     p.add_argument("--manifest", action="append", type=Path, default=None,
                    help="signed manifest envelope JSON to re-check acceptance binding with; "
+                   "repeatable; requires --public-key")
+    p.add_argument("--public-key", type=Path, default=None,
+                   help="trusted manifest-signing public key (PEM) for binding re-verification")
+
+    p = sub.add_parser(
+        "anchor-chain-verify",
+        help="verify anchor-chain continuity from a trusted genesis txid (issue #8)",
+    )
+    p.add_argument("--genesis-txid", required=True,
+                   help="trusted genesis anchor txid from operator-pinned config; "
+                   "never inferred from the anchors being checked")
+    p.add_argument("--anchor", action="append", type=Path, default=None,
+                   help="JSON file with payload_hex + txid for one anchor; "
+                   "repeatable, in chain order")
+    p.add_argument("--anchor-record", type=Path, default=None,
+                   help="publisher anchor-record JSON; its broadcast records "
+                   "are chain-checked (pending/superseded drafts are not chain members)")
+    p.add_argument("--journal", type=Path, default=None,
+                   help="if given, also verify the journal against every anchor "
+                   "in the chain (head hash + binding re-derivation)")
+    p.add_argument("--manifest", action="append", type=Path, default=None,
+                   help="signed manifest envelope JSON for binding re-verification; "
                    "repeatable; requires --public-key")
     p.add_argument("--public-key", type=Path, default=None,
                    help="trusted manifest-signing public key (PEM) for binding re-verification")
@@ -228,6 +255,54 @@ def main(argv=None):
             result = verify_journal_against_anchor(
                 args.journal, payload_bytes, manifests, public_key
             )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            print("LOCAL CHECK ONLY: BSV transaction inclusion has not been verified.")
+        elif args.command == "anchor-chain-verify":
+            anchors: list[dict] = []
+            for path in args.anchor or []:
+                entry = _read_json(path)
+                if (
+                    not isinstance(entry, dict)
+                    or not isinstance(entry.get("payload_hex"), str)
+                    or not isinstance(entry.get("txid"), str)
+                ):
+                    raise VerificationError(
+                        "anchor JSON must contain payload_hex and txid"
+                    )
+                anchors.append(
+                    {"payload_hex": entry["payload_hex"], "txid": entry["txid"]}
+                )
+            if args.anchor_record is not None:
+                store = _read_json(args.anchor_record)
+                records = store.get("anchors") if isinstance(store, dict) else None
+                if not isinstance(records, list):
+                    raise VerificationError(
+                        "anchor-record JSON must contain an anchors list"
+                    )
+                for record in records:
+                    if isinstance(record, dict) and record.get("status") == "broadcast":
+                        anchors.append(
+                            {
+                                "payload_hex": record["payload_hex"],
+                                "txid": record["txid"],
+                            }
+                        )
+            if args.journal is not None:
+                manifests = None
+                public_key = None
+                if args.manifest is not None or args.public_key is not None:
+                    if args.manifest is None or args.public_key is None:
+                        raise VerificationError(
+                            "anchor-chain-verify requires --manifest and "
+                            "--public-key together to re-check acceptance binding"
+                        )
+                    manifests = [_read_json(path) for path in args.manifest]
+                    public_key = load_public_key(args.public_key)
+                result = verify_journal_against_anchor_chain(
+                    args.journal, anchors, args.genesis_txid, manifests, public_key
+                )
+            else:
+                result = verify_anchor_chain(anchors, args.genesis_txid)
             print(json.dumps(result, indent=2, sort_keys=True))
             print("LOCAL CHECK ONLY: BSV transaction inclusion has not been verified.")
         elif args.command == "publish":

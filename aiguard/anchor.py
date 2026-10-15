@@ -343,3 +343,232 @@ def verify_journal_against_anchor(
         "prev_txid": fields["prev_txid"].lower(),
         "chain_inclusion_verified": False,
     }
+
+
+def _normalize_chain_anchor(entry: Any, index: int) -> dict[str, Any]:
+    """Validate one anchor-chain entry and return its txid + decoded fields.
+
+    Accepted shapes (both carry the anchor's own txid, which is what the
+    *next* anchor's ``prev_txid`` must equal):
+
+    - ``{"payload": bytes, "txid": str}`` / ``{"payload_hex": str, "txid": str}``
+    - ``(payload_bytes, txid)`` / ``(payload_hex, txid)`` tuples
+
+    Publisher anchor records (``payload_hex`` + ``txid`` + ``status`` ...)
+    pass through directly; callers filter to the records that belong in
+    the chain (e.g. ``status == "broadcast"``) before calling.
+    """
+    if isinstance(entry, (tuple, list)):
+        if len(entry) != 2:
+            raise VerificationError(
+                f"anchor {index}: tuple entry must be (payload, txid)"
+            )
+        payload_value, txid_value = entry
+    elif isinstance(entry, dict):
+        txid_value = entry.get("txid")
+        if "payload" in entry:
+            payload_value = entry["payload"]
+        elif "payload_hex" in entry:
+            payload_value = entry["payload_hex"]
+        else:
+            raise VerificationError(
+                f"anchor {index}: entry must carry a payload or payload_hex"
+            )
+    else:
+        raise VerificationError(
+            f"anchor {index}: entry must be a dict or (payload, txid) tuple"
+        )
+    if not isinstance(txid_value, str) or not HEX_64.fullmatch(txid_value):
+        raise VerificationError(
+            f"anchor {index}: txid must be 64 hexadecimal characters"
+        )
+    txid = txid_value.lower()
+    if isinstance(payload_value, (bytes, bytearray)):
+        payload = bytes(payload_value)
+    elif isinstance(payload_value, str):
+        try:
+            payload = bytes.fromhex(payload_value)
+        except ValueError as exc:
+            raise VerificationError(
+                f"anchor {index}: payload_hex is not valid hexadecimal"
+            ) from exc
+    else:
+        raise VerificationError(
+            f"anchor {index}: payload must be bytes or a hex string"
+        )
+    fields = decode_anchor_payload(payload)
+    return {"txid": txid, "payload": payload, "fields": fields}
+
+
+def verify_anchor_chain(anchors: Any, genesis_txid: Any) -> dict[str, Any]:
+    """Verify that anchors form one continuous, fork-free chain from genesis.
+
+    ``anchors`` is an ordered list of entries (see
+    :func:`_normalize_chain_anchor`); order matters — a reordered list is
+    rejected, not silently re-sorted. ``genesis_txid`` is the trusted
+    genesis anchor txid from operator-pinned config (out-of-band). It is
+    never inferred from the anchor set: passing the txid of an anchor in
+    the set as genesis is rejected, and a missing/invalid genesis fails
+    closed.
+
+    Enforced, fail-closed:
+
+    - First anchor's ``prev_txid`` equals the trusted genesis (an
+      arbitrary well-formed ``prev_txid`` is rejected).
+    - First anchor's ``start_seq`` is 1 (protocol §3: the genesis anchor
+      starts at sequence 1).
+    - Each later anchor's ``prev_txid`` equals the previous anchor's
+      txid (no skipped anchors, no reordering).
+    - Each later anchor's ``start_seq`` equals the previous anchor's
+      ``end_seq + 1`` (no gaps, no overlaps).
+    - No duplicated txid, no duplicated payload.
+    - No fork: no two anchors build on the same predecessor (no
+      ``prev_txid`` appears twice), including two anchors both claiming
+      genesis. A fork is reported as an error, never silently accepted.
+
+    What this does NOT prove: that any anchor is really on-chain. This
+    is continuity of the *claimed* chain — Merkle-proof / header-chain /
+    confirmation verification (SPV) is still out of scope and would
+    report ``chain_inclusion_verified``.
+
+    An empty anchor list verifies vacuously (``anchor_count`` 0):
+    nothing was checked. Callers that expect anchors must check
+    ``anchor_count`` themselves.
+    """
+    if not isinstance(genesis_txid, str) or not HEX_64.fullmatch(genesis_txid):
+        raise VerificationError(
+            "genesis_txid must be supplied as 64 hexadecimal characters: "
+            "it comes from operator-pinned config, never from the anchor set"
+        )
+    genesis = genesis_txid.lower()
+    if not isinstance(anchors, (list, tuple)):
+        raise VerificationError("anchors must be a list of anchor entries")
+    normalized = [
+        _normalize_chain_anchor(entry, index)
+        for index, entry in enumerate(anchors)
+    ]
+    if not normalized:
+        return {
+            "verified": True,
+            "anchor_count": 0,
+            "genesis_txid": genesis,
+            "first_seq": None,
+            "last_seq": None,
+            "last_txid": None,
+            "last_release_seq": None,
+            "anchors": [],
+        }
+    seen_txids: set[str] = set()
+    seen_payloads: set[str] = set()
+    seen_prev: set[str] = set()
+    for index, anchor in enumerate(normalized):
+        if anchor["txid"] in seen_txids:
+            raise VerificationError(
+                f"duplicate anchor txid at position {index}: {anchor['txid']}"
+            )
+        seen_txids.add(anchor["txid"])
+        payload_hex = anchor["payload"].hex()
+        if payload_hex in seen_payloads:
+            raise VerificationError(
+                f"duplicate anchor payload at position {index}: "
+                "the same checkpoint anchored twice is rejected"
+            )
+        seen_payloads.add(payload_hex)
+        if anchor["txid"] == genesis:
+            raise VerificationError(
+                "genesis txid must be external to the chain: it matches the "
+                f"txid of the anchor at position {index}; genesis comes from "
+                "operator-pinned config, never from the anchor set"
+            )
+        prev = anchor["fields"]["prev_txid"]
+        if prev in seen_prev:
+            raise VerificationError(
+                f"fork detected: two anchors build on predecessor {prev} "
+                f"(second at position {index}); a fork is reported, "
+                "never silently accepted"
+            )
+        seen_prev.add(prev)
+    first = normalized[0]["fields"]
+    if first["prev_txid"] != genesis:
+        raise VerificationError(
+            f"first anchor prev_txid {first['prev_txid']} does not match "
+            f"trusted genesis {genesis}: arbitrary prev_txid rejected"
+        )
+    if first["start_seq"] != 1:
+        raise VerificationError(
+            f"first anchor start_seq is {first['start_seq']}, expected 1: "
+            "the genesis anchor must start at sequence 1 (protocol §3)"
+        )
+    for index in range(1, len(normalized)):
+        previous = normalized[index - 1]
+        fields = normalized[index]["fields"]
+        if fields["prev_txid"] != previous["txid"]:
+            raise VerificationError(
+                f"anchor {index} prev_txid {fields['prev_txid']} does not "
+                f"match previous anchor txid {previous['txid']}: "
+                "chain linkage broken (skipped or reordered anchor)"
+            )
+        if fields["start_seq"] != previous["fields"]["end_seq"] + 1:
+            raise VerificationError(
+                f"anchor {index} start_seq {fields['start_seq']} does not "
+                f"follow previous end_seq {previous['fields']['end_seq']}: "
+                "sequence gap or overlap"
+            )
+    last = normalized[-1]
+    return {
+        "verified": True,
+        "anchor_count": len(normalized),
+        "genesis_txid": genesis,
+        "first_seq": normalized[0]["fields"]["start_seq"],
+        "last_seq": last["fields"]["end_seq"],
+        "last_txid": last["txid"],
+        "last_release_seq": last["fields"]["release_seq"],
+        "anchors": [
+            {
+                "txid": anchor["txid"],
+                "payload_hex": anchor["payload"].hex(),
+                "head_hash": anchor["fields"]["head_hash"],
+                "start_seq": anchor["fields"]["start_seq"],
+                "end_seq": anchor["fields"]["end_seq"],
+                "release_seq": anchor["fields"]["release_seq"],
+                "prev_txid": anchor["fields"]["prev_txid"],
+            }
+            for anchor in normalized
+        ],
+    }
+
+
+def verify_journal_against_anchor_chain(
+    journal: Path,
+    anchors: Any,
+    genesis_txid: Any,
+    manifests: Any = None,
+    public_key: Any = None,
+) -> dict[str, Any]:
+    """Verify a journal against a full anchor chain, not one anchor alone.
+
+    First enforces chain continuity via :func:`verify_anchor_chain`
+    (genesis, linkage, contiguity, fork-free), then checks the journal
+    against *each* anchor's payload (head hash at its ``end_seq``, plus
+    binding re-derivation when manifests + public key are supplied).
+
+    The chain check runs first on purpose: a set of anchors that each
+    match the journal individually can still be a broken chain (wrong
+    genesis, gap, fork), and that must fail verification, not warn.
+    """
+    chain = verify_anchor_chain(anchors, genesis_txid)
+    per_anchor = [
+        verify_journal_against_anchor(
+            journal,
+            bytes.fromhex(summary["payload_hex"]),
+            manifests,
+            public_key,
+        )
+        for summary in chain["anchors"]
+    ]
+    return {
+        "verified": True,
+        "chain": chain,
+        "anchors": per_anchor,
+        "chain_inclusion_verified": False,
+    }

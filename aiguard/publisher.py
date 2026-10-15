@@ -49,10 +49,14 @@ Explicitly out of scope (documented, not faked)
   confirmation): a broadcast anchor's inclusion is ``confirmed-unknown``
   until an SPV verifier lands. The record store never claims
   ``confirmed``.
-- Anchor-chain continuity enforcement (issue #8): the publisher chains
-  to the last broadcast txid it recorded, but does not independently
-  validate a full on-chain chain from genesis — that verifier is
-  future work.
+- Anchor-chain continuity enforcement (issue #8) for the *record
+  store*: on every load, the broadcast records must form one
+  continuous, fork-free chain from the store's genesis
+  (``anchor.verify_anchor_chain``). A tampered store — edited
+  ``prev_txid``, a forked record, a gap — refuses every publisher
+  operation, so the publisher can never build a new anchor on top of
+  a broken chain. On-chain confirmation of those anchors is still
+  unverified (see above).
 - Transaction construction / signing / real broadcast: no BSV
   transaction is built here. Broadcast, when enabled, goes through a
   caller-supplied broadcaster object.
@@ -66,7 +70,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .anchor import ZERO_TXID, create_anchor_payload, decode_anchor_payload
+from .anchor import (
+    ZERO_TXID,
+    create_anchor_payload,
+    decode_anchor_payload,
+    verify_anchor_chain,
+)
 from .core import HEX_64, VerificationError, _read_jsonl, _verify_audit_events
 
 MANIFEST_ACCEPTED_EVENT_TYPE = "manifest_accepted"
@@ -235,9 +244,24 @@ class Publisher:
         anchors = store.get("anchors")
         if not isinstance(anchors, list):
             raise PublisherError("anchor record store is corrupt: anchors is not a list")
+        validated = [_validate_record(record) for record in anchors]
+        # Continuity (issue #8): broadcast records must form one
+        # continuous, fork-free chain from the store's genesis. A
+        # tampered store refuses every operation, so the publisher can
+        # never build a new anchor on top of a broken chain. Pending /
+        # superseded records are drafts, not chain members, and are not
+        # checked here.
+        broadcast = [r for r in validated if r["status"] == "broadcast"]
+        if broadcast:
+            try:
+                verify_anchor_chain(broadcast, genesis.lower())
+            except VerificationError as exc:
+                raise PublisherError(
+                    f"anchor record store chain is broken: {exc}"
+                ) from exc
         return {
             "genesis_txid": genesis.lower(),
-            "anchors": [_validate_record(record) for record in anchors],
+            "anchors": validated,
         }
 
     def _save_store(self, store: dict) -> None:

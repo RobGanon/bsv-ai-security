@@ -116,3 +116,110 @@ the payload's checkpoint is returned as committed, without re-derivation.
 5. Add integration tests against a test environment before any mainnet use.
 
 Never put event details, prompts, model bytes, secrets, or private keys on-chain.
+
+## Publisher: anchor-on-release + scheduled checkpoints
+
+`aiguard.publisher.Publisher` turns the design above into running code.
+Broadcast stays **disabled by default** and no real broadcaster exists in
+this build: the publisher prepares anchor payloads and records them
+locally. Nothing is signed, spent, or sent to any network unless the
+operator explicitly enables broadcast *and* supplies a broadcaster.
+
+```bash
+# One scheduler tick (dry-run): anchor if a release landed or the interval elapsed.
+aiguard publish --journal demo/audit.jsonl --anchor-record demo/anchors.json
+
+# Anchor immediately after recording an acceptance.
+aiguard publish --journal demo/audit.jsonl --anchor-record demo/anchors.json \
+  --mode on-release --manifest demo/manifest-signed.json --public-key demo/public.pem
+
+# Long-running loop: re-reads the manifests directory at every checkpoint.
+aiguard publish --journal demo/audit.jsonl --anchor-record demo/anchors.json \
+  --mode loop --interval-seconds 3600 \
+  --manifest-dir demo/manifests --public-key demo/public.pem
+```
+
+`--broadcast` is an explicit opt-in that fails closed: no broadcast
+adapter exists in this build, so requesting it without a broadcaster is
+refused rather than silently dropped.
+
+### Triggers
+
+- **Anchor-on-release.** A new `manifest_accepted` event since the last
+  anchor triggers a checkpoint immediately (via `on_release_accepted()` or
+  the scheduler). This is the practical version of "publish journal heads
+  where the writer cannot rewrite them": the window in which a release
+  acceptance sits unanchored shrinks to the time needed to build the
+  payload.
+- **Scheduled checkpoints.** When the configured interval (default 3600s)
+  elapses since the last anchor, the current head is anchored even with
+  no new release, closing the unanchored-tail window between releases.
+
+Deliberate deviation from `anchoring-protocol.md` §8: that section
+suggests an every-N-events trigger. The publisher uses release +
+time triggers instead — a release acceptance is the event that matters
+for the rollback checkpoint, and the time trigger covers event-only
+tails. An N-events trigger adds anchor spam without closing a distinct
+window.
+
+### Anchor record store
+
+Emitted anchors persist in the `--anchor-record` JSON file (payload +
+txid slot + status), written atomically, so a later run resumes from
+the last anchor instead of re-anchoring the same range:
+
+- `pending` — payload prepared, not broadcast (the default state).
+- `broadcast` — submitted via a broadcaster, txid recorded. Inclusion
+  is still **confirmed-unknown**: no SPV/Merkle verifier exists yet,
+  so the store never claims `confirmed`.
+- `superseded` — a prepared anchor for an older head, replaced when
+  the head advanced before anything was broadcast. It stays in the
+  store for audit; it anchors nothing on-chain.
+
+### Chaining
+
+`prev_txid` chains to the last **broadcast** anchor's txid, or the
+configured genesis txid when nothing has been broadcast yet. A merely
+prepared anchor has no txid, so the next anchor still chains to the
+last broadcast anchor (or genesis) and covers the full range from there.
+The store records the genesis it was created with; running under a
+different genesis fails closed (genesis mismatch).
+
+### Fail-closed behavior
+
+The publisher refuses to anchor when the journal fails verification,
+when acceptance binding fails (acceptances present but no verified
+manifests / trusted public key), when the journal is missing or
+malformed, or on genesis mismatch. A journal truncated below the last
+broadcast anchor is refused (the next `start_seq` would fall outside
+the journal). It never anchors a checkpoint it cannot verify locally.
+
+Broadcast failure is best-effort, per the protocol doc: the anchor is
+already saved as `pending`, the scheduler reports the failure in its
+decision and retries the *same* record on the next tick — it never
+emits a duplicate anchor and never dies on chain unavailability.
+Journal/binding failures, by contrast, always raise: a broken journal
+must never be silently skipped.
+
+### Manifests for binding checks
+
+`--manifest` supplies fixed envelopes; `--manifest-dir` is re-read at
+every checkpoint, so a long-running publisher picks up envelopes for
+acceptances that land after startup. A missing directory contributes
+zero envelopes (binding still fails closed once an acceptance exists);
+a path that exists but is not a directory is a misconfiguration.
+
+### What remains
+
+- Real broadcast: transaction construction, signing, fee funding, and a
+  `PublisherAdapter`-based broadcaster behind the explicit opt-in, plus
+  tBSV to fund a testnet anchor (both known testnet faucets were dead
+  at last check — no funding is attempted by this code).
+- SPV verification: Merkle-proof / header-chain / confirmation checks
+  before any anchor may be reported `confirmed`.
+- Anchor-chain continuity enforcement (issue #8): the publisher chains
+  to the last broadcast txid it recorded, but does not independently
+  validate a full on-chain chain from genesis.
+- The highest anchored `release_seq` is recorded per anchor but not yet
+  persisted as a durable rollback checkpoint compared against a trusted
+  manifest policy at verify time.

@@ -129,6 +129,29 @@ def load_public_key(path: Path) -> Ed25519PublicKey:
     return key
 
 
+def manifest_hash(envelope: dict) -> str:
+    """Hash of a signed manifest envelope: SHA-256 over its canonical JSON.
+
+    The hash covers both the payload and the Ed25519 signature, so it
+    identifies one exact signed manifest. Acceptance events carry this hash
+    (see :func:`record_manifest_acceptance`); anchor-time derivation
+    re-verifies the envelope's signature and checks the acceptance's
+    ``release_id`` / ``release_seq`` against the manifest's own fields,
+    so an acceptance cannot be rebound to a different release.
+    """
+    if not isinstance(envelope, dict):
+        raise VerificationError("manifest envelope must be a JSON object")
+    return hashlib.sha256(canonical_json_bytes(envelope)).hexdigest()
+
+
+def _check_manifest_hash(value: Any, *, field: str = "manifest_hash") -> str:
+    if not isinstance(value, str) or not HEX_64.fullmatch(value):
+        raise VerificationError(
+            f"invalid {field}: must be 64 hexadecimal characters"
+        )
+    return value.lower()
+
+
 def _check_release_seq(value: Any, *, field: str = "release_seq") -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise VerificationError(f"invalid {field}: must be a non-negative integer")
@@ -374,7 +397,7 @@ def _check_release_seq_uint32(value: Any, *, field: str = "release_seq") -> int:
 
 
 def record_manifest_acceptance(
-    journal: Path, release_seq: int, release_id: str
+    journal: Path, release_seq: int, release_id: str, manifest_hash_value: str
 ) -> dict:
     """Record an operator's adoption of a release as a typed audit event.
 
@@ -386,16 +409,44 @@ def record_manifest_acceptance(
     by the anchoring caller, so a publisher cannot anchor an arbitrary
     checkpoint value.
 
+    The acceptance is bound to one exact signed manifest via
+    ``manifest_hash`` — ``sha256(canonical_json(envelope))`` over the
+    signed manifest envelope (see :func:`manifest_hash`). Anchor-time
+    derivation re-verifies the envelope's Ed25519 signature against a
+    trusted public key and requires the acceptance's ``release_id`` /
+    ``release_seq`` to match the manifest's own fields. An acceptance
+    whose hash matches no verified manifest, or whose release identity
+    does not match its manifest, fails closed at anchor time.
+
+    What this binding proves and does not prove (trust boundary): it
+    proves the accepted release corresponds to a real, signed manifest
+    with matching release identity — a forged acceptance for a
+    nonexistent or mismatched manifest is rejected. It does NOT prove
+    who recorded the acceptance: anyone with journal write access can
+    still record an acceptance that references a *real* manifest (e.g.
+    re-accepting an older release). Per-event authorization/signatures
+    on acceptance events are out of scope (issue #11); the operator's
+    journal write access remains trusted, and consumers should enforce
+    monotonic release policy (``--min-release-seq``) at verify time.
+
     The event detail is canonical JSON ``{"release_seq": N, "release_id":
-    "..."}``. The append goes through the normal locked
-    :func:`append_audit_event` path, so flock, O_NOFOLLOW, size limits, and
-    canonical serialization all apply.
+    "...", "manifest_hash": "<64-hex>"}``. The append goes through the
+    normal locked :func:`append_audit_event` path, so flock, O_NOFOLLOW,
+    size limits, and canonical serialization all apply.
+
+    Recording only stores the claim; the binding is enforced when an
+    anchor is created, not at record time.
     """
     release_seq = _check_release_seq_uint32(release_seq)
     if not isinstance(release_id, str) or not release_id:
         raise VerificationError("release_id must be a non-empty string")
+    manifest_hash_value = _check_manifest_hash(manifest_hash_value)
     detail = canonical_json_bytes(
-        {"release_seq": release_seq, "release_id": release_id}
+        {
+            "release_seq": release_seq,
+            "release_id": release_id,
+            "manifest_hash": manifest_hash_value,
+        }
     ).decode("utf-8")
     return append_audit_event(journal, MANIFEST_ACCEPTED_EVENT_TYPE, detail)
 

@@ -12,11 +12,11 @@ This file records notable test and security-validation runs. Detailed per-run ev
 
 ## History
 
-No verified run is recorded here yet. Populate this table from an actual test report, not an estimate.
+Rows below come from actual test reports, not estimates.
 
 | Date (UTC) | Commit SHA | Environment | Reported | Passed | Failed | Errors | Skipped | Categories / notes | Evidence |
 |---|---|---|---:|---:|---:|---:|---:|---|---|
-| _No verified runs recorded yet._ | — | — | — | — | — | — | — | Add a row after reviewing an actual run. | — |
+| 2026-10-15 | 4fef0615ce9e9e070c0da8f16faca340c7703094 | Local run — Linux (x86_64), Python 3.12.3, `python3 -m pytest -q` | 191 | 191 | 0 | 0 | 0 | Local run (not CI, not an independent review). Categories exercised: unit and integration tests; manifest signatures, hashes, and artifact validation; audit-journal integrity, tampering, and rollback protection; manifest acceptance and release-sequence binding; anchor payload encoding and anchor-chain continuity; adversarial and malformed-input tests; publishing safeguards and explicit failure when broadcasting is unsupported. Independent on-chain inclusion/header verification NOT covered (not implemented). | Local run, no CI workflow |
 
 ## Coverage categories to track
 

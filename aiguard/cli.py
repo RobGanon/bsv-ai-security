@@ -6,6 +6,11 @@ import sys
 from pathlib import Path
 
 from .anchor import create_anchor_payload, verify_journal_against_anchor
+from .publisher import (
+    Publisher,
+    PublisherConfig,
+    PublisherError,
+)
 from .core import (
     VerificationError,
     append_audit_event,
@@ -104,6 +109,36 @@ def main(argv=None):
     p.add_argument("--public-key", type=Path, default=None,
                    help="trusted manifest-signing public key (PEM) for binding re-verification")
 
+    p = sub.add_parser(
+        "publish",
+        help="publisher: anchor checkpoints on release acceptance + on schedule "
+        "(dry-run by default: prepares payloads, never broadcasts)",
+    )
+    p.add_argument("--journal", required=True, type=Path)
+    p.add_argument("--anchor-record", required=True, type=Path,
+                   help="JSON file persisting emitted anchors (payload + txid slot + status)")
+    p.add_argument("--genesis-txid", default="0" * 64,
+                   help="out-of-band genesis anchor txid; zeros mean no genesis anchor yet")
+    p.add_argument("--interval-seconds", type=int, default=3600,
+                   help="scheduled checkpoint interval (default 3600)")
+    p.add_argument("--mode", choices=["once", "on-release", "loop"], default="once",
+                   help="once: one scheduler tick; on-release: anchor immediately; "
+                   "loop: repeat ticks until interrupted or --max-iterations")
+    p.add_argument("--max-iterations", type=int, default=None,
+                   help="cap loop iterations (test / operator safety)")
+    p.add_argument("--broadcast", action="store_true",
+                   help="opt-in broadcast; fails closed: no broadcaster exists in "
+                   "this build, so --broadcast without one is refused")
+    p.add_argument("--manifest", action="append", type=Path, default=None,
+                   help="signed manifest envelope JSON to check acceptances against; "
+                   "repeatable; required when the journal contains acceptances")
+    p.add_argument("--manifest-dir", type=Path, default=None,
+                   help="directory of signed manifest envelope JSON files, "
+                   "re-read at every checkpoint (for long-running publishers)")
+    p.add_argument("--public-key", type=Path, default=None,
+                   help="trusted manifest-signing public key (PEM); "
+                   "required with --manifest when the journal contains acceptances")
+
     args = parser.parse_args(argv)
     try:
         if args.command == "keygen":
@@ -195,6 +230,51 @@ def main(argv=None):
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             print("LOCAL CHECK ONLY: BSV transaction inclusion has not been verified.")
+        elif args.command == "publish":
+            manifests = None
+            public_key = None
+            has_manifests = args.manifest is not None or args.manifest_dir is not None
+            if has_manifests or args.public_key is not None:
+                if not has_manifests or args.public_key is None:
+                    raise VerificationError(
+                        "publish requires --manifest and/or --manifest-dir "
+                        "together with --public-key to check acceptance binding"
+                    )
+                manifests = [_read_json(path) for path in args.manifest or []]
+                public_key = load_public_key(args.public_key)
+            if args.broadcast:
+                # No broadcaster exists in this build: the opt-in is real,
+                # but enabling it without a broadcaster fails closed.
+                raise PublisherError(
+                    "broadcast requested but no broadcaster is configured: "
+                    "no broadcast adapter exists in this build; refusing to run"
+                )
+            config = PublisherConfig(
+                journal=args.journal,
+                anchor_record=args.anchor_record,
+                genesis_txid=args.genesis_txid,
+                checkpoint_interval_seconds=args.interval_seconds,
+                broadcast_enabled=False,
+                manifests=tuple(manifests) if manifests is not None else (),
+                public_key=public_key,
+                manifests_dir=args.manifest_dir,
+            )
+            publisher = Publisher(config)
+            if args.mode == "on-release":
+                record = publisher.on_release_accepted()
+                print(json.dumps({"action": "anchored", "reason": "release",
+                                  "record": record}, indent=2, sort_keys=True))
+            elif args.mode == "loop":
+                try:
+                    decisions = publisher.run_loop(max_iterations=args.max_iterations)
+                except KeyboardInterrupt:
+                    print("Publisher loop interrupted by operator.")
+                    return 0
+                print(json.dumps(decisions, indent=2, sort_keys=True))
+            else:
+                decision = publisher.run_once()
+                print(json.dumps(decision, indent=2, sort_keys=True))
+            print("DRY RUN: broadcast disabled — payloads prepared, nothing broadcast.")
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

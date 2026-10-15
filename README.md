@@ -1,30 +1,118 @@
 # BSV AI Security
 
-**Verifiable AI operations, anchored to Bitcoin SV.**
+**Prove what your AI actually ran.**
 
 AI systems run as black boxes: you cannot prove *which* model and
 configuration produced an output, or that the audit log describing it was
-not rewritten afterwards.
+not rewritten afterwards. When an auditor, a regulator, or a customer
+asks "show me exactly what ran," most teams have only their word.
 
-This project fixes that in two layers:
+This project gives you the evidence.
 
-1. **Local trust core** (working, tested): signed manifests pin the exact
-   approved model and config bytes; verification runs against the signature
-   before launch; every security event goes into a hash-chained audit
-   journal. Rollback protection via monotonic release sequences, and a
-   TOCTOU-resistant API that hands the launcher open, verified file
-   descriptors instead of paths.
+## Why use this
 
-2. **BSV anchoring** ([design](docs/anchoring-protocol.md)): journal heads
-   and rollback checkpoints are committed on-chain, so anyone holding the
-   journal, the anchor transactions, and block headers can independently
-   verify history was never rewritten — even against the local
-   administrator.
+- **Prove what ran, not what was supposed to run.** A signed manifest
+  pins the exact model, code, data, and config bytes for a release.
+  Verification checks the signature *before* launch, so a swapped,
+  stale, or tampered artifact fails instead of running.
+- **A tamper-evident record of what happened.** Every security event
+  goes into a hash-chained audit journal. Editing an earlier entry
+  breaks the chain, so rewriting history is detectable.
+- **Rollback protection.** Monotonic release sequences reject
+  older legitimately-signed releases, so a system cannot be quietly
+  rolled back to a vulnerable version.
+- **Evidence your auditors already ask for.** The journal and
+  manifests map directly onto what compliance requires: logging of
+  AI system activity (EU AI Act), change and access evidence
+  (SOC 2), and a reproducible record for incident forensics.
+- **No blockchain required to start.** The local trust core works
+  with zero blockchain. Anchoring (below) is an optional upgrade
+  for when you need proof that holds up against your own
+  administrators — not a prerequisite for using the tool.
 
-The prototype is deliberately narrow. It does not claim to solve model
-inference integrity, prompt injection, or the broader AI alignment problem.
-It solves the narrower, measurable problem of *artifact and audit-log
-integrity under a local administrator adversary*.
+**What this is not.** It does not solve prompt injection, model
+safety, data poisoning, adversarial ML, or privacy. It does not
+prove that recorded events are truthful or complete — only that
+they have not been altered after recording. It is the provenance
+pillar of AI security: proving what ran, not whether the model
+behaved well.
+
+Status: 191 tests passing on main, plus adversarial spot-checks on
+every feature. Independent security review is still open
+([issue #4](https://github.com/RobGanon/bsv-ai-security/issues/4)) —
+we state that plainly because it matters.
+
+## What it saves you in money
+
+No quantified case study exists yet — we will not invent savings
+percentages. The mechanisms:
+
+- **Audit and compliance preparation.** Evidence is preassembled
+  (signed manifests + chained journal) instead of reconstructed
+  after the fact.
+- **Incident forensics.** Identify exactly which release produced
+  an output, instead of guessing across deployments.
+- **Prevented bad runs.** A wrong, stale, or tampered artifact is
+  caught before launch, not after it burns a training or
+  deployment run.
+- **Reproduce instead of retrain.** Hashes identify exactly what
+  changed, so unchanged inputs are not retrained.
+- **Scoped legal retraining.** If data is disputed, retraining is
+  limited to the runs that actually used it.
+- **Cheaper disputes.** Independently checkable evidence replaces
+  "trust us."
+
+Next step: a pilot with one AI team measuring audit-prep hours
+before and after adoption.
+
+## How anchoring works
+
+The local journal proves *order* and detects tampering — but an
+administrator with full access could rewrite the whole journal
+from scratch. Anchoring closes that hole: periodic journal heads
+and rollback checkpoints are committed to a public blockchain,
+so anyone holding the journal, the anchor transactions, and block
+headers can verify history was never rewritten, even against the
+local administrator.
+
+The current anchor backend is Bitcoin SV, chosen for cost and
+cadence: anchors are small and frequent (on release acceptance
+plus scheduled checkpoints), and BSV's low fees and native
+on-chain data make that practical. Verification is SPV-style —
+verifiers check headers, not a full node.
+
+Honest tradeoff: Bitcoin has substantially deeper proof-of-work
+security. BSV's case is cost, frequency, and data fit, not
+maximum settlement depth.
+
+**Current status:** the publisher prepares checkpoints, but
+broadcast is still a stub — no anchor has been confirmed on-chain
+yet. The tagline says "anchoring to," not "anchored to," until
+the first real anchor confirms.
+
+## Training-data provenance
+
+The same mechanism works for training data: record a signed
+dataset manifest *before* training, and the manifest + journal +
+anchor prove what was in the training set and when it was
+recorded. A creator can likewise hash and timestamp their work
+before it is ever used.
+
+Hard limits: this proves what was recorded. It does not stop
+scraping, enforce consent or licenses, or prove an omitted item
+was not secretly used. It helps parties who adopt it *before*
+the dispute — it cannot retroactively prove an unrecorded run.
+
+## What makes this different
+
+Hash-chained logs, signed artifacts, and timestamping all have
+real precedents — Sigstore/Rekor, in-toto/SLSA, OpenTimestamps,
+Certificate Transparency, CloudTrail, systemd journal sealing.
+No single product combines all of this specifically for AI
+operations: signed manifests pinning model, code, data, and
+config bytes; TOCTOU-resistant verified file-descriptor handoff;
+journal-derived rollback protection; manifest-bound acceptance;
+and chain-continuous anchors.
 
 Contributions welcome — especially security review. If you find something,
 open an issue.

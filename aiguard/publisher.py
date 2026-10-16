@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -81,6 +82,11 @@ from .core import HEX_64, VerificationError, _read_jsonl, _verify_audit_events
 MANIFEST_ACCEPTED_EVENT_TYPE = "manifest_accepted"
 
 RECORD_STATUSES = ("pending", "broadcast", "superseded")
+
+# O_NOFOLLOW makes open(2) fail on a trailing symlink instead of following
+# it. It is Unix-only; where unavailable the value is 0 (a no-op flag),
+# matching aiguard.core.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 # Sensible default: anchor at least hourly even with no new release.
 DEFAULT_CHECKPOINT_INTERVAL_SECONDS = 3600
@@ -268,9 +274,40 @@ class Publisher:
         path = self.config.anchor_record
         path.parent.mkdir(parents=True, exist_ok=True)
         text = json.dumps(store, indent=2, sort_keys=True) + "\n"
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
+        # Unique tmp per save, in the same directory so os.replace stays
+        # atomic on one filesystem. A shared, predictable tmp path is
+        # unsafe two ways: concurrent writers race on it (one thread's
+        # replace removes the tmp out from under another's, crashing
+        # the save and losing updates), and a planted symlink at the
+        # predictable path redirects store bytes into its target.
+        # A random suffix makes the tmp unpredictable and unshared; a
+        # symlink planted at any legacy predictable tmp path is simply
+        # never followed. O_NOFOLLOW refuses a trailing symlink at open
+        # time as defense in depth.
+        tmp = path.parent / (
+            f"{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+        )
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW
+        try:
+            fd = os.open(tmp, flags, 0o666)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(text)
+            except BaseException:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                raise
+            os.replace(tmp, path)
+        except BaseException:
+            # Best-effort cleanup of our own tmp; never mask the
+            # original error (e.g. an interrupted save).
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     # -- journal ------------------------------------------------------
 

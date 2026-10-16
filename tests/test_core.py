@@ -9,6 +9,7 @@ from aiguard.core import (
     VerificationError,
     append_audit_event,
     create_manifest,
+    generate_keypair,
     sha256_file,
     sign_manifest,
     verify_audit_journal,
@@ -326,3 +327,34 @@ def test_appended_line_matches_canonical_hash_bytes(tmp_path):
     assert stored_line == canonical_json_bytes(event).decode("utf-8")
     assert "\\u" not in stored_line
     assert verify_audit_journal(journal) == 1
+
+
+
+def test_generate_keypair_rejects_same_private_and_public_path(tmp_path):
+    key_path = tmp_path / "key.pem"
+
+    with pytest.raises(ValueError, match="different|distinct|same"):
+        generate_keypair(key_path, key_path)
+
+    # A rejected call must not leave a public key where a private key was expected.
+    if key_path.exists():
+        assert b"PRIVATE KEY" not in key_path.read_bytes()
+
+
+@pytest.mark.parametrize("which_path", ["private", "public"])
+def test_generate_keypair_rejects_symlink_output_without_overwriting_target(
+    tmp_path, which_path
+):
+    target = tmp_path / "target.txt"
+    original = b"preserve this file"
+    target.write_bytes(original)
+
+    private_path = tmp_path / "private.pem"
+    public_path = tmp_path / "public.pem"
+    selected = private_path if which_path == "private" else public_path
+    selected.symlink_to(target)
+
+    with pytest.raises(OSError):
+        generate_keypair(private_path, public_path)
+
+    assert target.read_bytes() == original

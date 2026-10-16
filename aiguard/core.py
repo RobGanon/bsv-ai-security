@@ -91,6 +91,12 @@ def _sha256_fd(fd: int) -> tuple[str, int]:
 
 
 def generate_keypair(private_path: Path, public_path: Path) -> None:
+    # Refuse aliased output paths before creating or truncating either file.
+    # resolve(strict=False) also catches distinct path spellings that point
+    # at the same destination.
+    if private_path.resolve() == public_path.resolve():
+        raise ValueError("private and public key paths must be different")
+
     private_path.parent.mkdir(parents=True, exist_ok=True)
     public_path.parent.mkdir(parents=True, exist_ok=True)
     private_key = Ed25519PrivateKey.generate()
@@ -103,11 +109,15 @@ def generate_keypair(private_path: Path, public_path: Path) -> None:
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
-    # Best-effort restrictive permissions; umask is also applied by the OS.
-    fd = os.open(private_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # Refuse trailing symlinks at open time (not just via a pre-check), so
+    # an output path cannot redirect key material into a symlink target.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW
+    fd = os.open(private_path, flags, 0o600)
     with os.fdopen(fd, "wb") as f:
         f.write(private_bytes)
-    public_path.write_bytes(public_bytes)
+    fd = os.open(public_path, flags, 0o644)
+    with os.fdopen(fd, "wb") as f:
+        f.write(public_bytes)
     try:
         os.chmod(private_path, 0o600)
         os.chmod(public_path, 0o644)

@@ -128,6 +128,18 @@ Rotation of any of these is a key-ceremony event, out of scope for v0.1.
 Inputs: journal file, genesis anchor txid, anchor pubkey, BSV block headers
 (or an SPV source serving Merkle inclusion proofs, e.g. BEEF).
 
+**Status (2026-10-16):** step 1's inclusion check is implemented in
+`aiguard/spv.py` (`anchor-chain-verify --spv`). WoC-TTN serves no
+compact Merkle-proof endpoint, so the verifier recomputes the Merkle
+root from the claimed block's tx list and checks the header hash +
+proof-of-work — stronger evidence than a served proof, heavier on
+bandwidth (fine for Teratestnet's tiny blocks; compact proofs are the
+mainnet path). Header-chain sync back to a trusted checkpoint is still
+a follow-up; the verifier currently checks one block at a time. The
+anchor-input-signature check (step 1, second bullet) is also still
+open: the payload is verified against the journal, but the anchor
+tx's input is not yet checked against the anchor pubkey.
+
 1. **Collect the anchor chain.** From the genesis txid, fetch each anchor
    transaction and follow `prev_txid` until the latest. For each anchor:
    - Verify a Merkle inclusion proof against block headers (confirms the

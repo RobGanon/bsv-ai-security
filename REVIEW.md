@@ -43,9 +43,12 @@ The review succeeds if it finds — or rules out — any of these:
 
 - Mainnet. Everything chain-related is Teratestnet play money.
 - Compact SPV proofs / BEEF envelope — BUMP (BRC-74) parse/verify/build
-  + `anchor-chain-verify --bump-file` are implemented; the BEEF envelope
-  (BUMP array + tx array) is not parsed, and no public source serves
-  BUMPs, so proofs are operator-supplied.
+  + `anchor-chain-verify --bump-file`, and BEEF (BRC-62) envelope
+  parse/verify + `anchor-chain-verify --beef-file`, are implemented;
+  no public source serves BUMPs or BEEF, so proofs/envelopes are
+  operator-supplied. BEEF verification covers inclusion + ancestry +
+  amount conservation; it does NOT evaluate scripts, so an unmined
+  tx's signatures are not checked.
 - Performance, UX, and the separate BRC-166 paid-endpoint harness.
 - Whether BSV is the "right" chain. The review is about this code's
   correctness, not the choice of backend.

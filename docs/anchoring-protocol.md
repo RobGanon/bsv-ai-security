@@ -139,7 +139,13 @@ too — BUMP (BRC-74) parse/verify/build in `aiguard/spv.py`
 (`anchor-chain-verify --bump-file`), checked against the BRC-74
 reference vector and a real Teratestnet anchor; proofs are
 operator-supplied since no public source serves BUMPs, and the BEEF
-envelope (BUMP array + tx array) is not yet parsed. Header-chain sync back to a trusted checkpoint is
+envelope (BUMP array + tx array) is not yet parsed. **Status (2026-10-17):**
+the BEEF envelope is parsed and verified too — BRC-62 parse/encode in
+`aiguard/beef.py` (`anchor-chain-verify --beef-file`), checked against
+the BRC-62 reference envelope and a real Teratestnet anchor + child
+tx; verification covers BUMP inclusion for mined txs plus ancestry
+and amount conservation for unmined ones. It does NOT evaluate
+scripts, so an unmined tx's signatures are not checked. Header-chain sync back to a trusted checkpoint is
 implemented in `aiguard/spv.py` (`anchor-chain-verify --header-chain
 --checkpoint-hash --checkpoint-height`): the verifier walks headers
 from each anchor's block back to the operator-pinned checkpoint,

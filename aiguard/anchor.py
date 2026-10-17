@@ -573,3 +573,283 @@ def verify_journal_against_anchor_chain(
         "anchors": per_anchor,
         "chain_inclusion_verified": False,
     }
+
+
+# ---------------------------------------------------------------------------
+# Anchor input signature verification (protocol §6, step 1)
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass as _dataclass  # local: keep top imports stable
+from typing import Protocol as _Protocol
+
+from .bsv import (
+    SIGHASH_ALL_FORKID,
+    Tx,
+    TxIn,
+    TxOut,
+    build_p2pkh_script,
+    sighash_forkid,
+    verify_sig,
+)
+
+
+def parse_p2pkh_script_sig(script_sig: bytes) -> tuple[bytes, int, bytes]:
+    """Parse a P2PKH scriptSig into (der_signature, sighash_byte, pubkey).
+
+    Strict: exactly two pushes, ``<sig || sighash> <compressed pubkey>``,
+    no trailing bytes. Raises :class:`VerificationError` on any
+    deviation (non-P2PKH, truncated, extra pushes).
+    """
+    if not isinstance(script_sig, (bytes, bytearray)) or len(script_sig) < 2:
+        raise VerificationError("scriptSig is empty or not bytes")
+    script_sig = bytes(script_sig)
+    n1 = script_sig[0]
+    if n1 == 0 or n1 > 75 or 1 + n1 > len(script_sig):
+        raise VerificationError("scriptSig first push is malformed")
+    sig_push = script_sig[1 : 1 + n1]
+    rest = script_sig[1 + n1 :]
+    if len(rest) < 2:
+        raise VerificationError("scriptSig is missing the pubkey push")
+    n2 = rest[0]
+    if n2 == 0 or n2 > 75 or 1 + n2 != len(rest):
+        raise VerificationError("scriptSig pubkey push is malformed")
+    pubkey = rest[1:]
+    if len(sig_push) < 2:
+        raise VerificationError("scriptSig signature push is empty")
+    if len(pubkey) != 33 or pubkey[0] not in (0x02, 0x03):
+        raise VerificationError("scriptSig pubkey is not a compressed pubkey")
+    return sig_push[:-1], sig_push[-1], pubkey
+
+
+def _tx_from_woc_json(tx_json: Any) -> Tx:
+    """Build a :class:`Tx` from a WoC ``/tx/hash`` JSON body.
+
+    Only the fields the sighash needs are used: version, locktime,
+    inputs (prev txid/vout/scriptSig/sequence), outputs (value/script).
+    """
+    if not isinstance(tx_json, dict):
+        raise VerificationError("tx JSON must be an object")
+    vin = tx_json.get("vin")
+    vout = tx_json.get("vout")
+    if not isinstance(vin, list) or not isinstance(vout, list):
+        raise VerificationError("tx JSON must carry vin and vout lists")
+    inputs = []
+    for entry in vin:
+        try:
+            script_hex = entry["scriptSig"]["hex"]
+            inputs.append(
+                TxIn(
+                    entry["txid"],
+                    int(entry["vout"]),
+                    bytes.fromhex(script_hex),
+                    int(entry.get("sequence", 0xFFFFFFFF)),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise VerificationError("tx JSON has a malformed input") from exc
+    outputs = []
+    for entry in vout:
+        try:
+            value = int(round(float(entry["value"]) * 1e8))
+            outputs.append(TxOut(value, bytes.fromhex(entry["scriptPubKey"]["hex"])))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise VerificationError("tx JSON has a malformed output") from exc
+    try:
+        version = int(tx_json.get("version", 1))
+        locktime = int(tx_json.get("locktime", 0))
+    except (TypeError, ValueError) as exc:
+        raise VerificationError("tx JSON has a malformed version/locktime") from exc
+    return Tx(version=version, inputs=inputs, outputs=outputs, locktime=locktime)
+
+
+def verify_anchor_tx_signature(
+    tx_json: Any, prev_tx_json: Any, anchor_pubkey_hex: str
+) -> dict[str, Any]:
+    """Check an anchor tx's single input against the trusted anchor pubkey.
+
+    Fail-closed: every malformed input returns ``verified=False`` with a
+    reason, never raises. Checked, in order:
+
+    - The trusted pubkey is a well-formed compressed pubkey.
+    - The anchor tx has exactly one input (anchor txs are 1-input).
+    - The input's scriptSig parses as P2PKH with sighash
+      ``SIGHASH_ALL | FORKID`` (``0x41``).
+    - The scriptSig pubkey equals the trusted anchor pubkey.
+    - The spent output's locking script is P2PKH to that pubkey.
+    - The ECDSA signature verifies against the BIP 143 FORKID sighash
+      computed from the tx, the spent script, and the spent value.
+    """
+    fail = lambda reason: {
+        "verified": False,
+        "reason": reason,
+        "pubkey": None,
+    }
+    if not isinstance(anchor_pubkey_hex, str):
+        return fail("trusted anchor pubkey must be a hex string")
+    trusted = anchor_pubkey_hex.lower()
+    if (
+        len(trusted) != 66
+        or not all(c in "0123456789abcdef" for c in trusted)
+        or trusted[:2] not in ("02", "03")
+    ):
+        return fail("trusted anchor pubkey must be a 66-char compressed pubkey")
+    try:
+        tx = _tx_from_woc_json(tx_json)
+    except VerificationError as exc:
+        return fail(f"anchor tx malformed: {exc}")
+    if len(tx.inputs) != 1:
+        return fail(
+            f"anchor tx must have exactly 1 input, has {len(tx.inputs)}"
+        )
+    txin = tx.inputs[0]
+    try:
+        der_sig, sighash_byte, pubkey = parse_p2pkh_script_sig(txin.script_sig)
+    except VerificationError as exc:
+        return fail(f"scriptSig is not a P2PKH input: {exc}")
+    if sighash_byte != SIGHASH_ALL_FORKID:
+        return fail(
+            f"sighash byte is {sighash_byte:#x}, expected "
+            f"SIGHASH_ALL|FORKID ({SIGHASH_ALL_FORKID:#x})"
+        )
+    if pubkey.hex() != trusted:
+        return fail("scriptSig pubkey does not match the trusted anchor pubkey")
+    if not isinstance(prev_tx_json, dict) or not isinstance(
+        prev_tx_json.get("vout"), list
+    ):
+        return fail("previous tx JSON is malformed")
+    if txin.prev_index >= len(prev_tx_json["vout"]):
+        return fail(
+            f"previous tx has no output {txin.prev_index}"
+        )
+    prev_out = prev_tx_json["vout"][txin.prev_index]
+    try:
+        prev_script = bytes.fromhex(prev_out["scriptPubKey"]["hex"])
+        prev_value = int(round(float(prev_out["value"]) * 1e8))
+    except (KeyError, TypeError, ValueError):
+        return fail("previous tx output is malformed")
+    if prev_script != build_p2pkh_script(pubkey):
+        return fail(
+            "spent output is not P2PKH to the anchor pubkey"
+        )
+    digest = sighash_forkid(tx, 0, prev_script, prev_value)
+    if not verify_sig(pubkey, digest, der_sig):
+        return fail("ECDSA signature does not verify against the sighash")
+    return {
+        "verified": True,
+        "reason": "input signed by the trusted anchor pubkey",
+        "pubkey": trusted,
+    }
+
+
+@_dataclass(frozen=True)
+class SignatureResult:
+    verified: bool
+    txid: str
+    reason: str = ""
+    pubkey: str | None = None
+
+
+class AnchorTxFetcher(_Protocol):
+    """Supplies full tx JSON for signature checks."""
+
+    def fetch_tx_full(self, txid: str) -> dict:
+        """Return the WoC ``/tx/hash`` JSON body for ``txid``."""
+        ...
+
+
+class AnchorSignatureVerifier:
+    """Verify anchor tx inputs are signed by the trusted anchor pubkey.
+
+    Fail-closed: a fetch failure or a malformed tx yields
+    ``verified=False`` with a reason, never an exception.
+    """
+
+    def __init__(self, fetcher: AnchorTxFetcher, anchor_pubkey_hex: str) -> None:
+        self.fetcher = fetcher
+        self.anchor_pubkey_hex = anchor_pubkey_hex
+
+    def verify_signature(self, txid: str) -> SignatureResult:
+        txid = txid.lower()
+        try:
+            tx_json = self.fetcher.fetch_tx_full(txid)
+        except Exception as exc:  # fetcher maps its own errors; stay closed
+            return SignatureResult(False, txid, reason=f"fetch failed: {exc}")
+        try:
+            tx = _tx_from_woc_json(tx_json)
+        except VerificationError as exc:
+            return SignatureResult(
+                False, txid, reason=f"anchor tx malformed: {exc}"
+            )
+        if len(tx.inputs) != 1:
+            return SignatureResult(
+                False, txid,
+                reason=f"anchor tx must have exactly 1 input, has {len(tx.inputs)}",
+            )
+        try:
+            prev_json = self.fetcher.fetch_tx_full(tx.inputs[0].prev_txid)
+        except Exception as exc:
+            return SignatureResult(False, txid, reason=f"fetch failed: {exc}")
+        checked = verify_anchor_tx_signature(
+            tx_json, prev_json, self.anchor_pubkey_hex
+        )
+        return SignatureResult(
+            checked["verified"], txid,
+            reason=checked["reason"], pubkey=checked["pubkey"],
+        )
+
+
+def apply_anchor_signatures(result: dict, verifier: AnchorSignatureVerifier) -> dict:
+    """Attach per-anchor signature results to a chain-verify result.
+
+    Handles both shapes: ``verify_anchor_chain`` (``result["anchors"]``)
+    and ``verify_journal_against_anchor_chain`` (``result["chain"]``
+    plus per-anchor journal entries). Returns a new dict; the input
+    is not mutated. Top-level ``anchor_signatures_verified`` is True
+    only when every anchor's input signature verifies.
+    """
+    if "chain" in result:
+        chain = dict(result["chain"])
+        summaries = chain.get("anchors", [])
+        merged = []
+        all_verified = True
+        for summary in summaries:
+            sig = verifier.verify_signature(summary["txid"])
+            all_verified = all_verified and sig.verified
+            merged.append(
+                {
+                    **summary,
+                    "anchor_signature_verified": sig.verified,
+                    "anchor_signature": {
+                        "verified": sig.verified,
+                        "reason": sig.reason,
+                        "pubkey": sig.pubkey,
+                    },
+                }
+            )
+        chain["anchors"] = merged
+        return {
+            **result,
+            "chain": chain,
+            "anchor_signatures_verified": all_verified,
+        }
+    merged = []
+    all_verified = True
+    for summary in result.get("anchors", []):
+        sig = verifier.verify_signature(summary["txid"])
+        all_verified = all_verified and sig.verified
+        merged.append(
+            {
+                **summary,
+                "anchor_signature_verified": sig.verified,
+                "anchor_signature": {
+                    "verified": sig.verified,
+                    "reason": sig.reason,
+                    "pubkey": sig.pubkey,
+                },
+            }
+        )
+    return {
+        **result,
+        "anchors": merged,
+        "anchor_signatures_verified": all_verified,
+    }

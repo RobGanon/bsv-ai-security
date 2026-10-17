@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 
 from .anchor import (
+    AnchorSignatureVerifier,
+    apply_anchor_signatures,
     create_anchor_payload,
     verify_anchor_chain,
     verify_journal_against_anchor,
@@ -142,9 +144,16 @@ def main(argv=None):
                    help="also verify each anchor tx is really inside its "
                    "claimed block (Merkle root recomputation + header hash "
                    "+ proof-of-work) via the --woc-base endpoint")
+    p.add_argument("--anchor-sig", action="store_true",
+                   help="also verify each anchor tx's single input is "
+                   "signed by the trusted anchor pubkey (requires "
+                   "--anchor-pubkey)")
+    p.add_argument("--anchor-pubkey", default=None,
+                   help="trusted anchor compressed pubkey hex (66 chars, "
+                   "02/03 prefix); required with --anchor-sig")
     p.add_argument("--woc-base", default=WOC_TTN_BASE,
-                   help="WhatsOnChain base URL for --spv block data "
-                   "(default: Teratestnet)")
+                   help="WhatsOnChain base URL for --spv / --anchor-sig "
+                   "chain data (default: Teratestnet)")
 
     p = sub.add_parser(
         "publish",
@@ -328,6 +337,23 @@ def main(argv=None):
                     result,
                     SPVVerifier(WoCBlockFetcher(base_url=args.woc_base)),
                 )
+            if args.anchor_sig:
+                pubkey = args.anchor_pubkey or ""
+                if (
+                    len(pubkey) != 66
+                    or pubkey[:2] not in ("02", "03")
+                    or not all(c in "0123456789abcdefABCDEF" for c in pubkey)
+                ):
+                    raise VerificationError(
+                        "--anchor-sig requires --anchor-pubkey as 66-char "
+                        "compressed pubkey hex (02/03 prefix)"
+                    )
+                result = apply_anchor_signatures(
+                    result,
+                    AnchorSignatureVerifier(
+                        WoCBlockFetcher(base_url=args.woc_base), pubkey
+                    ),
+                )
             print(json.dumps(result, indent=2, sort_keys=True))
             if args.spv and result.get("chain_inclusion_verified"):
                 count = result.get("anchor_count") or (
@@ -339,6 +365,19 @@ def main(argv=None):
                 )
             else:
                 print("LOCAL CHECK ONLY: BSV transaction inclusion has not been verified.")
+            if args.anchor_sig:
+                count = result.get("anchor_count") or (
+                    result.get("chain", {}).get("anchor_count")
+                )
+                if result.get("anchor_signatures_verified"):
+                    print(
+                        f"ANCHOR SIGNATURES VERIFIED: {count} anchor(s) "
+                        "signed by the trusted anchor key."
+                    )
+                else:
+                    print(
+                        "ANCHOR SIGNATURE CHECK FAILED: see per-anchor reasons."
+                    )
         elif args.command == "publish":
             manifests = None
             public_key = None

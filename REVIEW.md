@@ -42,7 +42,10 @@ The review succeeds if it finds — or rules out — any of these:
 ## Out of scope
 
 - Mainnet. Everything chain-related is Teratestnet play money.
-- Compact SPV proofs / BEEF — not built; no TTN source serves them.
+- Compact SPV proofs / BEEF envelope — BUMP (BRC-74) parse/verify/build
+  + `anchor-chain-verify --bump-file` are implemented; the BEEF envelope
+  (BUMP array + tx array) is not parsed, and no public source serves
+  BUMPs, so proofs are operator-supplied.
 - Performance, UX, and the separate BRC-166 paid-endpoint harness.
 - Whether BSV is the "right" chain. The review is about this code's
   correctness, not the choice of backend.

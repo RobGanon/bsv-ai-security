@@ -245,10 +245,14 @@ class BlockFetcher(Protocol):
 
     def fetch_tx_full(self, txid: str) -> dict:
         """Return the full WoC ``/tx/hash`` JSON body for ``txid``."""
-        return self._get_json(f"/tx/hash/{txid}")
+        ...
 
     def fetch_block(self, height: int) -> tuple[BlockHeader, list[str]]:
         """Return (header, txid list) for a block height."""
+        ...
+
+    def fetch_header(self, height: int) -> BlockHeader:
+        """Return the header for a block height (no tx list)."""
         ...
 
 
@@ -268,6 +272,34 @@ def _urllib_get(method: str, url: str) -> tuple[int, bytes]:
         return exc.code, exc.read()
     except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
         raise ConnectionError(f"request to {url} failed: {exc}") from exc
+
+
+def _header_from_block_json(data: dict, height: int) -> BlockHeader:
+    """Parse a WoC ``/block/height`` body into a :class:`BlockHeader`."""
+    try:
+        return BlockHeader(
+            version=int(data["version"]),
+            prev_hash=str(data["previousblockhash"]),
+            merkle_root=str(data["merkleroot"]),
+            time=int(data["time"]),
+            bits=int(data["bits"], 16) if isinstance(data["bits"], str) else int(data["bits"]),
+            nonce=int(data["nonce"]),
+            height=int(data["height"]),
+            hash=str(data["hash"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SPVUnavailable(
+            f"WoC block {height} body is missing required fields"
+        ) from exc
+
+
+def _txids_from_block_json(data: dict, height: int) -> list[str]:
+    try:
+        return [str(t) for t in data["tx"]]
+    except (KeyError, TypeError) as exc:
+        raise SPVUnavailable(
+            f"WoC block {height} body is missing required fields"
+        ) from exc
 
 
 class WoCBlockFetcher:
@@ -309,23 +341,16 @@ class WoCBlockFetcher:
 
     def fetch_block(self, height: int) -> tuple[BlockHeader, list[str]]:
         data = self._get_json(f"/block/height/{height}")
-        try:
-            header = BlockHeader(
-                version=int(data["version"]),
-                prev_hash=str(data["previousblockhash"]),
-                merkle_root=str(data["merkleroot"]),
-                time=int(data["time"]),
-                bits=int(data["bits"], 16) if isinstance(data["bits"], str) else int(data["bits"]),
-                nonce=int(data["nonce"]),
-                height=int(data["height"]),
-                hash=str(data["hash"]),
-            )
-            txids = [str(t) for t in data["tx"]]
-        except (KeyError, TypeError, ValueError) as exc:
-            raise SPVUnavailable(
-                f"WoC block {height} body is missing required fields"
-            ) from exc
-        return header, txids
+        return (
+            _header_from_block_json(data, height),
+            _txids_from_block_json(data, height),
+        )
+
+    def fetch_header(self, height: int) -> BlockHeader:
+        """Return the header for a block height (no tx list)."""
+        return _header_from_block_json(
+            self._get_json(f"/block/height/{height}"), height
+        )
 
 
 class SPVVerifier:
@@ -445,3 +470,166 @@ def apply_chain_inclusion(result: dict, verifier: SPVVerifier) -> dict:
         "anchors": merged,
         "chain_inclusion_verified": all_verified,
     }
+
+
+# ---------------------------------------------------------------------------
+# Header-chain sync: walk from a tip block back to a pinned checkpoint
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class HeaderChainResult:
+    verified: bool
+    txid: str
+    tip_height: int | None = None
+    checkpoint_height: int | None = None
+    headers_checked: int = 0
+    reason: str = ""
+
+
+# Default walk cap: one difficulty period (2016 blocks). An operator
+# pinning a checkpoint farther back than this fails closed with a
+# clear reason instead of walking the whole chain on every verify.
+DEFAULT_MAX_HEADERS = 2016
+
+
+def verify_chain_to_checkpoint(
+    fetcher: BlockFetcher,
+    *,
+    tip_height: int,
+    tip_hash: str,
+    checkpoint_hash: str,
+    checkpoint_height: int,
+    max_headers: int = DEFAULT_MAX_HEADERS,
+) -> tuple[bool, int, str]:
+    """Walk headers from ``tip_height`` back to ``checkpoint_height``.
+
+    Every fetched header must hash to the hash the walk expects
+    (the tip hash for the first header, then each header's
+    ``prev_hash``), and must pass its own proof-of-work. At the
+    checkpoint height the header's hash must equal ``checkpoint_hash``
+    — the operator-pinned trust anchor, distributed out-of-band like
+    the genesis txid.
+
+    Returns (verified, headers_checked, reason). Fail-closed: any
+    fetch error, hash mismatch, PoW failure, or walk overrun returns
+    False with a reason, never raises.
+    """
+    if not isinstance(tip_height, int) or not isinstance(checkpoint_height, int):
+        return False, 0, "tip/checkpoint heights must be integers"
+    if checkpoint_height < 0 or tip_height < 0:
+        return False, 0, "heights must be non-negative"
+    if checkpoint_height > tip_height:
+        return False, 0, "checkpoint is above the tip block"
+    walk_len = tip_height - checkpoint_height + 1
+    if walk_len > max_headers:
+        return (
+            False,
+            0,
+            f"walk of {walk_len} headers exceeds cap {max_headers}: "
+            "pin a more recent checkpoint",
+        )
+    expected_hash = tip_hash.lower()
+    checked = 0
+    try:
+        for height in range(tip_height, checkpoint_height - 1, -1):
+            header = fetcher.fetch_header(height)
+            # The declared hash must equal the hash recomputed from the
+            # header bytes AND the hash the walk expects: a source that
+            # serves tampered fields with a copied hash is caught here,
+            # not left to proof-of-work luck.
+            if header_hash(header.to_bytes()) != expected_hash:
+                return (
+                    False,
+                    checked,
+                    f"header hash mismatch at height {height}",
+                )
+            if (header.hash or "").lower() != expected_hash:
+                return (
+                    False,
+                    checked,
+                    f"header hash mismatch at height {height}",
+                )
+            if not verify_pow(header.to_bytes(), header.bits):
+                return (
+                    False,
+                    checked,
+                    f"proof-of-work failed at height {height}",
+                )
+            checked += 1
+            if height == checkpoint_height:
+                if (header.hash or "").lower() != checkpoint_hash.lower():
+                    return (
+                        False,
+                        checked,
+                        "checkpoint hash mismatch at height "
+                        f"{checkpoint_height}",
+                    )
+                return (
+                    True,
+                    checked,
+                    f"chain verified: {checked} header(s) back to "
+                    f"checkpoint {checkpoint_height}",
+                )
+            expected_hash = header.prev_hash.lower()
+    except SPVError as exc:
+        return False, checked, f"fetch failed: {exc}"
+    except (ValueError, TypeError, AttributeError) as exc:
+        return False, checked, f"malformed header data: {exc}"
+    return False, checked, "walk ended without reaching the checkpoint"
+
+
+class HeaderChainVerifier:
+    """Verify an anchor tx's block chains back to a pinned checkpoint.
+
+    Fail-closed throughout: an unconfirmed tx, a hash/PoW failure, a
+    checkpoint mismatch, or a fetch error all return ``verified=False``
+    with a reason.
+    """
+
+    def __init__(
+        self,
+        fetcher: BlockFetcher,
+        *,
+        checkpoint_hash: str,
+        checkpoint_height: int,
+        max_headers: int = DEFAULT_MAX_HEADERS,
+    ) -> None:
+        self.fetcher = fetcher
+        self.checkpoint_hash = checkpoint_hash
+        self.checkpoint_height = checkpoint_height
+        self.max_headers = max_headers
+
+    def verify_chain_for_tx(self, txid: str) -> HeaderChainResult:
+        txid = txid.lower()
+        try:
+            tx = self.fetcher.fetch_tx(txid)
+        except SPVError as exc:
+            return HeaderChainResult(
+                False, txid,
+                checkpoint_height=self.checkpoint_height,
+                reason=f"fetch failed: {exc}",
+            )
+        height = tx.get("blockheight")
+        blockhash = tx.get("blockhash")
+        if height is None or blockhash is None:
+            return HeaderChainResult(
+                False, txid,
+                checkpoint_height=self.checkpoint_height,
+                reason="unconfirmed: no blockheight on record",
+            )
+        verified, checked, reason = verify_chain_to_checkpoint(
+            self.fetcher,
+            tip_height=int(height),
+            tip_hash=str(blockhash),
+            checkpoint_hash=self.checkpoint_hash,
+            checkpoint_height=self.checkpoint_height,
+            max_headers=self.max_headers,
+        )
+        return HeaderChainResult(
+            verified, txid,
+            tip_height=int(height),
+            checkpoint_height=self.checkpoint_height,
+            headers_checked=checked,
+            reason=reason,
+        )

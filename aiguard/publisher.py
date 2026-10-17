@@ -2,11 +2,13 @@
 
 The publisher turns the anchoring design (``docs/anchoring-protocol.md``)
 into running code, with one hard boundary: **broadcast is disabled by
-default and no real broadcaster exists in this build**. By default the
-publisher *prepares* anchor payloads and records them locally. Nothing
-is signed, spent, or sent to any network unless the operator explicitly
-enables broadcast *and* supplies a broadcaster (see :class:`NullBroadcaster`
-and :func:`Publisher.__init__`).
+default**. By default the publisher *prepares* anchor payloads and
+records them locally. Nothing is signed, spent, or sent to any network
+unless the operator explicitly enables broadcast *and* supplies a
+broadcaster (see :class:`NullBroadcaster` and :func:`Publisher.__init__`).
+The real broadcaster implementation is
+:class:`aiguard.broadcast.WoCBroadcaster` (build + sign + send via
+WhatsOnChain); the CLI wires it up under ``publish --broadcast``.
 
 What the publisher does
 -----------------------
@@ -57,9 +59,13 @@ Explicitly out of scope (documented, not faked)
   operation, so the publisher can never build a new anchor on top of
   a broken chain. On-chain confirmation of those anchors is still
   unverified (see above).
-- Transaction construction / signing / real broadcast: no BSV
-  transaction is built here. Broadcast, when enabled, goes through a
-  caller-supplied broadcaster object.
+- Transaction construction / signing / real broadcast: implemented in
+  :mod:`aiguard.bsv` (stdlib-only secp256k1 + tx build/sign) and
+  :mod:`aiguard.broadcast` (:class:`WoCBroadcaster` via WhatsOnChain).
+  First live anchor on Teratestnet 2026-10-16 (txid
+  ``4111b7cf…2bf029``). The ``publish --broadcast`` CLI path wires it up;
+  broadcast stays opt-in and fail-closed without ``ANCHOR_WIF`` +
+  funding.
 """
 from __future__ import annotations
 

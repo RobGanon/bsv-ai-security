@@ -256,7 +256,8 @@ pipeline. Details: [`docs/pilot-brief.md`](docs/pilot-brief.md).
 
 1. Independent review of Phase 1 (this request).
 2. Implement Phase 2 payload creation + local verification (in progress).
-3. Implement publishing interfaces with testnet-only guards.
+3. Implement publishing interfaces with explicit network selection
+   (testnet default; mainnet behind separate confirmation).
 4. Independent SPV / header-chain verification.
 5. Migrate manifest signing from Ed25519 to secp256k1 (recommended before
    production).

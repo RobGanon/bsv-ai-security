@@ -57,7 +57,11 @@ def base58_encode(data: bytes) -> str:
         n, rem = divmod(n, 58)
         out = _B58_ALPHABET[rem] + out
     pad = len(data) - len(data.lstrip(b"\x00"))
-    return "0" * pad + (out or "1")
+    if not out:
+        # All-zero (or empty) input: exactly the leading-zero padding,
+        # with "1" for the empty case.
+        return "1" * pad if pad else "1"
+    return "1" * pad + out
 
 
 def base58_decode(text: str) -> bytes:
@@ -232,6 +236,25 @@ def verify_sig(pubkey: bytes, digest: bytes, der_sig: bytes) -> bool:
 
 # --- keys ---------------------------------------------------------------------
 
+#: Networks the signing code supports. "testnet" is always the default;
+#: mainnet must be selected explicitly, and a key's version byte must
+#: match the selected network (a mainnet WIF is refused for testnet use
+#: and vice versa) so a key can never silently cross networks.
+NETWORKS = ("testnet", "mainnet")
+_WIF_VERSION = {"testnet": 0xEF, "mainnet": 0x80}
+_ADDRESS_VERSION = {"testnet": 0x6F, "mainnet": 0x00}
+
+
+def validate_network(network: str) -> str:
+    """Return a normalized network name, or raise for an unknown one."""
+    if not isinstance(network, str):
+        raise ValueError(f"network must be 'testnet' or 'mainnet', got {network!r}")
+    normalized = network.strip().lower()
+    if normalized not in _WIF_VERSION:
+        raise ValueError(f"network must be 'testnet' or 'mainnet', got {network!r}")
+    return normalized
+
+
 class PrivKey:
     """A secp256k1 private key. Never logged; never serialized except via WIF."""
 
@@ -247,14 +270,16 @@ class PrivKey:
         return cls(int.from_bytes(data, "big"))
 
     @classmethod
-    def from_wif(cls, wif: str) -> "PrivKey":
+    def from_wif(cls, wif: str, network: str = "testnet") -> "PrivKey":
+        network = validate_network(network)
         version, payload = base58check_decode(wif)
-        if version == 0x80:
+        expected = _WIF_VERSION[network]
+        if version != expected:
             raise ValueError(
-                "refusing mainnet WIF: this module signs testnet anchors only"
+                f"WIF version 0x{version:02x} does not match network "
+                f"{network!r} (expected 0x{expected:02x}); refusing "
+                "cross-network key use"
             )
-        if version != 0xEF:
-            raise ValueError("WIF must be a testnet key (version 0xef)")
         if len(payload) != 33 or payload[-1] != 0x01:
             raise ValueError("WIF must encode a compressed private key")
         return cls(int.from_bytes(payload[:32], "big"))
@@ -265,15 +290,15 @@ class PrivKey:
     def pubkey_compressed(self) -> bytes:
         return pubkey_from_privkey(self.secret)
 
-    def address(self, testnet: bool = True) -> str:
-        if not testnet:
-            raise ValueError("this module derives testnet addresses only")
-        return base58check_encode(0x6F, hash160(self.pubkey_compressed()))
+    def address(self, network: str = "testnet") -> str:
+        network = validate_network(network)
+        return base58check_encode(
+            _ADDRESS_VERSION[network], hash160(self.pubkey_compressed())
+        )
 
-    def wif(self, testnet: bool = True) -> str:
-        if not testnet:
-            raise ValueError("this module encodes testnet WIF only")
-        return base58check_encode(0xEF, self.to_bytes() + b"\x01")
+    def wif(self, network: str = "testnet") -> str:
+        network = validate_network(network)
+        return base58check_encode(_WIF_VERSION[network], self.to_bytes() + b"\x01")
 
 
 # --- transactions ---------------------------------------------------------------
@@ -364,7 +389,7 @@ class Tx:
     @staticmethod
     def build_anchor(
         *, funding: "FundingUTXO", payload: bytes, change_address: str,
-        fee_sats: int, signer: "Signer",
+        fee_sats: int, signer: "Signer", network: str = "testnet",
     ) -> "Tx":
         """Build + sign a 1-input anchor tx (OP_RETURN payload + change).
 
@@ -373,6 +398,8 @@ class Tx:
         must match the funding output's P2PKH script (checked by the
         caller-side sighash, not re-derived here — the network rejects
         a mismatched signature, and the broadcaster surfaces that).
+        ``network`` selects the change-address version; it must match
+        the address given.
         """
         from .broadcast import BroadcastError  # local import: avoid a cycle
 
@@ -387,7 +414,12 @@ class Tx:
             )
         outputs = [TxOut(0, build_op_return_script(payload))]
         if change >= DUST_SATS:
-            outputs.append(TxOut(change, build_p2pkh_script_for_address(change_address)))
+            outputs.append(
+                TxOut(
+                    change,
+                    build_p2pkh_script_for_address(change_address, network=network),
+                )
+            )
         # Dust change is absorbed into the fee (no change output).
         tx = Tx(
             inputs=[TxIn(funding.txid, funding.vout)],
@@ -487,11 +519,19 @@ def build_p2pkh_script(pubkey: bytes) -> bytes:
     return b"\x76\xa9\x14" + hash160(pubkey) + b"\x88\xac"
 
 
-def build_p2pkh_script_for_address(address: str) -> bytes:
-    """P2PKH locking script for a testnet base58check address."""
+def build_p2pkh_script_for_address(address: str, network: str = "testnet") -> bytes:
+    """P2PKH locking script for a base58check address on the given network.
+
+    The address version byte must match the network, so a testnet
+    address can never be baked into a mainnet transaction or vice versa.
+    """
+    network = validate_network(network)
     version, payload = base58check_decode(address)
-    if version != 0x6F or len(payload) != 20:
-        raise ValueError("address must be a testnet P2PKH address")
+    if version != _ADDRESS_VERSION[network] or len(payload) != 20:
+        raise ValueError(
+            f"address version 0x{version:02x} does not match network "
+            f"{network!r}; refusing cross-network address use"
+        )
     return b"\x76\xa9\x14" + payload + b"\x88\xac"
 
 

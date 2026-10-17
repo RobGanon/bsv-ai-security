@@ -32,12 +32,29 @@ def test_provider_rejects_credentials_embedded_in_url():
         })
 
 
-def test_mainnet_is_rejected():
-    with pytest.raises(PublishingConfigurationError, match="mainnet publishing is disabled"):
+def test_mainnet_requires_explicit_confirmation():
+    # Mainnet without the confirmation value is refused: it must never
+    # be enabled by a single variable or by accident.
+    with pytest.raises(PublishingConfigurationError, match="confirm"):
         load_publishing_config({
             "AIGUARD_BSV_NETWORK": "mainnet",
             "AIGUARD_BSV_PROVIDER_URL": "https://provider.example/api",
         })
+    with pytest.raises(PublishingConfigurationError, match="confirm"):
+        load_publishing_config({
+            "AIGUARD_BSV_NETWORK": "mainnet",
+            "AIGUARD_BSV_MAINNET_CONFIRM": "yes",
+            "AIGUARD_BSV_PROVIDER_URL": "https://provider.example/api",
+        })
+
+
+def test_mainnet_with_confirmation_loads():
+    config = load_publishing_config({
+        "AIGUARD_BSV_NETWORK": "mainnet",
+        "AIGUARD_BSV_MAINNET_CONFIRM": "I_UNDERSTAND_MAINNET_RISK",
+        "AIGUARD_BSV_PROVIDER_URL": "https://provider.example/api",
+    })
+    assert config.network == "mainnet"
 
 
 def test_unknown_backend_is_rejected():

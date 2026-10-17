@@ -81,18 +81,21 @@ PAYLOAD = encode_anchor_payload(
 def test_privkey_vector_pubkey_address_wif():
     key = PrivKey.from_bytes(SECRET_11)
     assert key.pubkey_compressed().hex() == VECTOR_PUBKEY
-    assert key.address(testnet=True) == VECTOR_ADDRESS
-    assert key.wif(testnet=True) == VECTOR_WIF
+    assert key.address(network="testnet") == VECTOR_ADDRESS
+    assert key.wif(network="testnet") == VECTOR_WIF
 
 
-def test_wif_round_trip_and_mainnet_refusal():
+def test_wif_round_trip_and_cross_network_refusal():
     key = PrivKey.from_wif(VECTOR_WIF)
     assert key.to_bytes() == SECRET_11
-    assert key.address(testnet=True) == VECTOR_ADDRESS
-    # A mainnet WIF (0x80 version) must never be accepted for testnet use.
-    mainnet_wif = "5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ"
+    assert key.address(network="testnet") == VECTOR_ADDRESS
+    # A mainnet WIF (0x80 version) must never be accepted for testnet use,
+    # and a testnet WIF must never be accepted for mainnet use.
+    mainnet_wif = PrivKey.from_bytes(SECRET_11).wif(network="mainnet")
     with pytest.raises(ValueError):
-        PrivKey.from_wif(mainnet_wif)
+        PrivKey.from_wif(mainnet_wif, network="testnet")
+    with pytest.raises(ValueError):
+        PrivKey.from_wif(VECTOR_WIF, network="mainnet")
 
 
 def test_privkey_rejects_zero_and_overflow():
@@ -156,7 +159,7 @@ def test_build_and_parse_anchor_tx_round_trip():
     tx = Tx.build_anchor(
         funding=funding,
         payload=PAYLOAD,
-        change_address=key.address(testnet=True),
+        change_address=key.address(network="testnet"),
         fee_sats=500,
         signer=WIFSigner.from_wif(VECTOR_WIF),
     )
@@ -193,7 +196,7 @@ def test_build_anchor_tx_refuses_dust_change_and_insufficient_funds():
     with pytest.raises(BroadcastError):
         Tx.build_anchor(
             funding=tiny, payload=PAYLOAD,
-            change_address=key.address(testnet=True),
+            change_address=key.address(network="testnet"),
             fee_sats=500, signer=signer,
         )
 

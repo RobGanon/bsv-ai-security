@@ -15,7 +15,13 @@ from .anchor import (
     verify_journal_against_anchor,
     verify_journal_against_anchor_chain,
 )
-from .broadcast import FundingUTXO, WIFSigner, WoCBroadcaster, WOC_TTN_BASE
+from .broadcast import (
+    FundingUTXO,
+    WIFSigner,
+    WoCBroadcaster,
+    WOC_MAINNET_BASE,
+    WOC_TTN_BASE,
+)
 from .beef import (
     BEEF_MAGIC,
     BeefVerifier,
@@ -231,11 +237,21 @@ def main(argv=None):
                    help="cap loop iterations (test / operator safety)")
     p.add_argument("--broadcast", action="store_true",
                    help="opt-in broadcast: build, sign, and send the anchor "
-                   "transaction via WoC. Requires ANCHOR_WIF (testnet WIF) "
-                   "in the environment plus --funding-txid/--funding-vout.")
-    p.add_argument("--woc-base", default=WOC_TTN_BASE,
+                   "transaction via WoC. Requires ANCHOR_WIF (WIF for the "
+                   "selected --network) in the environment plus "
+                   "--funding-txid/--funding-vout. Mainnet also requires "
+                   "--confirm-mainnet.")
+    p.add_argument("--network", choices=["testnet", "mainnet"], default="testnet",
+                   help="network to anchor on (default: testnet). The "
+                   "ANCHOR_WIF version byte must match this network.")
+    p.add_argument("--confirm-mainnet", action="store_true",
+                   help="required with --network mainnet --broadcast: "
+                   "mainnet spends real funds and must never happen "
+                   "by default or accident")
+    p.add_argument("--woc-base", default=None,
                    help="WhatsOnChain base URL for broadcast + prev-tx fetch "
-                   "(default: Teratestnet)")
+                   "(default: Teratestnet for testnet, WoC mainnet for "
+                   "mainnet; an explicit --woc-base overrides)")
     p.add_argument("--funding-txid", default=None,
                    help="txid of the funding UTXO to spend (required with --broadcast)")
     p.add_argument("--funding-vout", type=int, default=0,
@@ -543,9 +559,19 @@ def main(argv=None):
                         "unspent index is broken, so discovery by address is "
                         "unavailable)"
                     )
+                if args.network == "mainnet" and not args.confirm_mainnet:
+                    raise PublisherError(
+                        "mainnet broadcast requires --confirm-mainnet: "
+                        "mainnet spends real funds and must never happen "
+                        "by default or accident"
+                    )
+                woc_base = args.woc_base or (
+                    WOC_MAINNET_BASE if args.network == "mainnet" else WOC_TTN_BASE
+                )
                 broadcaster = WoCBroadcaster(
-                    base_url=args.woc_base,
-                    signer=WIFSigner.from_wif(anchor_wif),
+                    base_url=woc_base,
+                    network=args.network,
+                    signer=WIFSigner.from_wif(anchor_wif, network=args.network),
                     fee_sats=args.fee_sats,
                     funding=FundingUTXO(
                         txid=args.funding_txid,

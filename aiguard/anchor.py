@@ -853,3 +853,74 @@ def apply_anchor_signatures(result: dict, verifier: AnchorSignatureVerifier) -> 
         "anchors": merged,
         "anchor_signatures_verified": all_verified,
     }
+
+
+# ---------------------------------------------------------------------------
+# Header-chain application (protocol §6: chain back to a pinned checkpoint)
+# ---------------------------------------------------------------------------
+
+
+def apply_header_chain(result: dict, verifier: Any) -> dict:
+    """Attach per-anchor header-chain results to a chain-verify result.
+
+    ``verifier`` must provide ``verify_chain_for_tx(txid)`` returning
+    an object with ``verified``, ``tip_height``,
+    ``checkpoint_height``, ``headers_checked`` and ``reason``
+    (see ``aiguard.spv.HeaderChainVerifier``).
+
+    Handles both shapes: ``verify_anchor_chain`` (``result["anchors"]``)
+    and ``verify_journal_against_anchor_chain`` (``result["chain"]``
+    plus per-anchor journal entries). Returns a new dict; the input
+    is not mutated. Top-level ``header_chain_verified`` is True only
+    when every anchor's block chains back to the checkpoint.
+    """
+    if "chain" in result:
+        chain = dict(result["chain"])
+        summaries = chain.get("anchors", [])
+        merged = []
+        all_verified = True
+        for summary in summaries:
+            chain_result = verifier.verify_chain_for_tx(summary["txid"])
+            all_verified = all_verified and chain_result.verified
+            merged.append(
+                {
+                    **summary,
+                    "header_chain_verified": chain_result.verified,
+                    "header_chain": {
+                        "verified": chain_result.verified,
+                        "tip_height": chain_result.tip_height,
+                        "checkpoint_height": chain_result.checkpoint_height,
+                        "headers_checked": chain_result.headers_checked,
+                        "reason": chain_result.reason,
+                    },
+                }
+            )
+        chain["anchors"] = merged
+        return {
+            **result,
+            "chain": chain,
+            "header_chain_verified": all_verified,
+        }
+    merged = []
+    all_verified = True
+    for summary in result.get("anchors", []):
+        chain_result = verifier.verify_chain_for_tx(summary["txid"])
+        all_verified = all_verified and chain_result.verified
+        merged.append(
+            {
+                **summary,
+                "header_chain_verified": chain_result.verified,
+                "header_chain": {
+                    "verified": chain_result.verified,
+                    "tip_height": chain_result.tip_height,
+                    "checkpoint_height": chain_result.checkpoint_height,
+                    "headers_checked": chain_result.headers_checked,
+                    "reason": chain_result.reason,
+                },
+            }
+        )
+    return {
+        **result,
+        "anchors": merged,
+        "header_chain_verified": all_verified,
+    }

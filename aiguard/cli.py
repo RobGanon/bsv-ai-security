@@ -9,13 +9,19 @@ from pathlib import Path
 from .anchor import (
     AnchorSignatureVerifier,
     apply_anchor_signatures,
+    apply_header_chain,
     create_anchor_payload,
     verify_anchor_chain,
     verify_journal_against_anchor,
     verify_journal_against_anchor_chain,
 )
 from .broadcast import FundingUTXO, WIFSigner, WoCBroadcaster, WOC_TTN_BASE
-from .spv import SPVVerifier, WoCBlockFetcher, apply_chain_inclusion
+from .spv import (
+    HeaderChainVerifier,
+    SPVVerifier,
+    WoCBlockFetcher,
+    apply_chain_inclusion,
+)
 from .publisher import (
     Publisher,
     PublisherConfig,
@@ -151,6 +157,17 @@ def main(argv=None):
     p.add_argument("--anchor-pubkey", default=None,
                    help="trusted anchor compressed pubkey hex (66 chars, "
                    "02/03 prefix); required with --anchor-sig")
+    p.add_argument("--header-chain", action="store_true",
+                   help="also verify each anchor tx's block chains back "
+                   "to a pinned checkpoint header (requires "
+                   "--checkpoint-hash + --checkpoint-height)")
+    p.add_argument("--checkpoint-hash", default=None,
+                   help="trusted checkpoint block hash (64 hex chars), "
+                   "pinned out-of-band like the genesis txid; required "
+                   "with --header-chain")
+    p.add_argument("--checkpoint-height", type=int, default=None,
+                   help="height of the trusted checkpoint header; "
+                   "required with --header-chain")
     p.add_argument("--woc-base", default=WOC_TTN_BASE,
                    help="WhatsOnChain base URL for --spv / --anchor-sig "
                    "chain data (default: Teratestnet)")
@@ -354,6 +371,27 @@ def main(argv=None):
                         WoCBlockFetcher(base_url=args.woc_base), pubkey
                     ),
                 )
+            if args.header_chain:
+                checkpoint_hash = args.checkpoint_hash or ""
+                if (
+                    len(checkpoint_hash) != 64
+                    or not all(c in "0123456789abcdefABCDEF" for c in checkpoint_hash)
+                    or args.checkpoint_height is None
+                    or args.checkpoint_height < 0
+                ):
+                    raise VerificationError(
+                        "--header-chain requires --checkpoint-hash as "
+                        "64-char block hash hex and --checkpoint-height "
+                        "as a non-negative integer"
+                    )
+                result = apply_header_chain(
+                    result,
+                    HeaderChainVerifier(
+                        WoCBlockFetcher(base_url=args.woc_base),
+                        checkpoint_hash=checkpoint_hash,
+                        checkpoint_height=args.checkpoint_height,
+                    ),
+                )
             print(json.dumps(result, indent=2, sort_keys=True))
             if args.spv and result.get("chain_inclusion_verified"):
                 count = result.get("anchor_count") or (
@@ -377,6 +415,19 @@ def main(argv=None):
                 else:
                     print(
                         "ANCHOR SIGNATURE CHECK FAILED: see per-anchor reasons."
+                    )
+            if args.header_chain:
+                count = result.get("anchor_count") or (
+                    result.get("chain", {}).get("anchor_count")
+                )
+                if result.get("header_chain_verified"):
+                    print(
+                        f"HEADER CHAIN VERIFIED: {count} anchor(s) chained "
+                        "back to the pinned checkpoint."
+                    )
+                else:
+                    print(
+                        "HEADER CHAIN CHECK FAILED: see per-anchor reasons."
                     )
         elif args.command == "publish":
             manifests = None

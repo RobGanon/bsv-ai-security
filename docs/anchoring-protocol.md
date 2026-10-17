@@ -134,8 +134,12 @@ compact Merkle-proof endpoint, so the verifier recomputes the Merkle
 root from the claimed block's tx list and checks the header hash +
 proof-of-work — stronger evidence than a served proof, heavier on
 bandwidth (fine for Teratestnet's tiny blocks; compact proofs are the
-mainnet path). Header-chain sync back to a trusted checkpoint is still
-a follow-up; the verifier currently checks one block at a time. The
+mainnet path). Header-chain sync back to a trusted checkpoint is
+implemented in `aiguard/spv.py` (`anchor-chain-verify --header-chain
+--checkpoint-hash --checkpoint-height`): the verifier walks headers
+from each anchor's block back to the operator-pinned checkpoint,
+checking every header's hash + proof-of-work; walks are capped at
+2016 headers and fail closed past the cap.
 anchor-input-signature check (step 1, second bullet) is implemented in
 `aiguard/anchor.py` (`anchor-chain-verify --anchor-sig --anchor-pubkey`):
 the anchor tx's single input must parse as P2PKH with sighash

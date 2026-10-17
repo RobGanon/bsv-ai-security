@@ -101,8 +101,6 @@ document exists.
 
 ## Known limitations (please don't re-report these as findings)
 
-- Publisher load-modify-save can lose updates; there is no
-  flow-level lock yet (deferred to pilot hardening).
 - Interrupted journal writes fail closed; there is no automated
   repair path.
 - The anchor key sits on the same machine as the publisher, which

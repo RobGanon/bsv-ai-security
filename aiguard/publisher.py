@@ -23,7 +23,10 @@ What the publisher does
   status) in a JSON record store, so a later run resumes from the last
   anchor instead of re-anchoring the same range. Two anchors never
   silently cover the same range: a checkpoint for a head that is already
-  anchored returns the existing record.
+  anchored returns the existing record. All store mutations run under
+  an inter-process lock (``<store>.lock``, flock, reentrant) across the
+  whole load-modify-save flow, so concurrent publishers cannot lose
+  updates or emit duplicate anchors for one head.
 
 Chaining model (honest about what is / is not on-chain)
 ------------------------------------------------------
@@ -69,9 +72,13 @@ Explicitly out of scope (documented, not faked)
 """
 from __future__ import annotations
 
+import contextlib
+import functools
 import json
 import os
 import secrets
+import stat
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -94,8 +101,21 @@ RECORD_STATUSES = ("pending", "broadcast", "superseded")
 # matching aiguard.core.
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
+try:
+    import fcntl
+except ImportError:  # non-POSIX platforms have no flock
+    fcntl = None  # type: ignore[assignment]
+
 # Sensible default: anchor at least hourly even with no new release.
 DEFAULT_CHECKPOINT_INTERVAL_SECONDS = 3600
+
+# Flow-level lock for the record store: one lock file next to the store,
+# ``<store>.lock``. Holders are keyed by (store path, thread) so the lock
+# is reentrant for run_once -> build_checkpoint nesting and for two
+# Publisher instances in one thread, while threads in one process and
+# separate processes serialize on flock.
+_STORE_LOCK_GUARD = threading.Lock()
+_STORE_LOCK_HOLDERS: dict[tuple[str, int], list] = {}
 
 
 class PublisherError(VerificationError):
@@ -119,6 +139,8 @@ class PublisherConfig:
     so the operator drops newly signed manifest envelopes into this
     directory and the publisher picks them up. ``manifests`` is a fixed
     snapshot taken at construction; ``manifests_dir`` is the live source.
+    ``lock_timeout_seconds`` bounds how long a publisher waits for the
+    record-store lock before failing closed.
     """
 
     journal: Path
@@ -129,6 +151,7 @@ class PublisherConfig:
     manifests: tuple[dict, ...] = ()
     public_key: Any = None
     manifests_dir: Path | None = None
+    lock_timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.genesis_txid, str) or not HEX_64.fullmatch(
@@ -141,6 +164,12 @@ class PublisherConfig:
             or self.checkpoint_interval_seconds <= 0
         ):
             raise PublisherError("checkpoint_interval_seconds must be a positive integer")
+        if (
+            not isinstance(self.lock_timeout_seconds, (int, float))
+            or isinstance(self.lock_timeout_seconds, bool)
+            or self.lock_timeout_seconds <= 0
+        ):
+            raise PublisherError("lock_timeout_seconds must be a positive number")
 
 
 class NullBroadcaster:
@@ -205,6 +234,27 @@ def _validate_record(record: Any) -> dict:
     return dict(record)
 
 
+def _locked(method):
+    """Serialize a Publisher operation across the record-store flow.
+
+    Holds the inter-process store lock for the whole operation —
+    load, decide, save, and (when enabled) broadcast — so two
+    publishers can never interleave load-modify-save and lose updates
+    or emit duplicate anchors for one head. Reentrant for nested calls
+    (``run_once`` -> ``build_checkpoint``) via the holders table. The
+    lock is held across broadcast deliberately: anchoring is a
+    serialized operation, and a second publisher must not build on a
+    store snapshot taken before the first one's broadcast lands.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._locked_store():
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class Publisher:
     """Build and record anchor checkpoints for a journal.
 
@@ -228,6 +278,102 @@ class Publisher:
             )
         self.broadcaster = broadcaster
         self._clock = clock or time.time
+
+    # -- record-store lock ----------------------------------------------
+
+    @contextlib.contextmanager
+    def _locked_store(self):
+        """Hold the inter-process record-store lock for one operation.
+
+        The lock file is ``<store>.lock`` next to the store. Same-thread
+        re-entry (``run_once`` -> ``build_checkpoint``, or two Publisher
+        instances in one thread) just deepens a counter; threads and
+        processes serialize on flock. The fd is closed on release, so a
+        dead holder's lock vanishes with it — a stale lock file on disk
+        is inert. Fail-closed throughout: no fcntl, a symlink at the
+        lock path, a non-regular lock file, or a timeout all raise
+        :class:`PublisherError` instead of proceeding unsynchronized.
+        """
+        if fcntl is None:
+            raise PublisherError(
+                "anchor record store locking requires fcntl (POSIX); "
+                "refusing to run without mutual exclusion"
+            )
+        key = (
+            os.path.abspath(os.fspath(self.config.anchor_record)),
+            threading.get_ident(),
+        )
+        with _STORE_LOCK_GUARD:
+            holder = _STORE_LOCK_HOLDERS.get(key)
+            if holder is not None:
+                holder[0] += 1
+                try:
+                    yield
+                finally:
+                    holder[0] -= 1
+                return
+        fd = self._acquire_store_lock()
+        with _STORE_LOCK_GUARD:
+            _STORE_LOCK_HOLDERS[key] = [1, fd]
+        try:
+            yield
+        finally:
+            with _STORE_LOCK_GUARD:
+                _STORE_LOCK_HOLDERS.pop(key, None)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(fd)
+
+    def _acquire_store_lock(self) -> int:
+        """Open + flock the lock file; return the fd on success.
+
+        Polls ``LOCK_EX | LOCK_NB`` until ``lock_timeout_seconds`` so a
+        stuck holder fails closed instead of hanging the caller
+        forever. O_NOFOLLOW refuses a trailing symlink at open time;
+        the fd is re-checked as regular after the lock lands.
+        """
+        assert fcntl is not None
+        lock_path = self.config.anchor_record.parent / (
+            self.config.anchor_record.name + ".lock"
+        )
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(
+                lock_path, os.O_RDWR | os.O_CREAT | _O_NOFOLLOW, 0o644
+            )
+        except OSError as exc:
+            raise PublisherError(
+                "anchor record store lock file must be a regular "
+                "non-symlink file"
+            ) from exc
+        try:
+            deadline = time.monotonic() + self.config.lock_timeout_seconds
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise PublisherError(
+                            "timed out waiting for the anchor record "
+                            "store lock; another publisher may be holding it"
+                        )
+                    time.sleep(0.05)
+                except OSError as exc:
+                    raise PublisherError(
+                        f"could not lock the anchor record store: {exc}"
+                    ) from exc
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise PublisherError(
+                    "anchor record store lock file must be a regular "
+                    "non-symlink file"
+                )
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
 
     # -- record store -------------------------------------------------
 
@@ -388,6 +534,7 @@ class Publisher:
         self._save_store(store)
         return dict(record)
 
+    @_locked
     def build_checkpoint(self, reason: str, *, raise_on_broadcast_failure: bool = True) -> dict:
         """Build (and, if enabled, broadcast) the anchor for the current head.
 
@@ -497,6 +644,7 @@ class Publisher:
 
     # -- scheduling ----------------------------------------------------
 
+    @_locked
     def run_once(self, now: float | None = None) -> dict:
         """One scheduler tick.
 

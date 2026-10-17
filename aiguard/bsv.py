@@ -289,9 +289,11 @@ def _varint(n: int) -> bytes:
 
 
 class _Reader:
-    def __init__(self, data: bytes) -> None:
+    def __init__(self, data: bytes, pos: int = 0) -> None:
+        if pos < 0 or pos > len(data):
+            raise ValueError("transaction offset out of range")
         self.data = data
-        self.pos = 0
+        self.pos = pos
 
     def read(self, n: int) -> bytes:
         if self.pos + n > len(self.data):
@@ -408,8 +410,17 @@ def _push(data: bytes) -> bytes:
     return bytes([len(data)]) + data
 
 
-def parse_tx(raw: bytes) -> Tx:
-    r = _Reader(raw)
+def parse_tx_prefix(raw: bytes, offset: int = 0) -> tuple[Tx, int]:
+    """Parse one raw transaction starting at ``offset``.
+
+    Returns ``(tx, consumed)`` where ``consumed`` is the number of
+    bytes the transaction occupies, so a caller parsing a stream
+    (e.g. a BEEF envelope) knows where the next field starts.
+    Raises ValueError on truncated input or an out-of-range offset.
+    """
+    if not isinstance(raw, (bytes, bytearray)):
+        raise ValueError("transaction must be bytes")
+    r = _Reader(bytes(raw), offset)
     version = struct.unpack("<i", r.read(4))[0]
     n_in = r.varint()
     inputs = []
@@ -427,9 +438,14 @@ def parse_tx(raw: bytes) -> Tx:
         script_len = r.varint()
         outputs.append(TxOut(value, r.read(script_len)))
     locktime = struct.unpack("<I", r.read(4))[0]
-    if r.pos != len(raw):
+    return Tx(version, inputs, outputs, locktime), r.pos - offset
+
+
+def parse_tx(raw: bytes) -> Tx:
+    tx, consumed = parse_tx_prefix(raw)
+    if consumed != len(raw):
         raise ValueError("transaction has trailing bytes")
-    return Tx(version, inputs, outputs, locktime)
+    return tx
 
 
 def sighash_forkid(tx: Tx, input_index: int, prev_script: bytes, prev_value: int) -> bytes:

@@ -427,9 +427,10 @@ def verify_anchor_chain(anchors: Any, genesis_txid: Any) -> dict[str, Any]:
       genesis. A fork is reported as an error, never silently accepted.
 
     What this does NOT prove: that any anchor is really on-chain. This
-    is continuity of the *claimed* chain — Merkle-proof / header-chain /
-    confirmation verification (SPV) is still out of scope and would
-    report ``chain_inclusion_verified``.
+    is continuity of the *claimed* chain — inclusion in a mined block
+    is a separate check, available via ``aiguard.spv`` (``--spv`` on
+    ``anchor-chain-verify``), which recomputes the Merkle root from the
+    claimed block's tx list and checks the header hash + proof-of-work.
 
     An empty anchor list verifies vacuously (``anchor_count`` 0):
     nothing was checked. Callers that expect anchors must check

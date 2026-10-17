@@ -13,6 +13,7 @@ from .anchor import (
     verify_journal_against_anchor_chain,
 )
 from .broadcast import FundingUTXO, WIFSigner, WoCBroadcaster, WOC_TTN_BASE
+from .spv import SPVVerifier, WoCBlockFetcher, apply_chain_inclusion
 from .publisher import (
     Publisher,
     PublisherConfig,
@@ -137,6 +138,13 @@ def main(argv=None):
                    "repeatable; requires --public-key")
     p.add_argument("--public-key", type=Path, default=None,
                    help="trusted manifest-signing public key (PEM) for binding re-verification")
+    p.add_argument("--spv", action="store_true",
+                   help="also verify each anchor tx is really inside its "
+                   "claimed block (Merkle root recomputation + header hash "
+                   "+ proof-of-work) via the --woc-base endpoint")
+    p.add_argument("--woc-base", default=WOC_TTN_BASE,
+                   help="WhatsOnChain base URL for --spv block data "
+                   "(default: Teratestnet)")
 
     p = sub.add_parser(
         "publish",
@@ -315,8 +323,22 @@ def main(argv=None):
                 )
             else:
                 result = verify_anchor_chain(anchors, args.genesis_txid)
+            if args.spv:
+                result = apply_chain_inclusion(
+                    result,
+                    SPVVerifier(WoCBlockFetcher(base_url=args.woc_base)),
+                )
             print(json.dumps(result, indent=2, sort_keys=True))
-            print("LOCAL CHECK ONLY: BSV transaction inclusion has not been verified.")
+            if args.spv and result.get("chain_inclusion_verified"):
+                count = result.get("anchor_count") or (
+                    result.get("chain", {}).get("anchor_count")
+                )
+                print(
+                    f"CHAIN INCLUSION VERIFIED: {count} anchor(s) proven "
+                    "inside their claimed blocks."
+                )
+            else:
+                print("LOCAL CHECK ONLY: BSV transaction inclusion has not been verified.")
         elif args.command == "publish":
             manifests = None
             public_key = None

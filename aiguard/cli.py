@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from .anchor import (
     verify_journal_against_anchor,
     verify_journal_against_anchor_chain,
 )
+from .broadcast import FundingUTXO, WIFSigner, WoCBroadcaster, WOC_TTN_BASE
 from .publisher import (
     Publisher,
     PublisherConfig,
@@ -154,8 +156,18 @@ def main(argv=None):
     p.add_argument("--max-iterations", type=int, default=None,
                    help="cap loop iterations (test / operator safety)")
     p.add_argument("--broadcast", action="store_true",
-                   help="opt-in broadcast; fails closed: no broadcaster exists in "
-                   "this build, so --broadcast without one is refused")
+                   help="opt-in broadcast: build, sign, and send the anchor "
+                   "transaction via WoC. Requires ANCHOR_WIF (testnet WIF) "
+                   "in the environment plus --funding-txid/--funding-vout.")
+    p.add_argument("--woc-base", default=WOC_TTN_BASE,
+                   help="WhatsOnChain base URL for broadcast + prev-tx fetch "
+                   "(default: Teratestnet)")
+    p.add_argument("--funding-txid", default=None,
+                   help="txid of the funding UTXO to spend (required with --broadcast)")
+    p.add_argument("--funding-vout", type=int, default=0,
+                   help="vout of the funding UTXO (default 0)")
+    p.add_argument("--fee-sats", type=int, default=500,
+                   help="miner fee in satoshis (default 500)")
     p.add_argument("--manifest", action="append", type=Path, default=None,
                    help="signed manifest envelope JSON to check acceptances against; "
                    "repeatable; required when the journal contains acceptances")
@@ -318,23 +330,46 @@ def main(argv=None):
                 manifests = [_read_json(path) for path in args.manifest or []]
                 public_key = load_public_key(args.public_key)
             if args.broadcast:
-                # No broadcaster exists in this build: the opt-in is real,
-                # but enabling it without a broadcaster fails closed.
-                raise PublisherError(
-                    "broadcast requested but no broadcaster is configured: "
-                    "no broadcast adapter exists in this build; refusing to run"
+                anchor_wif = os.environ.get("ANCHOR_WIF")
+                if not anchor_wif:
+                    raise PublisherError(
+                        "broadcast requested but ANCHOR_WIF is not set: "
+                        "the anchor signing key comes from the environment, "
+                        "never from config or the command line"
+                    )
+                if not args.funding_txid:
+                    raise PublisherError(
+                        "broadcast requested but --funding-txid is not set: "
+                        "the funding UTXO must be named explicitly (WoC-TTN's "
+                        "unspent index is broken, so discovery by address is "
+                        "unavailable)"
+                    )
+                broadcaster = WoCBroadcaster(
+                    base_url=args.woc_base,
+                    signer=WIFSigner.from_wif(anchor_wif),
+                    fee_sats=args.fee_sats,
+                    funding=FundingUTXO(
+                        txid=args.funding_txid,
+                        vout=args.funding_vout,
+                        value=0,  # replaced by the fetched prev-tx value
+                        script_hex="",  # replaced by the fetched prev-tx script
+                    ),
                 )
+                broadcast_enabled = True
+            else:
+                broadcaster = None
+                broadcast_enabled = False
             config = PublisherConfig(
                 journal=args.journal,
                 anchor_record=args.anchor_record,
                 genesis_txid=args.genesis_txid,
                 checkpoint_interval_seconds=args.interval_seconds,
-                broadcast_enabled=False,
+                broadcast_enabled=broadcast_enabled,
                 manifests=tuple(manifests) if manifests is not None else (),
                 public_key=public_key,
                 manifests_dir=args.manifest_dir,
             )
-            publisher = Publisher(config)
+            publisher = Publisher(config, broadcaster=broadcaster)
             if args.mode == "on-release":
                 record = publisher.on_release_accepted()
                 print(json.dumps({"action": "anchored", "reason": "release",
@@ -349,7 +384,8 @@ def main(argv=None):
             else:
                 decision = publisher.run_once()
                 print(json.dumps(decision, indent=2, sort_keys=True))
-            print("DRY RUN: broadcast disabled — payloads prepared, nothing broadcast.")
+            if not args.broadcast:
+                print("DRY RUN: broadcast disabled — payloads prepared, nothing broadcast.")
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

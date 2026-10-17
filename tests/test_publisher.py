@@ -551,16 +551,18 @@ def test_cli_publish_once_dry_run(tmp_path, capsys):
     assert json.loads(record_file.read_text(encoding="utf-8"))["anchors"][0]["status"] == "pending"
 
 
-def test_cli_publish_broadcast_flag_fails_closed(tmp_path, capsys):
+def test_cli_publish_broadcast_flag_fails_closed(tmp_path, capsys, monkeypatch):
     journal = tmp_path / "audit.jsonl"
     append_audit_event(journal, "test", "first")
+    # No ANCHOR_WIF, no funding: broadcast must fail closed.
+    monkeypatch.delenv("ANCHOR_WIF", raising=False)
     assert main([
         "publish",
         "--journal", str(journal),
         "--anchor-record", str(tmp_path / "anchors.json"),
         "--broadcast",
     ]) == 1
-    assert "no broadcaster" in capsys.readouterr().err
+    assert "ANCHOR_WIF" in capsys.readouterr().err
 
 
 def test_cli_publish_on_release_with_binding(tmp_path, capsys):

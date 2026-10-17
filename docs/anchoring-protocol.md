@@ -6,7 +6,10 @@ party holding the journal file, the anchor transactions, and BSV block
 headers can confirm the log was not rewritten — even against the local
 administrator.
 
-Status: design only. No implementation yet.
+Status: publisher + WoC broadcaster implemented. First live anchor on
+Teratestnet 2026-10-16 (txid ``4111b7cf9d42624be75aa78f5031caaebe4e836665b95fbcdbadbb086b2bf029``,
+OP_RETURN payload committing journal head seq 1–3). SPV / Merkle inclusion
+verification is still out of scope (see §10).
 
 ## 1. What this fixes (and why Phase 1 needs it)
 

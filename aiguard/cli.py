@@ -17,9 +17,11 @@ from .anchor import (
 )
 from .broadcast import FundingUTXO, WIFSigner, WoCBroadcaster, WOC_TTN_BASE
 from .spv import (
+    BUMPVerifier,
     HeaderChainVerifier,
     SPVVerifier,
     WoCBlockFetcher,
+    apply_bump_inclusion,
     apply_chain_inclusion,
 )
 from .publisher import (
@@ -150,6 +152,13 @@ def main(argv=None):
                    help="also verify each anchor tx is really inside its "
                    "claimed block (Merkle root recomputation + header hash "
                    "+ proof-of-work) via the --woc-base endpoint")
+    p.add_argument("--bump-file", type=Path, default=None,
+                   help="JSON file mapping txid -> BUMP (BRC-74 JSON form); "
+                   "if given, verify each anchor tx's inclusion from its "
+                   "compact proof, fetching only the block header via "
+                   "--woc-base. Proofs are operator-supplied: no public "
+                   "WhatsOnChain endpoint serves BUMPs (404 on TTN and "
+                   "mainnet, checked 2026-10-17).")
     p.add_argument("--anchor-sig", action="store_true",
                    help="also verify each anchor tx's single input is "
                    "signed by the trusted anchor pubkey (requires "
@@ -354,6 +363,17 @@ def main(argv=None):
                     result,
                     SPVVerifier(WoCBlockFetcher(base_url=args.woc_base)),
                 )
+            if args.bump_file is not None:
+                bumps = _read_json(args.bump_file)
+                if not isinstance(bumps, dict):
+                    raise VerificationError(
+                        "--bump-file JSON must map txid -> BUMP"
+                    )
+                result = apply_bump_inclusion(
+                    result,
+                    BUMPVerifier(WoCBlockFetcher(base_url=args.woc_base)),
+                    bumps,
+                )
             if args.anchor_sig:
                 pubkey = args.anchor_pubkey or ""
                 if (
@@ -401,7 +421,23 @@ def main(argv=None):
                     f"CHAIN INCLUSION VERIFIED: {count} anchor(s) proven "
                     "inside their claimed blocks."
                 )
-            else:
+            if args.bump_file is not None:
+                count = result.get("anchor_count") or (
+                    result.get("chain", {}).get("anchor_count")
+                )
+                if result.get("bump_inclusion_verified"):
+                    print(
+                        f"BUMP INCLUSION VERIFIED: {count} anchor(s) proven "
+                        "inside their claimed blocks from compact proofs."
+                    )
+                else:
+                    print(
+                        "BUMP INCLUSION CHECK FAILED: see per-anchor reasons."
+                    )
+            if not (
+                (args.spv and result.get("chain_inclusion_verified"))
+                or result.get("bump_inclusion_verified")
+            ):
                 print("LOCAL CHECK ONLY: BSV transaction inclusion has not been verified.")
             if args.anchor_sig:
                 count = result.get("anchor_count") or (

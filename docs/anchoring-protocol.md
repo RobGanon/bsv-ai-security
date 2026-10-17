@@ -195,6 +195,15 @@ infrequent (§8).
   remain distinct; only the scheme is unified.
 - **Production:** consider a multisig anchor key (2-of-3 across separate
   custodians) so no single compromised machine can anchor false history.
+- **Network selection:** the code takes an explicit `network`
+  ("testnet" or "mainnet"; testnet is the default). A key's version byte
+  must match the selected network — a mainnet WIF is refused for testnet
+  use and vice versa — and mainnet publishing requires a separate
+  confirmation (`AIGUARD_BSV_MAINNET_CONFIRM`, `--confirm-mainnet` for
+  the CLI) so it can never happen by default or accident. Mainnet
+  addresses use version `0x00`; the base58 encoder pads leading zero
+  bytes with `1`, per the base58 spec (a latent encoder bug here was
+  caught by the mainnet key-1 test vector before any mainnet use).
 
 ## 8. Anchoring policy (parameters)
 

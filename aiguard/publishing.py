@@ -16,6 +16,12 @@ class PublishingConfigurationError(ValueError):
     """Raised when publishing configuration is missing or unsafe."""
 
 
+#: Exact value required in ``AIGUARD_BSV_MAINNET_CONFIRM`` to enable
+#: mainnet publishing. A long literal, so it cannot be set by accident
+#: or by a stray "1"/"true".
+MAINNET_CONFIRM_VALUE = "I_UNDERSTAND_MAINNET_RISK"
+
+
 @dataclass(frozen=True)
 class PublishingConfig:
     """Validated non-secret configuration for a publishing backend."""
@@ -53,17 +59,25 @@ def _reject_url_credentials(parsed, label: str) -> None:
 def load_publishing_config(
     environ: Mapping[str, str] | None = None,
 ) -> PublishingConfig:
-    """Load and validate testnet-only configuration from environment variables.
+    """Load and validate publishing configuration from environment variables.
 
-    Mainnet is deliberately rejected in this foundation. A future mainnet
-    implementation requires a separate reviewed change and explicit approval.
+    Mainnet is never enabled by a single variable or by accident: it
+    requires ``AIGUARD_BSV_NETWORK=mainnet`` *and* the separate
+    confirmation value ``AIGUARD_BSV_MAINNET_CONFIRM``.
     """
     env = os.environ if environ is None else environ
     network = env.get("AIGUARD_BSV_NETWORK", "testnet").strip().lower()
-    if network != "testnet":
+    if network not in {"testnet", "mainnet"}:
         raise PublishingConfigurationError(
-            "only the testnet network is enabled; mainnet publishing is disabled"
+            "AIGUARD_BSV_NETWORK must be 'testnet' or 'mainnet'"
         )
+    if network == "mainnet":
+        confirm = env.get("AIGUARD_BSV_MAINNET_CONFIRM", "")
+        if confirm != MAINNET_CONFIRM_VALUE:
+            raise PublishingConfigurationError(
+                "mainnet publishing requires explicit confirmation: set "
+                f"AIGUARD_BSV_MAINNET_CONFIRM={MAINNET_CONFIRM_VALUE}"
+            )
 
     backend = env.get("AIGUARD_BSV_BACKEND", "provider").strip().lower()
     if backend not in {"provider", "node"}:

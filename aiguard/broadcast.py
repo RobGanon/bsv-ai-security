@@ -4,7 +4,11 @@ The publisher's broadcaster interface is ``broadcast(payload_hex) -> txid``.
 This module provides the first real implementation: :class:`WoCBroadcaster`,
 which builds the 1-input anchor transaction (OP_RETURN payload + change),
 signs it through a :class:`Signer`, and posts it to a WhatsOnChain
-endpoint (Teratestnet for the first live anchor).
+endpoint (Teratestnet for the first live anchor). The broadcaster takes
+an explicit ``network`` ("testnet" or "mainnet"); testnet is the
+default, and mainnet must be selected deliberately — the CLI requires
+a separate --confirm-mainnet flag for a mainnet broadcast, and a
+key's version byte must match the selected network.
 
 Key management (ADR 0001): signing lives behind the :class:`Signer`
 interface. Long-lived private keys are never passed through publishing
@@ -33,10 +37,12 @@ from dataclasses import dataclass
 from typing import Callable, Protocol
 
 from .anchor import decode_anchor_payload
-from .bsv import PrivKey, Tx
+from .bsv import PrivKey, Tx, validate_network
 
 # Default Teratestnet WhatsOnChain (WoC v1 compatible).
 WOC_TTN_BASE = "https://api.woc-ttn.bsvblockchain.tech/v1/bsv/test"
+# Default mainnet WhatsOnChain (WoC v1).
+WOC_MAINNET_BASE = "https://api.whatsonchain.com/v1/bsv/main"
 
 
 class BroadcastError(Exception):
@@ -70,20 +76,24 @@ class Signer(Protocol):
         """Return the 33-byte compressed pubkey matching the signing key."""
         ...
 
-    def address(self, testnet: bool = True) -> str:
-        """Return the P2PKH address receiving change."""
+    def address(self, network: str = "testnet") -> str:
+        """Return the P2PKH address receiving change on the given network."""
         ...
 
 
 class WIFSigner:
-    """A :class:`Signer` backed by a testnet WIF (from env, never logged)."""
+    """A :class:`Signer` backed by a WIF (from env, never logged).
+
+    The WIF's version byte must match ``network``: a mainnet WIF is
+    refused for testnet use and vice versa.
+    """
 
     def __init__(self, key: PrivKey) -> None:
         self._key = key
 
     @classmethod
-    def from_wif(cls, wif: str) -> "WIFSigner":
-        return cls(PrivKey.from_wif(wif))
+    def from_wif(cls, wif: str, network: str = "testnet") -> "WIFSigner":
+        return cls(PrivKey.from_wif(wif, network=network))
 
     def sign(self, digest: bytes) -> bytes:
         from .bsv import sign_digest
@@ -93,8 +103,8 @@ class WIFSigner:
     def pubkey_compressed(self) -> bytes:
         return self._key.pubkey_compressed()
 
-    def address(self, testnet: bool = True) -> str:
-        return self._key.address(testnet=testnet)
+    def address(self, network: str = "testnet") -> str:
+        return self._key.address(network=network)
 
 
 # request_fn(method, url, body) -> (status, body_bytes). Injectable for tests.
@@ -118,18 +128,26 @@ def _urllib_request(method: str, url: str, body: bytes | None) -> tuple[int, byt
 
 
 class WoCBroadcaster:
-    """Broadcast anchor payloads through a WhatsOnChain ``/tx/raw`` endpoint."""
+    """Broadcast anchor payloads through a WhatsOnChain ``/tx/raw`` endpoint.
+
+    ``network`` selects the change-address version and is threaded into
+    the transaction builder; it defaults to testnet and must be set
+    explicitly to mainnet by the caller (the CLI requires a separate
+    --confirm-mainnet flag for a mainnet broadcast).
+    """
 
     def __init__(
         self,
         *,
         base_url: str = WOC_TTN_BASE,
+        network: str = "testnet",
         signer: Signer,
         fee_sats: int = 500,
         funding: FundingUTXO,
         request_fn: RequestFn | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        self.network = validate_network(network)
         self.signer = signer
         self.fee_sats = fee_sats
         self.funding = funding
@@ -174,9 +192,10 @@ class WoCBroadcaster:
         tx = Tx.build_anchor(
             funding=funding,
             payload=payload,
-            change_address=self.signer.address(testnet=True),
+            change_address=self.signer.address(network=self.network),
             fee_sats=self.fee_sats,
             signer=self.signer,
+            network=self.network,
         )
         raw_hex = tx.serialize().hex()
         try:

@@ -187,9 +187,11 @@ def _bump_varint(n: int) -> bytes:
 class _BumpReader:
     """Bounds-checked reader for BUMP binary encoding."""
 
-    def __init__(self, data: bytes) -> None:
+    def __init__(self, data: bytes, pos: int = 0) -> None:
+        if pos < 0 or pos > len(data):
+            raise ValueError("BUMP offset out of range")
         self.data = data
-        self.pos = 0
+        self.pos = pos
 
     def read(self, n: int) -> bytes:
         if n < 0 or self.pos + n > len(self.data):
@@ -283,19 +285,21 @@ def parse_bump_json(bump: object) -> dict:
     return {"blockHeight": block_height, "path": normalized}
 
 
-def parse_bump_hex(hex_str: str) -> dict:
-    """Parse a BUMP binary encoding (hex) into the normalized JSON form.
+def parse_bump_bytes(data: bytes, offset: int = 0) -> tuple[dict, int]:
+    """Parse one BUMP binary encoding starting at ``offset``.
 
-    Raises ValueError on truncated input, unknown flag bytes, trailing
-    bytes, or a tree height over 64.
+    Returns ``(bump, consumed)`` where ``consumed`` is the number of
+    bytes the BUMP occupies, so a caller parsing a stream (e.g. a
+    BEEF envelope) knows where the next field starts. Raises
+    ValueError on truncated input, unknown flag bytes, or a tree
+    height over 64. Trailing bytes after the BUMP are the caller's
+    problem — use :func:`parse_bump_hex` for the standalone form,
+    which rejects them.
     """
-    if not isinstance(hex_str, str):
-        raise ValueError("BUMP hex must be a string")
-    try:
-        data = bytes.fromhex(hex_str)
-    except ValueError as exc:
-        raise ValueError("BUMP hex is not valid hex") from exc
-    reader = _BumpReader(data)
+    if not isinstance(data, (bytes, bytearray)):
+        raise ValueError("BUMP data must be bytes")
+    start = offset
+    reader = _BumpReader(bytes(data), offset)
     block_height = reader.varint()
     tree_height = reader.read(1)[0]
     if tree_height > _BUMP_MAX_TREE_HEIGHT:
@@ -323,13 +327,32 @@ def parse_bump_hex(hex_str: str) -> dict:
                 )
         leaves.sort(key=lambda leaf: leaf["offset"])
         path.append(leaves)
-    if not reader.done():
+    bump = {"blockHeight": block_height, "path": path}
+    # Reuse the JSON validator so binary parsing is exactly as strict
+    # (e.g. duplicate offsets inside one level are rejected here too).
+    return parse_bump_json(bump), reader.pos - start
+
+
+def parse_bump_hex(hex_str: str) -> dict:
+    """Parse a BUMP binary encoding (hex) into the normalized JSON form.
+
+    Raises ValueError on truncated input, unknown flag bytes, trailing
+    bytes, or a tree height over 64.
+    """
+    if not isinstance(hex_str, str):
+        raise ValueError("BUMP hex must be a string")
+    try:
+        data = bytes.fromhex(hex_str)
+    except ValueError as exc:
+        raise ValueError("BUMP hex is not valid hex") from exc
+    bump, consumed = parse_bump_bytes(data)
+    if consumed != len(data):
         raise ValueError("BUMP has trailing bytes after the last level")
-    return {"blockHeight": block_height, "path": path}
+    return bump
 
 
-def bump_to_hex(bump: dict) -> str:
-    """Encode a BUMP (JSON form) to its binary hex encoding."""
+def bump_to_bytes(bump: dict) -> bytes:
+    """Encode a BUMP (JSON form) to its binary encoding."""
     bump = parse_bump_json(bump)
     out = bytearray(_bump_varint(bump["blockHeight"]))
     out.append(len(bump["path"]))
@@ -344,7 +367,12 @@ def bump_to_hex(bump: dict) -> str:
                     _BUMP_FLAG_TXID if leaf.get("txid") else _BUMP_FLAG_SIBLING
                 )
                 out += bytes.fromhex(leaf["hash"])[::-1]
-    return bytes(out).hex()
+    return bytes(out)
+
+
+def bump_to_hex(bump: dict) -> str:
+    """Encode a BUMP (JSON form) to its binary hex encoding."""
+    return bump_to_bytes(bump).hex()
 
 
 def verify_bump_proof(txid: str, bump: dict, root: str) -> bool:

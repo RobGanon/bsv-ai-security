@@ -16,6 +16,13 @@ from .anchor import (
     verify_journal_against_anchor_chain,
 )
 from .broadcast import FundingUTXO, WIFSigner, WoCBroadcaster, WOC_TTN_BASE
+from .beef import (
+    BEEF_MAGIC,
+    BeefVerifier,
+    apply_beef_inclusion,
+    parse_beef,
+    parse_beef_hex,
+)
 from .spv import (
     BUMPVerifier,
     HeaderChainVerifier,
@@ -46,6 +53,22 @@ from .core import (
 
 def _read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _read_beef(path: Path):
+    """Read a BEEF envelope file: raw BEEF binary (magic ``0100BEEF``)
+    or hex text. Raises VerificationError on unreadable/malformed
+    input."""
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise VerificationError(f"cannot read --beef-file: {exc}") from exc
+    try:
+        if data[:4] == BEEF_MAGIC:
+            return parse_beef(data)
+        return parse_beef_hex(data.decode("ascii"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise VerificationError(f"malformed --beef-file: {exc}") from exc
 
 
 def _write_json(path: Path, obj):
@@ -159,6 +182,14 @@ def main(argv=None):
                    "--woc-base. Proofs are operator-supplied: no public "
                    "WhatsOnChain endpoint serves BUMPs (404 on TTN and "
                    "mainnet, checked 2026-10-17).")
+    p.add_argument("--beef-file", type=Path, default=None,
+                   help="BEEF envelope file (BRC-62 binary, or hex text); "
+                   "if given, verify each anchor tx's inclusion from the "
+                   "envelope's BUMPs + ancestry, fetching only block "
+                   "headers via --woc-base. Envelopes are "
+                   "operator-supplied: no public WhatsOnChain endpoint "
+                   "serves BEEF (404 on TTN and mainnet, checked "
+                   "2026-10-17).")
     p.add_argument("--anchor-sig", action="store_true",
                    help="also verify each anchor tx's single input is "
                    "signed by the trusted anchor pubkey (requires "
@@ -374,6 +405,12 @@ def main(argv=None):
                     BUMPVerifier(WoCBlockFetcher(base_url=args.woc_base)),
                     bumps,
                 )
+            if args.beef_file is not None:
+                result = apply_beef_inclusion(
+                    result,
+                    BeefVerifier(WoCBlockFetcher(base_url=args.woc_base)),
+                    _read_beef(args.beef_file),
+                )
             if args.anchor_sig:
                 pubkey = args.anchor_pubkey or ""
                 if (
@@ -434,9 +471,23 @@ def main(argv=None):
                     print(
                         "BUMP INCLUSION CHECK FAILED: see per-anchor reasons."
                     )
+            if args.beef_file is not None:
+                count = result.get("anchor_count") or (
+                    result.get("chain", {}).get("anchor_count")
+                )
+                if result.get("beef_inclusion_verified"):
+                    print(
+                        f"BEEF INCLUSION VERIFIED: {count} anchor(s) proven "
+                        "inside their claimed blocks from the envelope."
+                    )
+                else:
+                    print(
+                        "BEEF INCLUSION CHECK FAILED: see per-anchor reasons."
+                    )
             if not (
                 (args.spv and result.get("chain_inclusion_verified"))
                 or result.get("bump_inclusion_verified")
+                or result.get("beef_inclusion_verified")
             ):
                 print("LOCAL CHECK ONLY: BSV transaction inclusion has not been verified.")
             if args.anchor_sig:

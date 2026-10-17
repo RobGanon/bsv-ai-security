@@ -247,6 +247,11 @@ exact 84-byte OP_RETURN payload layout, the on-chain anchor chaining via
 `prev_txid`, the independent verifier procedure, and an explicit list of
 what anchoring does and does not prove.
 
+## Pilot program
+
+We are looking for one AI team to run a 30-day pilot on one real
+pipeline. Details: [`docs/pilot-brief.md`](docs/pilot-brief.md).
+
 ## Roadmap (high level)
 
 1. Independent review of Phase 1 (this request).

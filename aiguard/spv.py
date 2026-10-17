@@ -243,6 +243,10 @@ class BlockFetcher(Protocol):
         """Return {"blockheight": int|None, "blockhash": str|None}."""
         ...
 
+    def fetch_tx_full(self, txid: str) -> dict:
+        """Return the full WoC ``/tx/hash`` JSON body for ``txid``."""
+        return self._get_json(f"/tx/hash/{txid}")
+
     def fetch_block(self, height: int) -> tuple[BlockHeader, list[str]]:
         """Return (header, txid list) for a block height."""
         ...
@@ -298,6 +302,10 @@ class WoCBlockFetcher:
             "blockheight": data.get("blockheight"),
             "blockhash": data.get("blockhash"),
         }
+
+    def fetch_tx_full(self, txid: str) -> dict:
+        """Return the full WoC ``/tx/hash`` JSON body for ``txid``."""
+        return self._get_json(f"/tx/hash/{txid}")
 
     def fetch_block(self, height: int) -> tuple[BlockHeader, list[str]]:
         data = self._get_json(f"/block/height/{height}")

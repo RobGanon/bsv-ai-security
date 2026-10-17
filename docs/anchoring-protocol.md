@@ -136,9 +136,12 @@ proof-of-work — stronger evidence than a served proof, heavier on
 bandwidth (fine for Teratestnet's tiny blocks; compact proofs are the
 mainnet path). Header-chain sync back to a trusted checkpoint is still
 a follow-up; the verifier currently checks one block at a time. The
-anchor-input-signature check (step 1, second bullet) is also still
-open: the payload is verified against the journal, but the anchor
-tx's input is not yet checked against the anchor pubkey.
+anchor-input-signature check (step 1, second bullet) is implemented in
+`aiguard/anchor.py` (`anchor-chain-verify --anchor-sig --anchor-pubkey`):
+the anchor tx's single input must parse as P2PKH with sighash
+`SIGHASH_ALL|FORKID`, carry the trusted anchor pubkey, spend a P2PKH
+output to that pubkey, and its ECDSA signature must verify against
+the BIP 143 FORKID sighash.
 
 1. **Collect the anchor chain.** From the genesis txid, fetch each anchor
    transaction and follow `prev_txid` until the latest. For each anchor:

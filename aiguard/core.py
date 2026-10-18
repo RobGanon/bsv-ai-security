@@ -29,11 +29,14 @@ HEX_64 = re.compile(r"^[0-9a-fA-F]{64}$")
 MAX_EVENT_DETAIL_BYTES = 4096
 MAX_JOURNAL_EVENTS = 1_000_000
 
+UINT32_MAX = (1 << 32) - 1
+
 # O_NOFOLLOW makes open(2) fail on a trailing symlink instead of following it.
 # It is Unix-only; where unavailable the per-component symlink walk in
 # _validated_entries() and the fstat() regular-file check in _open_verified_fd()
 # still apply.
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 
 class VerificationError(ValueError):
@@ -47,9 +50,14 @@ class VerifiedArtifact:
     `handle` is an open binary file object positioned at offset 0. It was
     opened with O_NOFOLLOW (where available), confirmed by fstat() to be a
     regular file, and hashed from the open descriptor *before* being handed
-    out. Bytes read from `handle` are therefore exactly the verified bytes,
-    which closes the check-to-use window that exists when a consumer
-    re-opens the artifact path after verification. The consumer (or the
+    out. The handle pins the inode, which closes the check-to-use window
+    that exists when a consumer re-opens the artifact path after
+    verification (no path-swap race). It does NOT freeze the bytes: a
+    writer with write access to the same inode can still mutate the
+    file after hashing, and reads from `handle` would then return the
+    new bytes. Consumers that need a frozen snapshot must copy the
+    bytes themselves; a sealed memfd copy is a possible follow-up,
+    not implemented here. The consumer (or the
     `verified_artifacts()` context manager) must close the handle.
     """
 
@@ -127,6 +135,14 @@ def generate_keypair(private_path: Path, public_path: Path) -> None:
 
 
 def load_private_key(path: Path) -> Ed25519PrivateKey:
+    try:
+        mode = os.stat(path).st_mode
+    except OSError as exc:
+        raise VerificationError(f"cannot stat private key: {path}") from exc
+    if mode & 0o077:
+        raise VerificationError(
+            f"private key must not be group- or world-readable: {path}"
+        )
     key = serialization.load_pem_private_key(path.read_bytes(), password=None)
     if not isinstance(key, Ed25519PrivateKey):
         raise VerificationError("private key is not Ed25519")
@@ -143,16 +159,33 @@ def load_public_key(path: Path) -> Ed25519PublicKey:
 def manifest_hash(envelope: dict) -> str:
     """Hash of a signed manifest envelope: SHA-256 over its canonical JSON.
 
-    The hash covers both the payload and the Ed25519 signature, so it
-    identifies one exact signed manifest. Acceptance events carry this hash
-    (see :func:`record_manifest_acceptance`); anchor-time derivation
-    re-verifies the envelope's signature and checks the acceptance's
-    ``release_id`` / ``release_seq`` against the manifest's own fields,
-    so an acceptance cannot be rebound to a different release.
+    The hash covers both the payload and the Ed25519 signature. The
+    signature is normalized to canonical base64 before hashing, so
+    different spellings of the same signature (base64 has several
+    valid spellings per signature — the low bits of the last data
+    character are padding) hash identically. The hash therefore
+    identifies one exact signed manifest. Acceptance events carry
+    this hash (see :func:`record_manifest_acceptance`); anchor-time
+    derivation re-verifies the envelope's signature and checks the
+    acceptance's ``release_id`` / ``release_seq`` against the
+    manifest's own fields, so an acceptance cannot be rebound to a
+    different release.
     """
     if not isinstance(envelope, dict):
         raise VerificationError("manifest envelope must be a JSON object")
-    return hashlib.sha256(canonical_json_bytes(envelope)).hexdigest()
+    normalized = dict(envelope)
+    signature = normalized.get("signature")
+    if signature is not None:
+        if not isinstance(signature, str):
+            raise VerificationError("manifest signature must be base64 text")
+        try:
+            raw = base64.b64decode(signature, validate=True)
+        except ValueError as exc:
+            raise VerificationError(
+                "manifest signature is not valid base64"
+            ) from exc
+        normalized["signature"] = base64.b64encode(raw).decode("ascii")
+    return hashlib.sha256(canonical_json_bytes(normalized)).hexdigest()
 
 
 def _check_manifest_hash(value: Any, *, field: str = "manifest_hash") -> str:
@@ -164,8 +197,14 @@ def _check_manifest_hash(value: Any, *, field: str = "manifest_hash") -> str:
 
 
 def _check_release_seq(value: Any, *, field: str = "release_seq") -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise VerificationError(f"invalid {field}: must be a non-negative integer")
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 0 <= value <= UINT32_MAX
+    ):
+        raise VerificationError(
+            f"invalid {field}: must be an unsigned 32-bit integer"
+        )
     return value
 
 
@@ -301,15 +340,28 @@ def verify_manifest(
 def _open_verified_fd(path: Path) -> int:
     """Open a file descriptor without following a trailing symlink.
 
-    The descriptor is confirmed by fstat() to reference a regular file, so a
-    symlink (or fifo/device) swapped in at the final component cannot slip
-    through. A swapped *intermediate* directory component between the walk in
-    _validated_entries() and this open remains a residual race; closing it
-    fully requires opening each component with O_NOFOLLOW, which is left to
-    the future privileged launcher.
+    The descriptor is confirmed by fstat() to reference a regular file.
+    With O_NOFOLLOW, a symlink (or fifo/device) swapped in at the final
+    component cannot slip through; the open itself fails on a trailing
+    symlink, and fstat() rejects fifos and devices. Where O_NOFOLLOW
+    is unavailable, fstat() still rejects fifos and devices, but a
+    symlink to a regular file would pass fstat() — the per-component
+    walk in _validated_entries() is then the remaining defense, and a
+    swap between the walk and this open is a residual race. A swapped
+    *intermediate* directory component between the walk in
+    _validated_entries() and this open remains a residual race;
+    closing it fully requires opening each component with O_NOFOLLOW,
+    which is left to the future privileged launcher.
+
+    The open uses O_NONBLOCK so a FIFO swapped in between the caller's
+    ``is_file()`` check and this open cannot block the open forever;
+    non-blocking mode is cleared once the descriptor is confirmed to
+    be a regular file.
     """
     try:
-        fd = os.open(os.fspath(path), os.O_RDONLY | _O_NOFOLLOW)
+        fd = os.open(
+            os.fspath(path), os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK
+        )
     except OSError as exc:
         raise VerificationError(
             f"cannot open artifact without following symlinks: {path}"
@@ -322,6 +374,15 @@ def _open_verified_fd(path: Path) -> int:
     if not stat.S_ISREG(mode):
         os.close(fd)
         raise VerificationError(f"artifact is not a regular file: {path}")
+    if fcntl is not None and _O_NONBLOCK:
+        try:
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~_O_NONBLOCK)
+        except OSError as exc:
+            os.close(fd)
+            raise VerificationError(
+                f"cannot clear non-blocking mode: {path}"
+            ) from exc
     return fd
 
 
@@ -336,10 +397,13 @@ def verified_artifacts(
 
     This is the TOCTOU-resistant verification API: each artifact is opened
     with O_NOFOLLOW, confirmed to be a regular file, hashed *from the open
-    descriptor*, and yielded positioned at offset 0. A consumer (e.g. the
-    future launcher) that reads or executes from these handles gets exactly
-    the bytes that were verified, with no window for replacement between the
-    check and the use. All handles are closed when the context exits,
+    descriptor*, and yielded positioned at offset 0. The handle pins the
+    inode, so there is no window for path-based replacement between the
+    check and the use. It does NOT freeze the bytes: a writer with write
+    access to the same inode can still mutate the file after hashing,
+    and reads from the handle would then return the new bytes.
+    Consumers that need a frozen snapshot must copy the bytes
+    themselves. All handles are closed when the context exits,
     including on verification failure part-way through.
     """
     payload = _load_verified_payload(envelope, public_key)
@@ -360,13 +424,20 @@ def verified_artifacts(
                 raise VerificationError(
                     f"artifact integrity mismatch: {rel.as_posix()}"
                 )
-            os.lseek(fd, 0, os.SEEK_SET)
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                handle = os.fdopen(fd, "rb")
+            except OSError as exc:
+                os.close(fd)
+                raise VerificationError(
+                    f"error opening artifact: {rel.as_posix()}"
+                ) from exc
             opened.append(
                 VerifiedArtifact(
                     path=rel.as_posix(),
                     sha256=actual_hash,
                     size=actual_size,
-                    handle=os.fdopen(fd, "rb"),
+                    handle=handle,
                 )
             )
         yield opened
@@ -392,19 +463,9 @@ def _safe_relative_path(raw: str) -> Path:
 
 MANIFEST_ACCEPTED_EVENT_TYPE = "manifest_accepted"
 
-UINT32_MAX = (1 << 32) - 1
-
 
 def _check_release_seq_uint32(value: Any, *, field: str = "release_seq") -> int:
-    if (
-        not isinstance(value, int)
-        or isinstance(value, bool)
-        or not 0 <= value <= UINT32_MAX
-    ):
-        raise VerificationError(
-            f"invalid {field}: must be an unsigned 32-bit integer"
-        )
-    return value
+    return _check_release_seq(value, field=field)
 
 
 def record_manifest_acceptance(
@@ -581,6 +642,26 @@ def _verify_audit_events(events: list[dict]) -> int:
     return len(events)
 
 
+def _no_duplicate_object(pairs: list[tuple[str, Any]]) -> dict:
+    """``json.loads`` object hook that rejects duplicate keys.
+
+    The default ``json.loads`` keeps the last duplicate, so a file
+    could parse differently under another implementation. The
+    signature/hash checks would reject such a divergence (fail
+    closed), but rejecting duplicates at parse time is the strictest
+    defense and removes the ambiguity entirely. Used in the
+    trust-critical parse paths (journal, manifest/anchor/record
+    loading); WoC-response parsing relies on downstream hash/txid
+    checks instead.
+    """
+    obj: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"duplicate JSON key: {key!r}")
+        obj[key] = value
+    return obj
+
+
 def _read_jsonl(path: Path) -> list[dict]:
     events = []
     with path.open("r", encoding="utf-8") as handle:
@@ -588,9 +669,11 @@ def _read_jsonl(path: Path) -> list[dict]:
             if not line.strip():
                 raise VerificationError(f"blank line in audit journal at line {line_no}")
             try:
-                event = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise VerificationError(f"invalid JSON at audit line {line_no}") from exc
+                event = json.loads(line, object_pairs_hook=_no_duplicate_object)
+            except ValueError as exc:
+                raise VerificationError(
+                    f"invalid JSON at audit line {line_no}: {exc}"
+                ) from exc
             if not isinstance(event, dict):
                 raise VerificationError(f"audit event must be a JSON object at line {line_no}")
             events.append(event)

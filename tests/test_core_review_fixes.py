@@ -17,7 +17,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from aiguard.bsv import PrivKey
 
 from aiguard.cli import _read_json
 from aiguard.core import (
@@ -41,25 +41,39 @@ _B64_ALPHABET = string.ascii_uppercase + string.ascii_lowercase + string.digits 
 def _respelled_signature(canonical: str) -> str:
     """Return a different base64 spelling of the same signature bytes.
 
-    A 64-byte Ed25519 signature encodes to 88 base64 chars ending in
-    ``==``; the last data char (index 85) carries 2 data bits in its
-    high bits and 4 zero padding bits. Flipping a low bit yields a
-    different spelling that decodes to identical bytes.
+    Base64's spare zero bits live in the final data character whenever
+    the string ends in ``=`` padding: with ``==`` the last char carries
+    2 data bits, with ``=`` it carries 4. Flipping a low bit yields a
+    different spelling that decodes to identical bytes. (A DER signature
+    whose length is a multiple of 3 has no padding and no spare bits;
+    the test below picks a release_seq whose signature does.)
     """
-    assert canonical.endswith("==") and len(canonical) == 88
-    idx = _B64_ALPHABET.index(canonical[85])
-    return canonical[:85] + _B64_ALPHABET[idx ^ 1] + canonical[86:]
+    assert canonical.endswith("=")
+    last_data = len(canonical) - 1
+    while canonical[last_data] == "=":
+        last_data -= 1
+    idx = _B64_ALPHABET.index(canonical[last_data])
+    return canonical[:last_data] + _B64_ALPHABET[idx ^ 1] + canonical[last_data + 1:]
 
 
 def test_manifest_hash_canonicalizes_signature_spelling():
-    private = Ed25519PrivateKey.generate()
-    payload = {
-        "schema": "aiguard-manifest-v1",
-        "release_id": "r1",
-        "release_seq": 1,
-        "artifacts": [],
-    }
-    envelope = sign_manifest(payload, private)
+    # Fixed key + RFC 6979 make the signature deterministic, so this
+    # test's spelling is stable run to run. ECDSA DER signatures are
+    # 70-72 bytes and only some lengths leave base64 padding bits, so
+    # try a few release_seqs until one does.
+    private = PrivKey.from_bytes(b"\x11" * 32)
+    for release_seq in (1, 2, 3, 4):
+        payload = {
+            "schema": "aiguard-manifest-v2",
+            "release_id": "r1",
+            "release_seq": release_seq,
+            "artifacts": [],
+        }
+        envelope = sign_manifest(payload, private)
+        if envelope["signature"].endswith("="):
+            break
+    else:
+        raise AssertionError("no signature with base64 padding in four attempts")
     respelled = _respelled_signature(envelope["signature"])
     assert respelled != envelope["signature"]
     assert base64.b64decode(respelled, validate=True) == base64.b64decode(
@@ -89,16 +103,16 @@ def test_verify_manifest_rejects_huge_release_seq(tmp_path):
     root.mkdir()
     (root / "a.txt").write_bytes(b"x")
     digest, size = sha256_file(root / "a.txt")
-    private = Ed25519PrivateKey.generate()
+    private = PrivKey.generate()
     payload = {
-        "schema": "aiguard-manifest-v1",
+        "schema": "aiguard-manifest-v2",
         "release_id": "r1",
         "release_seq": 2**32,
         "artifacts": [{"path": "a.txt", "sha256": digest, "size": size}],
     }
     envelope = sign_manifest(payload, private)
     with pytest.raises(VerificationError):
-        verify_manifest(root, envelope, private.public_key())
+        verify_manifest(root, envelope, private.pubkey_compressed())
 
 
 def test_open_verified_fd_fifo_does_not_hang(tmp_path):
@@ -127,9 +141,9 @@ def test_verified_artifacts_lseek_failure_closes_fd(tmp_path, monkeypatch):
     root.mkdir()
     (root / "a.txt").write_bytes(b"x")
     digest, size = sha256_file(root / "a.txt")
-    private = Ed25519PrivateKey.generate()
+    private = PrivKey.generate()
     payload = {
-        "schema": "aiguard-manifest-v1",
+        "schema": "aiguard-manifest-v2",
         "release_id": "r1",
         "release_seq": 1,
         "artifacts": [{"path": "a.txt", "sha256": digest, "size": size}],
@@ -142,15 +156,15 @@ def test_verified_artifacts_lseek_failure_closes_fd(tmp_path, monkeypatch):
 
     monkeypatch.setattr(os, "lseek", bad_lseek)
     with pytest.raises(VerificationError):
-        with verified_artifacts(root, envelope, private.public_key()):
+        with verified_artifacts(root, envelope, private.pubkey_compressed()):
             pass
     assert len(os.listdir("/proc/self/fd")) == fds_before
 
 
 @pytest.mark.parametrize("mode", [0o644, 0o640])
 def test_load_private_key_refuses_loose_permissions(tmp_path, mode):
-    priv_path = tmp_path / "priv.pem"
-    pub_path = tmp_path / "pub.pem"
+    priv_path = tmp_path / "priv.wif"
+    pub_path = tmp_path / "pub.pub"
     generate_keypair(priv_path, pub_path)
     os.chmod(priv_path, mode)
     with pytest.raises(VerificationError):
@@ -158,8 +172,8 @@ def test_load_private_key_refuses_loose_permissions(tmp_path, mode):
 
 
 def test_load_private_key_accepts_0600(tmp_path):
-    priv_path = tmp_path / "priv.pem"
-    pub_path = tmp_path / "pub.pem"
+    priv_path = tmp_path / "priv.wif"
+    pub_path = tmp_path / "pub.pub"
     generate_keypair(priv_path, pub_path)
     os.chmod(priv_path, 0o600)
     assert load_private_key(priv_path) is not None

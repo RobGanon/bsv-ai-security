@@ -220,10 +220,11 @@ infrequent (§8).
   "attacker can anchor a false history" — the protocol then proves nothing
   against the local admin.
 - **Manifest signing key** stays separate from the anchor key (different
-  authorities: *release approval* vs. *history attestation*). Recommendation:
-  migrate manifest signing from Ed25519 to secp256k1 so the whole system
-  uses one signature scheme and one cryptographic audit surface. The keys
-  remain distinct; only the scheme is unified.
+  authorities: *release approval* vs. *history attestation*). Manifest
+  signing has been migrated to secp256k1 (RFC 6979 ECDSA, low-S,
+  DER-encoded — the same signature scheme as anchor inputs), so the
+  whole system uses one signature scheme and one cryptographic audit
+  surface. The keys remain distinct; only the scheme is unified.
 - **Production:** consider a multisig anchor key (2-of-3 across separate
   custodians) so no single compromised machine can anchor false history.
 - **Network selection:** the code takes an explicit `network`

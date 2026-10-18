@@ -11,12 +11,7 @@ import stat
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-    Ed25519PublicKey,
-)
+from .bsv import PrivKey, _pubkey_point, sign_digest, verify_sig
 
 try:
     import fcntl
@@ -24,6 +19,11 @@ except ImportError:  # pragma: no cover - non-Unix platforms
     fcntl = None  # type: ignore[assignment]
 
 HEX_64 = re.compile(r"^[0-9a-fA-F]{64}$")
+
+#: Signed-manifest payload schema. Version 2 is secp256k1/ECDSA
+#: (RFC 6979, low-S, DER over SHA-256 of the canonical payload bytes);
+#: version 1 (Ed25519) envelopes fail closed with "unsupported schema".
+MANIFEST_SCHEMA = "aiguard-manifest-v2"
 
 # Limits for the local audit journal (Phase 1 DoS hardening).
 MAX_EVENT_DETAIL_BYTES = 4096
@@ -108,16 +108,14 @@ def generate_keypair(private_path: Path, public_path: Path) -> None:
 
     private_path.parent.mkdir(parents=True, exist_ok=True)
     public_path.parent.mkdir(parents=True, exist_ok=True)
-    private_key = Ed25519PrivateKey.generate()
-    private_bytes = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
-    )
-    public_bytes = private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
+    key = PrivKey.generate()
+    # Private key: WIF text with the testnet version byte (the project
+    # default; load_private_key accepts either network — manifest keys
+    # are not chain keys). The base58check checksum catches a corrupted
+    # key file at load time. Public key: 33-byte compressed point as hex.
+    # Both files are plain text ending in a newline; loaders strip it.
+    private_bytes = (key.wif(network="testnet") + "\n").encode("ascii")
+    public_bytes = (key.pubkey_compressed().hex() + "\n").encode("ascii")
     # Refuse trailing symlinks at open time (not just via a pre-check), so
     # an output path cannot redirect key material into a symlink target.
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW
@@ -134,7 +132,17 @@ def generate_keypair(private_path: Path, public_path: Path) -> None:
         pass
 
 
-def load_private_key(path: Path) -> Ed25519PrivateKey:
+_HEX_COMPRESSED_PUBKEY = re.compile(r"[0-9a-fA-F]{66}")
+
+
+def load_private_key(path: Path) -> PrivKey:
+    """Load a manifest-signing private key from a WIF text file.
+
+    Refuses a key that is group- or world-readable. WIF is used as the
+    container for its checksum; the network version byte is not
+    meaningful for off-chain manifest signing, so both known version
+    bytes are accepted (chain use validates the network itself).
+    """
     try:
         mode = os.stat(path).st_mode
     except OSError as exc:
@@ -143,23 +151,39 @@ def load_private_key(path: Path) -> Ed25519PrivateKey:
         raise VerificationError(
             f"private key must not be group- or world-readable: {path}"
         )
-    key = serialization.load_pem_private_key(path.read_bytes(), password=None)
-    if not isinstance(key, Ed25519PrivateKey):
-        raise VerificationError("private key is not Ed25519")
-    return key
+    try:
+        return PrivKey.from_wif_any(path.read_text(encoding="ascii").strip())
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise VerificationError("private key is not valid WIF") from exc
 
 
-def load_public_key(path: Path) -> Ed25519PublicKey:
-    key = serialization.load_pem_public_key(path.read_bytes())
-    if not isinstance(key, Ed25519PublicKey):
-        raise VerificationError("public key is not Ed25519")
-    return key
+def load_public_key(path: Path) -> bytes:
+    """Load a compressed secp256k1 public key from a hex text file.
+
+    Accepts 66 hex characters (02/03 prefix + x-coordinate); the point
+    is validated against the curve so a bad key fails here with a clear
+    error, not later as a confusing signature failure.
+    """
+    try:
+        text = path.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise VerificationError(f"cannot read public key: {path}") from exc
+    if not _HEX_COMPRESSED_PUBKEY.fullmatch(text):
+        raise VerificationError(
+            "public key must be 66 hex characters (compressed secp256k1)"
+        )
+    pubkey = bytes.fromhex(text)
+    try:
+        _pubkey_point(pubkey)
+    except ValueError as exc:
+        raise VerificationError("public key is not a valid secp256k1 point") from exc
+    return pubkey
 
 
 def manifest_hash(envelope: dict) -> str:
     """Hash of a signed manifest envelope: SHA-256 over its canonical JSON.
 
-    The hash covers both the payload and the Ed25519 signature. The
+    The hash covers both the payload and the ECDSA signature. The
     signature is normalized to canonical base64 before hashing, so
     different spellings of the same signature (base64 has several
     valid spellings per signature — the low bits of the last data
@@ -223,30 +247,39 @@ def create_manifest(
         digest, size = sha256_file(full)
         artifacts.append({"path": rel.as_posix(), "sha256": digest, "size": size})
     return {
-        "schema": "aiguard-manifest-v1",
+        "schema": MANIFEST_SCHEMA,
         "release_id": release_id,
         "release_seq": release_seq,
         "artifacts": artifacts,
     }
 
 
-def sign_manifest(payload: dict, private_key: Ed25519PrivateKey) -> dict:
-    signature = private_key.sign(canonical_json_bytes(payload))
+def sign_manifest(payload: dict, private_key: PrivKey) -> dict:
+    """Sign a manifest payload: RFC 6979 ECDSA (secp256k1, low-S) over
+    SHA-256 of the exact canonical payload bytes; signature DER-encoded
+    as base64 in the envelope."""
+    digest = hashlib.sha256(canonical_json_bytes(payload)).digest()
+    signature = sign_digest(private_key, digest)
     return {"payload": payload, "signature": base64.b64encode(signature).decode("ascii")}
 
 
-def _load_verified_payload(envelope: dict, public_key: Ed25519PublicKey) -> dict:
-    """Validate envelope shape/schema and the Ed25519 signature; return payload."""
+def _load_verified_payload(envelope: dict, public_key: bytes) -> dict:
+    """Validate envelope shape/schema and the secp256k1 signature; return payload."""
     if not isinstance(envelope, dict) or set(envelope) != {"payload", "signature"}:
         raise VerificationError("invalid signed envelope fields")
     payload = envelope["payload"]
-    if not isinstance(payload, dict) or payload.get("schema") != "aiguard-manifest-v1":
+    if not isinstance(payload, dict) or payload.get("schema") != MANIFEST_SCHEMA:
         raise VerificationError("unsupported manifest schema")
     try:
         signature = base64.b64decode(envelope["signature"], validate=True)
-        public_key.verify(signature, canonical_json_bytes(payload))
-    except (InvalidSignature, ValueError, TypeError) as exc:
+        digest = hashlib.sha256(canonical_json_bytes(payload)).digest()
+    except (ValueError, TypeError) as exc:
         raise VerificationError("manifest signature invalid") from exc
+    # require_low_s pins the canonical signature form: ECDSA verifies both
+    # s and N - s, and the manifest hash covers the signature bytes, so
+    # without it one payload would hash as two "exact" manifests.
+    if not verify_sig(public_key, digest, signature, require_low_s=True):
+        raise VerificationError("manifest signature invalid")
     return payload
 
 
@@ -316,7 +349,7 @@ def _validated_entries(root: Path, payload: dict) -> list[tuple[Path, str, int]]
 def verify_manifest(
     root: Path,
     envelope: dict,
-    public_key: Ed25519PublicKey,
+    public_key: bytes,
     min_release_seq: int | None = None,
 ) -> list[str]:
     """Verify manifest signature, rollback policy, and artifact hashes.
@@ -390,7 +423,7 @@ def _open_verified_fd(path: Path) -> int:
 def verified_artifacts(
     root: Path,
     envelope: dict,
-    public_key: Ed25519PublicKey,
+    public_key: bytes,
     min_release_seq: int | None = None,
 ) -> Iterator[list[VerifiedArtifact]]:
     """Verify a manifest and yield open handles to the verified artifact bytes.
@@ -484,7 +517,7 @@ def record_manifest_acceptance(
     The acceptance is bound to one exact signed manifest via
     ``manifest_hash`` — ``sha256(canonical_json(envelope))`` over the
     signed manifest envelope (see :func:`manifest_hash`). Anchor-time
-    derivation re-verifies the envelope's Ed25519 signature against a
+    derivation re-verifies the envelope's secp256k1 signature against a
     trusted public key and requires the acceptance's ``release_id`` /
     ``release_seq`` to match the manifest's own fields. An acceptance
     whose hash matches no verified manifest, or whose release identity

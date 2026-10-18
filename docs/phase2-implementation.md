@@ -26,7 +26,7 @@ aiguard anchor-payload \
   --journal demo/audit.jsonl \
   --start-seq 1 \
   --manifest demo/manifest-signed.json \
-  --public-key demo/public.pem \
+  --public-key demo/public.pub \
   --output demo/anchor-payload.json
 ```
 
@@ -97,7 +97,7 @@ aiguard anchor-verify \
   --journal demo/audit.jsonl \
   --payload demo/anchor-payload.json \
   --manifest demo/manifest-signed.json \
-  --public-key demo/public.pem
+  --public-key demo/public.pub
 ```
 
 With `--manifest` + `--public-key`, verification re-derives the anchored
@@ -202,12 +202,12 @@ aiguard publish --journal demo/audit.jsonl --anchor-record demo/anchors.json
 
 # Anchor immediately after recording an acceptance.
 aiguard publish --journal demo/audit.jsonl --anchor-record demo/anchors.json \
-  --mode on-release --manifest demo/manifest-signed.json --public-key demo/public.pem
+  --mode on-release --manifest demo/manifest-signed.json --public-key demo/public.pub
 
 # Long-running loop: re-reads the manifests directory at every checkpoint.
 aiguard publish --journal demo/audit.jsonl --anchor-record demo/anchors.json \
   --mode loop --interval-seconds 3600 \
-  --manifest-dir demo/manifests --public-key demo/public.pem
+  --manifest-dir demo/manifests --public-key demo/public.pub
 ```
 
 `--broadcast` is an explicit opt-in that fails closed: no broadcast

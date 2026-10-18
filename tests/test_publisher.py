@@ -9,7 +9,7 @@ import hashlib
 import json
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from aiguard.bsv import PrivKey
 
 from aiguard.cli import main
 from aiguard.core import (
@@ -28,7 +28,7 @@ from aiguard.publisher import (
 
 def _envelope(key, release_seq, release_id):
     payload = {
-        "schema": "aiguard-manifest-v1",
+        "schema": "aiguard-manifest-v2",
         "release_id": release_id,
         "release_seq": release_seq,
         "artifacts": [{"path": "a.txt", "sha256": "a" * 64, "size": 1}],
@@ -198,11 +198,11 @@ def test_pending_anchor_superseded_when_head_advances(tmp_path):
 
 def test_on_release_fires_exactly_once_per_acceptance(tmp_path):
     journal = tmp_path / "audit.jsonl"
-    key = Ed25519PrivateKey.generate()
+    key = PrivKey.generate()
     manifests_dir = tmp_path / "manifests"
     publisher = Publisher(
         _config(tmp_path, manifests_dir=manifests_dir,
-                public_key=key.public_key())
+                public_key=key.pubkey_compressed())
     )
     _accept_to_dir(journal, key, manifests_dir, 5, "r-5")
     first = publisher.on_release_accepted()
@@ -222,11 +222,11 @@ def test_missing_manifests_dir_contributes_no_envelopes(tmp_path):
     # A missing dir is not an error by itself: it contributes zero
     # envelopes. Binding still fails closed once an acceptance exists.
     journal = tmp_path / "audit.jsonl"
-    key = Ed25519PrivateKey.generate()
+    key = PrivKey.generate()
     append_audit_event(journal, "test", "first")
     publisher = Publisher(
         _config(tmp_path, manifests_dir=tmp_path / "no-such-dir",
-                public_key=key.public_key())
+                public_key=key.pubkey_compressed())
     )
     assert publisher.build_checkpoint("scheduled")["status"] == "pending"
     manifests = []
@@ -249,7 +249,7 @@ def test_manifests_dir_path_that_is_a_file_fails_closed(tmp_path):
 
 def test_acceptance_without_binding_inputs_fails_closed(tmp_path):
     journal = tmp_path / "audit.jsonl"
-    key = Ed25519PrivateKey.generate()
+    key = PrivKey.generate()
     manifests = []
     _accept(journal, key, manifests, 5, "r-5")
     # Publisher was not given the manifests / public key to check against.
@@ -293,12 +293,12 @@ def test_run_once_bootstrap_anchors_current_head(tmp_path):
 def test_run_once_new_acceptance_triggers_before_interval(tmp_path):
     journal = tmp_path / "audit.jsonl"
     append_audit_event(journal, "test", "first")
-    key = Ed25519PrivateKey.generate()
+    key = PrivKey.generate()
     manifests_dir = tmp_path / "manifests"
     clock = _FakeClock()
     publisher = Publisher(
         _config(tmp_path, interval=3600, manifests_dir=manifests_dir,
-                public_key=key.public_key()),
+                public_key=key.pubkey_compressed()),
         clock=clock,
     )
     assert publisher.run_once()["action"] == "anchored"
@@ -442,11 +442,11 @@ def test_spotcheck_b_no_duplicate_anchor_for_same_head(tmp_path):
 
 def test_spotcheck_c_on_release_fires_exactly_once(tmp_path):
     journal = tmp_path / "audit.jsonl"
-    key = Ed25519PrivateKey.generate()
+    key = PrivKey.generate()
     manifests_dir = tmp_path / "manifests"
     publisher = Publisher(
         _config(tmp_path, manifests_dir=manifests_dir,
-                public_key=key.public_key())
+                public_key=key.pubkey_compressed())
     )
     _accept_to_dir(journal, key, manifests_dir, 3, "r-3")
     records = [publisher.on_release_accepted() for _ in range(3)]
@@ -567,18 +567,13 @@ def test_cli_publish_broadcast_flag_fails_closed(tmp_path, capsys, monkeypatch):
 
 def test_cli_publish_on_release_with_binding(tmp_path, capsys):
     journal = tmp_path / "audit.jsonl"
-    key = Ed25519PrivateKey.generate()
+    key = PrivKey.generate()
     manifests = []
     _accept(journal, key, manifests, 2, "r-2")
     manifest_file = tmp_path / "manifest.json"
     manifest_file.write_text(json.dumps(manifests[0]), encoding="utf-8")
-    public_key_file = tmp_path / "public.pem"
-    from cryptography.hazmat.primitives import serialization
-
-    public_key_file.write_bytes(key.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    ))
+    public_key_file = tmp_path / "public.pub"
+    public_key_file.write_text(key.pubkey_compressed().hex(), encoding="ascii")
     assert main([
         "publish",
         "--journal", str(journal),

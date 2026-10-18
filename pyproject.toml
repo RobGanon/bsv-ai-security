@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bsv-ai-security-phase1"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local AI artifact verification and tamper-evident audit prototype"
 requires-python = ">=3.10"
-dependencies = ["cryptography>=42.0"]
+dependencies = []
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]

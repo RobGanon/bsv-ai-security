@@ -19,7 +19,7 @@ import multiprocessing
 import threading
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from aiguard.bsv import PrivKey
 
 from aiguard.core import (
     manifest_hash,
@@ -35,7 +35,7 @@ from aiguard.publisher import (
 
 def _envelope(key, release_seq, release_id):
     payload = {
-        "schema": "aiguard-manifest-v1",
+        "schema": "aiguard-manifest-v2",
         "release_id": release_id,
         "release_seq": release_seq,
         "artifacts": [{"path": "a.txt", "sha256": "a" * 64, "size": 1}],
@@ -51,7 +51,7 @@ def _config(tmp_path, *, key, manifests, lock_timeout=30.0):
         checkpoint_interval_seconds=3600,
         broadcast_enabled=False,
         manifests=tuple(manifests),
-        public_key=key.public_key(),
+        public_key=key.pubkey_compressed(),
         manifests_dir=None,
         lock_timeout_seconds=lock_timeout,
     )
@@ -59,7 +59,7 @@ def _config(tmp_path, *, key, manifests, lock_timeout=30.0):
 
 def _seed_journal(tmp_path):
     """One acceptance in the journal; return (key, manifests)."""
-    key = Ed25519PrivateKey.generate()
+    key = PrivKey.generate()
     manifests = []
     envelope = _envelope(key, 1, "r1")
     manifests.append(envelope)
@@ -109,7 +109,7 @@ def _child_build(tmp_path, key, manifests, queue, barrier):
                 checkpoint_interval_seconds=3600,
                 broadcast_enabled=False,
                 manifests=tuple(manifests),
-                public_key=key.public_key(),
+                public_key=key.pubkey_compressed(),
                 manifests_dir=None,
             )
         )

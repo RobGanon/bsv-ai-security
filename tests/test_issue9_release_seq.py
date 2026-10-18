@@ -17,7 +17,7 @@ import hashlib
 import json
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from aiguard.bsv import PrivKey
 
 from aiguard.anchor import (
     create_anchor_payload,
@@ -56,13 +56,13 @@ def _write_chained_journal(path, raw_events):
 
 
 def _make_key():
-    return Ed25519PrivateKey.generate()
+    return PrivKey.generate()
 
 
 def _accept(journal, key, manifests, release_seq, release_id):
     """Record a bound acceptance for a freshly signed manifest; stash the envelope."""
     payload = {
-        "schema": "aiguard-manifest-v1",
+        "schema": "aiguard-manifest-v2",
         "release_id": release_id,
         "release_seq": release_seq,
         "artifacts": [{"path": "a.txt", "sha256": "a" * 64, "size": 1}],
@@ -129,7 +129,7 @@ def test_anchor_derives_max_release_seq(tmp_path):
     _accept(journal, key, manifests, 5, "r-5")
     _accept(journal, key, manifests, 3, "r-3")
     result = create_anchor_payload(
-        journal, start_seq=1, manifests=manifests, public_key=key.public_key()
+        journal, start_seq=1, manifests=manifests, public_key=key.pubkey_compressed()
     )
     assert result["release_seq"] == 5
     assert result["end_seq"] == 5
@@ -158,14 +158,14 @@ def test_acceptance_after_end_seq_not_counted(tmp_path):
     prefix.write_text("\n".join(full_lines[:3]) + "\n", encoding="utf-8")
     assert verify_audit_journal(prefix) == 3
     result = create_anchor_payload(
-        prefix, start_seq=1, manifests=manifests, public_key=key.public_key()
+        prefix, start_seq=1, manifests=manifests, public_key=key.pubkey_compressed()
     )
     assert result["end_seq"] == 3
     assert result["release_seq"] == 5  # not 9: seq-4 acceptance is out of range
     # The full journal still derives the max.
     assert (
         create_anchor_payload(
-            journal, start_seq=1, manifests=manifests, public_key=key.public_key()
+            journal, start_seq=1, manifests=manifests, public_key=key.pubkey_compressed()
         )["release_seq"]
         == 9
     )
@@ -188,7 +188,7 @@ def test_tampered_acceptance_refuses_anchor(tmp_path):
         verify_audit_journal(journal)
     with pytest.raises(VerificationError):
         create_anchor_payload(
-            journal, start_seq=1, manifests=manifests, public_key=key.public_key()
+            journal, start_seq=1, manifests=manifests, public_key=key.pubkey_compressed()
         )
 
 
@@ -262,7 +262,7 @@ def test_end_to_end_acceptance_anchor_verify(tmp_path):
     _accept(journal, key, manifests, 4, "release-4")
     append_audit_event(journal, "test", "two")
     result = create_anchor_payload(
-        journal, start_seq=1, manifests=manifests, public_key=key.public_key()
+        journal, start_seq=1, manifests=manifests, public_key=key.pubkey_compressed()
     )
     assert result["release_seq"] == 4
     payload = bytes.fromhex(result["payload_hex"])
@@ -293,7 +293,7 @@ def test_old_anchors_still_decode_and_verify(tmp_path):
     manifests = []
     _accept(journal, key, manifests, 6, "r-6")
     result = create_anchor_payload(
-        journal, start_seq=1, manifests=manifests, public_key=key.public_key()
+        journal, start_seq=1, manifests=manifests, public_key=key.pubkey_compressed()
     )
     assert result["release_seq"] == 6
     assert verify_journal_against_anchor(
@@ -306,8 +306,8 @@ def test_cli_audit_manifest_accepted_and_anchor(tmp_path, capsys):
     payload_file = tmp_path / "anchor.json"
     artifact = tmp_path / "a.txt"
     artifact.write_text("hello", encoding="utf-8")
-    priv = tmp_path / "priv.pem"
-    pub = tmp_path / "pub.pem"
+    priv = tmp_path / "priv.wif"
+    pub = tmp_path / "pub.pub"
     manifest = tmp_path / "manifest.json"
     envelope = tmp_path / "envelope.json"
     assert main(["keygen", "--private-key", str(priv), "--public-key", str(pub)]) == 0

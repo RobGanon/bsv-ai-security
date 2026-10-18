@@ -1,7 +1,7 @@
 import pytest
 from pathlib import Path
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from aiguard.bsv import PrivKey
 
 from aiguard.anchor import (
     create_anchor_payload,
@@ -26,9 +26,9 @@ def write_journal(path: Path, count: int = 3):
 
 def test_payload_has_protocol_layout_and_round_trips(tmp_path):
     journal = write_journal(tmp_path / "audit.jsonl")
-    key = Ed25519PrivateKey.generate()
+    key = PrivKey.generate()
     payload = {
-        "schema": "aiguard-manifest-v1",
+        "schema": "aiguard-manifest-v2",
         "release_id": "release-7",
         "release_seq": 7,
         "artifacts": [{"path": "a.txt", "sha256": "a" * 64, "size": 1}],
@@ -36,7 +36,7 @@ def test_payload_has_protocol_layout_and_round_trips(tmp_path):
     envelope = sign_manifest(payload, key)
     record_manifest_acceptance(journal, 7, "release-7", manifest_hash(envelope))
     result = create_anchor_payload(
-        journal, start_seq=1, manifests=[envelope], public_key=key.public_key()
+        journal, start_seq=1, manifests=[envelope], public_key=key.pubkey_compressed()
     )
     assert result["start_seq"] == 1
     assert result["end_seq"] == 4  # 3 test events + 1 acceptance event

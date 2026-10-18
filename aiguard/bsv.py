@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import secrets
 import struct
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
@@ -284,8 +285,18 @@ def sign_digest(privkey: "PrivKey", digest: bytes) -> bytes:
     return der
 
 
-def verify_sig(pubkey: bytes, digest: bytes, der_sig: bytes) -> bool:
-    """Verify a DER ECDSA signature against a compressed pubkey and digest."""
+def verify_sig(
+    pubkey: bytes, digest: bytes, der_sig: bytes, *, require_low_s: bool = False
+) -> bool:
+    """Verify a DER ECDSA signature against a compressed pubkey and digest.
+
+    With ``require_low_s`` the high-S malleated form is rejected as well
+    (ECDSA verifies both ``s`` and ``N - s`` over the same message).
+    Callers that hash the signature bytes themselves — manifest
+    envelopes via ``core.manifest_hash`` — need the canonical low-S form
+    so that one payload has exactly one valid envelope. On-chain anchor
+    input signatures keep the consensus-compatible default.
+    """
     if len(digest) != 32:
         return False
     try:
@@ -294,6 +305,8 @@ def verify_sig(pubkey: bytes, digest: bytes, der_sig: bytes) -> bool:
     except ValueError:
         return False
     if not 1 <= r < _N or not 1 <= s < _N:
+        return False
+    if require_low_s and s > _N // 2:
         return False
     z = int.from_bytes(digest, "big")
     w = pow(s, -1, _N)
@@ -354,6 +367,28 @@ class PrivKey:
         if len(payload) != 33 or payload[-1] != 0x01:
             raise ValueError("WIF must encode a compressed private key")
         return cls(int.from_bytes(payload[:32], "big"))
+
+    @classmethod
+    def from_wif_any(cls, wif: str) -> "PrivKey":
+        """Load a WIF from either network (manifest keys are not chain keys).
+
+        The WIF network byte carries no meaning for off-chain manifest
+        signing, so both the mainnet (0x80) and testnet (0xEF) version
+        bytes are accepted; the base58check checksum still detects a
+        corrupted key file. Chain use goes through :meth:`from_wif`,
+        which enforces an explicit network at broadcast time.
+        """
+        version, payload = base58check_decode(wif)
+        if version not in _WIF_VERSION.values():
+            raise ValueError(f"unknown WIF version byte 0x{version:02x}")
+        if len(payload) != 33 or payload[-1] != 0x01:
+            raise ValueError("WIF must encode a compressed private key")
+        return cls(int.from_bytes(payload[:32], "big"))
+
+    @classmethod
+    def generate(cls) -> "PrivKey":
+        """Generate a fresh random private key from the OS CSPRNG."""
+        return cls(secrets.randbelow(_N - 1) + 1)
 
     def to_bytes(self) -> bytes:
         return self.secret.to_bytes(32, "big")

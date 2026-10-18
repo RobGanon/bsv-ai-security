@@ -95,7 +95,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="aiguard", description="Local AI artifact trust core")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("keygen", help="generate a development Ed25519 keypair")
+    p = sub.add_parser("keygen", help="generate a development secp256k1 keypair")
     p.add_argument("--private-key", required=True, type=Path)
     p.add_argument("--public-key", required=True, type=Path)
 
@@ -151,7 +151,7 @@ def main(argv=None):
                    help="signed manifest envelope JSON to check acceptances against; "
                    "repeatable; required when the journal contains acceptances")
     p.add_argument("--public-key", type=Path, default=None,
-                   help="trusted manifest-signing public key (PEM); "
+                   help="trusted manifest-signing public key (compressed hex); "
                    "required with --manifest when the journal contains acceptances")
     p.add_argument("--output", required=True, type=Path)
 
@@ -163,7 +163,7 @@ def main(argv=None):
                    help="signed manifest envelope JSON to re-check acceptance binding with; "
                    "repeatable; requires --public-key")
     p.add_argument("--public-key", type=Path, default=None,
-                   help="trusted manifest-signing public key (PEM) for binding re-verification")
+                   help="trusted manifest-signing public key (compressed hex) for binding re-verification")
 
     p = sub.add_parser(
         "anchor-chain-verify",
@@ -185,7 +185,7 @@ def main(argv=None):
                    help="signed manifest envelope JSON for binding re-verification; "
                    "repeatable; requires --public-key")
     p.add_argument("--public-key", type=Path, default=None,
-                   help="trusted manifest-signing public key (PEM) for binding re-verification")
+                   help="trusted manifest-signing public key (compressed hex) for binding re-verification")
     p.add_argument("--spv", action="store_true",
                    help="also verify each anchor tx is really inside its "
                    "claimed block (Merkle root recomputation + header hash "
@@ -274,7 +274,7 @@ def main(argv=None):
                    help="directory of signed manifest envelope JSON files, "
                    "re-read at every checkpoint (for long-running publishers)")
     p.add_argument("--public-key", type=Path, default=None,
-                   help="trusted manifest-signing public key (PEM); "
+                   help="trusted manifest-signing public key (compressed hex); "
                    "required with --manifest when the journal contains acceptances")
 
     args = parser.parse_args(argv)

@@ -16,7 +16,6 @@ import copy
 import json
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from aiguard.anchor import (
     _derive_release_seq,
@@ -32,6 +31,7 @@ from aiguard.bsv import (
     _P,
     _der_decode_signature,
     _pubkey_point,
+    PrivKey,
     sign_digest,
     verify_sig,
 )
@@ -375,10 +375,10 @@ def test_rederived_flag_false_without_manifests(tmp_path):
 
 
 def test_rederived_flag_true_with_manifests(tmp_path):
-    key = Ed25519PrivateKey.generate()
+    key = PrivKey.generate()
     envelope = sign_manifest(
         {
-            "schema": "aiguard-manifest-v1",
+            "schema": "aiguard-manifest-v2",
             "release_id": "r",
             "release_seq": 1,
             "artifacts": [{"path": "a.txt", "sha256": "a" * 64, "size": 1}],
@@ -395,7 +395,7 @@ def test_rederived_flag_true_with_manifests(tmp_path):
         prev_txid=ZERO_TXID,
     )
     result = verify_journal_against_anchor(
-        journal, payload, manifests=[envelope], public_key=key.public_key()
+        journal, payload, manifests=[envelope], public_key=key.pubkey_compressed()
     )
     assert result["release_seq_rederived"] is True
 
@@ -406,10 +406,10 @@ def test_rederived_flag_true_with_manifests(tmp_path):
 def test_derive_release_seq_rejects_duplicate_keys():
     # Duplicate keys with IDENTICAL values: pre-fix this parses fine
     # (last wins) and binding succeeds; post-fix it must be rejected.
-    key = Ed25519PrivateKey.generate()
+    key = PrivKey.generate()
     envelope = sign_manifest(
         {
-            "schema": "aiguard-manifest-v1",
+            "schema": "aiguard-manifest-v2",
             "release_id": "r",
             "release_seq": 1,
             "artifacts": [{"path": "a.txt", "sha256": "a" * 64, "size": 1}],
@@ -427,7 +427,7 @@ def test_derive_release_seq_rejects_duplicate_keys():
     ]
     with pytest.raises(VerificationError):
         _derive_release_seq(
-            events, 1, manifests=[envelope], public_key=key.public_key()
+            events, 1, manifests=[envelope], public_key=key.pubkey_compressed()
         )
 
 

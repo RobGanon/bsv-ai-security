@@ -90,7 +90,7 @@ def decode_anchor_payload(payload: bytes) -> dict[str, Any]:
 def _verified_manifest_map(manifests: Any, public_key: Any) -> dict[str, dict]:
     """Verify each supplied manifest envelope and index it by its hash.
 
-    Every envelope's Ed25519 signature is verified against ``public_key``
+    Every envelope's secp256k1 signature is verified against ``public_key``
     via :func:`core._load_verified_payload`, so caller-supplied manifests
     are safe: a publisher cannot smuggle in a forged manifest without
     the signing key. Returns ``{manifest_hash: payload}`` where payload
@@ -145,7 +145,7 @@ def _derive_release_seq(
     - The detail must parse as a JSON object with ``release_seq``,
       ``release_id``, and ``manifest_hash`` (64-hex).
     - The ``manifest_hash`` must match a supplied manifest envelope
-      whose Ed25519 signature verifies against ``public_key``.
+      whose secp256k1 signature verifies against ``public_key``.
     - The acceptance's ``release_id`` / ``release_seq`` must equal the
       manifest's own fields, so an acceptance cannot be rebound to a
       different release.

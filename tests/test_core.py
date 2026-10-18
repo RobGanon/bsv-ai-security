@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from aiguard.bsv import PrivKey
 
 from aiguard.core import (
     VerificationError,
@@ -27,7 +27,7 @@ def setup_artifacts(tmp_path: Path):
 
 
 def make_signed(root: Path, private=None, release_seq: int = 1):
-    private = private or Ed25519PrivateKey.generate()
+    private = private or PrivKey.generate()
     payload = create_manifest(root, ["model.bin", "config.json"], "test-release", release_seq)
     return private, sign_manifest(payload, private)
 
@@ -35,7 +35,7 @@ def make_signed(root: Path, private=None, release_seq: int = 1):
 def test_valid_manifest_passes(tmp_path):
     root = setup_artifacts(tmp_path)
     private, envelope = make_signed(root)
-    assert verify_manifest(root, envelope, private.public_key()) == ["model.bin", "config.json"]
+    assert verify_manifest(root, envelope, private.pubkey_compressed()) == ["model.bin", "config.json"]
 
 
 def test_modified_artifact_is_rejected(tmp_path):
@@ -43,15 +43,15 @@ def test_modified_artifact_is_rejected(tmp_path):
     private, envelope = make_signed(root)
     (root / "model.bin").write_bytes(b"modified")
     with pytest.raises(VerificationError, match="integrity mismatch"):
-        verify_manifest(root, envelope, private.public_key())
+        verify_manifest(root, envelope, private.pubkey_compressed())
 
 
 def test_wrong_public_key_rejects_manifest(tmp_path):
     root = setup_artifacts(tmp_path)
     _, envelope = make_signed(root)
-    other = Ed25519PrivateKey.generate()
+    other = PrivKey.generate()
     with pytest.raises(VerificationError, match="signature invalid"):
-        verify_manifest(root, envelope, other.public_key())
+        verify_manifest(root, envelope, other.pubkey_compressed())
 
 
 def test_payload_tampering_rejected(tmp_path):
@@ -59,21 +59,21 @@ def test_payload_tampering_rejected(tmp_path):
     private, envelope = make_signed(root)
     envelope["payload"]["release_id"] = "tampered"
     with pytest.raises(VerificationError, match="signature invalid"):
-        verify_manifest(root, envelope, private.public_key())
+        verify_manifest(root, envelope, private.pubkey_compressed())
 
 
 def test_path_traversal_rejected(tmp_path):
     root = setup_artifacts(tmp_path)
-    private = Ed25519PrivateKey.generate()
+    private = PrivKey.generate()
     payload = {
-        "schema": "aiguard-manifest-v1",
+        "schema": "aiguard-manifest-v2",
         "release_id": "bad",
         "release_seq": 1,
         "artifacts": [{"path": "../outside", "sha256": "0" * 64, "size": 0}],
     }
     envelope = sign_manifest(payload, private)
     with pytest.raises(VerificationError, match="path traversal|absolute|empty component"):
-        verify_manifest(root, envelope, private.public_key())
+        verify_manifest(root, envelope, private.pubkey_compressed())
 
 
 def test_missing_artifact_rejected(tmp_path):
@@ -81,7 +81,7 @@ def test_missing_artifact_rejected(tmp_path):
     private, envelope = make_signed(root)
     (root / "model.bin").unlink()
     with pytest.raises(VerificationError, match="missing or not a file"):
-        verify_manifest(root, envelope, private.public_key())
+        verify_manifest(root, envelope, private.pubkey_compressed())
 
 
 def test_audit_chain_round_trip_and_tamper_detection(tmp_path):
@@ -123,13 +123,13 @@ def test_rollback_rejected(tmp_path):
     root = setup_artifacts(tmp_path)
     private, envelope = make_signed(root, release_seq=1)
     with pytest.raises(VerificationError, match="rollback"):
-        verify_manifest(root, envelope, private.public_key(), min_release_seq=2)
+        verify_manifest(root, envelope, private.pubkey_compressed(), min_release_seq=2)
 
 
 def test_current_release_accepted_with_min_seq(tmp_path):
     root = setup_artifacts(tmp_path)
     private, envelope = make_signed(root, release_seq=5)
-    assert verify_manifest(root, envelope, private.public_key(), min_release_seq=5) == [
+    assert verify_manifest(root, envelope, private.pubkey_compressed(), min_release_seq=5) == [
         "model.bin",
         "config.json",
     ]
@@ -140,23 +140,23 @@ def test_release_seq_tampering_rejected(tmp_path):
     private, envelope = make_signed(root)
     envelope["payload"]["release_seq"] = 99
     with pytest.raises(VerificationError, match="signature invalid"):
-        verify_manifest(root, envelope, private.public_key())
+        verify_manifest(root, envelope, private.pubkey_compressed())
 
 
 def test_missing_release_seq_rejected(tmp_path):
     root = setup_artifacts(tmp_path)
-    private = Ed25519PrivateKey.generate()
+    private = PrivKey.generate()
     payload = create_manifest(root, ["model.bin"], "r", 1)
     del payload["release_seq"]
     envelope = sign_manifest(payload, private)
     with pytest.raises(VerificationError):
-        verify_manifest(root, envelope, private.public_key())
+        verify_manifest(root, envelope, private.pubkey_compressed())
 
 
 def test_verified_artifacts_yields_readable_handles(tmp_path):
     root = setup_artifacts(tmp_path)
     private, envelope = make_signed(root)
-    with verified_artifacts(root, envelope, private.public_key()) as arts:
+    with verified_artifacts(root, envelope, private.pubkey_compressed()) as arts:
         assert len(arts) == 2
         assert arts[0].path == "model.bin"
         assert arts[0].handle.read() == b"model-v1"
@@ -168,24 +168,24 @@ def test_verified_artifacts_detects_tampering(tmp_path):
     private, envelope = make_signed(root)
     (root / "model.bin").write_bytes(b"tampered")
     with pytest.raises(VerificationError, match="integrity mismatch"):
-        with verified_artifacts(root, envelope, private.public_key()):
+        with verified_artifacts(root, envelope, private.pubkey_compressed()):
             pass
 
 
 def test_verified_artifacts_rejects_symlink(tmp_path):
     root = setup_artifacts(tmp_path)
-    private = Ed25519PrivateKey.generate()
+    private = PrivKey.generate()
     digest, size = sha256_file(root / "model.bin")
     (root / "link.bin").symlink_to("model.bin")
     payload = {
-        "schema": "aiguard-manifest-v1",
+        "schema": "aiguard-manifest-v2",
         "release_id": "r",
         "release_seq": 1,
         "artifacts": [{"path": "link.bin", "sha256": digest, "size": size}],
     }
     envelope = sign_manifest(payload, private)
     with pytest.raises(VerificationError, match="symlink"):
-        with verified_artifacts(root, envelope, private.public_key()):
+        with verified_artifacts(root, envelope, private.pubkey_compressed()):
             pass
 
 
@@ -193,7 +193,7 @@ def test_verified_artifacts_enforces_rollback(tmp_path):
     root = setup_artifacts(tmp_path)
     private, envelope = make_signed(root, release_seq=1)
     with pytest.raises(VerificationError, match="rollback"):
-        with verified_artifacts(root, envelope, private.public_key(), min_release_seq=2):
+        with verified_artifacts(root, envelope, private.pubkey_compressed(), min_release_seq=2):
             pass
 
 
@@ -306,7 +306,7 @@ def test_manifest_accepts_uppercase_sha256(tmp_path):
     art["sha256"] = art["sha256"].upper()
     # Re-sign so the signature matches the modified payload.
     envelope = sign_manifest(envelope["payload"], private)
-    assert verify_manifest(root, envelope, private.public_key()) == ["model.bin", "config.json"]
+    assert verify_manifest(root, envelope, private.pubkey_compressed()) == ["model.bin", "config.json"]
 
 
 def test_sequential_locked_appends_produce_valid_chain(tmp_path):
@@ -331,14 +331,13 @@ def test_appended_line_matches_canonical_hash_bytes(tmp_path):
 
 
 def test_generate_keypair_rejects_same_private_and_public_path(tmp_path):
-    key_path = tmp_path / "key.pem"
+    key_path = tmp_path / "key.wif"
 
     with pytest.raises(ValueError, match="different|distinct|same"):
         generate_keypair(key_path, key_path)
 
-    # A rejected call must not leave a public key where a private key was expected.
-    if key_path.exists():
-        assert b"PRIVATE KEY" not in key_path.read_bytes()
+    # A rejected call must leave neither key file behind.
+    assert not key_path.exists()
 
 
 @pytest.mark.parametrize("which_path", ["private", "public"])
@@ -349,8 +348,8 @@ def test_generate_keypair_rejects_symlink_output_without_overwriting_target(
     original = b"preserve this file"
     target.write_bytes(original)
 
-    private_path = tmp_path / "private.pem"
-    public_path = tmp_path / "public.pem"
+    private_path = tmp_path / "private.wif"
+    public_path = tmp_path / "public.pub"
     selected = private_path if which_path == "private" else public_path
     selected.symlink_to(target)
 

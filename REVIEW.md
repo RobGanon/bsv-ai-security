@@ -28,8 +28,8 @@ The manifest verifier, the journal, and the anchor checks:
   amount conservation; no script evaluation)
 - `aiguard/cli.py` — the `anchor-chain-verify` surface
 
-About 6,076 lines of production Python, 8,136 lines of tests,
-460 tests passing on `main`.
+About 6,144 lines of production Python, 8,383 lines of tests,
+482 tests passing on `main`.
 
 ## What "good" looks like
 
@@ -61,7 +61,7 @@ The review succeeds if it finds — or rules out — any of these:
 ```sh
 git clone https://github.com/RobGanon/bsv-ai-security.git
 cd bsv-ai-security
-python3 -m pytest -q          # expect: 460 passed
+python3 -m pytest -q          # expect: 482 passed
 ```
 
 Full path for reviewers: `docs/reviewer-quickstart.md`.

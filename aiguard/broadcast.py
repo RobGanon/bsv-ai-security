@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from typing import Callable, Protocol
 
 from .anchor import decode_anchor_payload
-from .bsv import PrivKey, Tx, validate_network
+from .bsv import PrivKey, Tx, sats_from_btc_decimal, validate_network
 
 # Default Teratestnet WhatsOnChain (WoC v1 compatible).
 WOC_TTN_BASE = "https://api.woc-ttn.bsvblockchain.tech/v1/bsv/test"
@@ -168,7 +168,7 @@ class WoCBroadcaster:
             tx = json.loads(body)
             vout = tx["vout"][self.funding.vout]
             script = vout["scriptPubKey"]["hex"]
-            value = int(round(float(vout["value"]) * 1e8))
+            value = sats_from_btc_decimal(vout["value"])
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise BroadcastRejected(
                 f"funding tx {self.funding.txid} has no output {self.funding.vout}"

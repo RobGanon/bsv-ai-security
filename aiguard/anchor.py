@@ -588,6 +588,7 @@ from .bsv import (
     TxIn,
     TxOut,
     build_p2pkh_script,
+    sats_from_btc_decimal,
     sighash_forkid,
     verify_sig,
 )
@@ -650,7 +651,7 @@ def _tx_from_woc_json(tx_json: Any) -> Tx:
     outputs = []
     for entry in vout:
         try:
-            value = int(round(float(entry["value"]) * 1e8))
+            value = sats_from_btc_decimal(entry["value"])
             outputs.append(TxOut(value, bytes.fromhex(entry["scriptPubKey"]["hex"])))
         except (KeyError, TypeError, ValueError) as exc:
             raise VerificationError("tx JSON has a malformed output") from exc
@@ -724,7 +725,7 @@ def verify_anchor_tx_signature(
     prev_out = prev_tx_json["vout"][txin.prev_index]
     try:
         prev_script = bytes.fromhex(prev_out["scriptPubKey"]["hex"])
-        prev_value = int(round(float(prev_out["value"]) * 1e8))
+        prev_value = sats_from_btc_decimal(prev_out["value"])
     except (KeyError, TypeError, ValueError):
         return fail("previous tx output is malformed")
     if prev_script != build_p2pkh_script(pubkey):
@@ -779,6 +780,11 @@ class AnchorSignatureVerifier:
         except VerificationError as exc:
             return SignatureResult(
                 False, txid, reason=f"anchor tx malformed: {exc}"
+            )
+        if tx.txid() != txid:
+            return SignatureResult(
+                False, txid,
+                reason="fetched anchor transaction ID does not match requested txid",
             )
         if len(tx.inputs) != 1:
             return SignatureResult(

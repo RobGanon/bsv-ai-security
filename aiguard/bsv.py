@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import struct
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 
 # secp256k1 domain parameters.
 _P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
@@ -28,6 +29,32 @@ _GY = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
 
 SIGHASH_ALL_FORKID = 0x41
 DUST_SATS = 546
+
+
+def sats_from_btc_decimal(value: object) -> int:
+    """Convert a WoC decimal BTC value to exact integer satoshis.
+
+    Fail-closed: reject non-numeric, non-finite, negative, and
+    sub-satoshi values. Uses Decimal over the shortest repr of the
+    input so no binary floating-point rounding is involved — a
+    ``float`` 0.000995 becomes exactly 99500, never 99499.99999....
+    Raises ValueError on any deviation; callers map it to their own
+    fail-closed error.
+    """
+    try:
+        sats = Decimal(str(value)) * 10**8
+    except (InvalidOperation, ValueError, TypeError, AttributeError) as exc:
+        raise ValueError(f"invalid BTC decimal value {value!r}") from exc
+    if (
+        not sats.is_finite()
+        or sats < 0
+        or sats != sats.to_integral_value()
+    ):
+        raise ValueError(
+            f"BTC decimal value {value!r} is not a whole non-negative "
+            "satoshi amount"
+        )
+    return int(sats)
 
 
 def hash160(data: bytes) -> bytes:

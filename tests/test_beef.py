@@ -498,6 +498,12 @@ def test_apply_beef_inclusion_rejects_non_beef():
 def _run_cli_beef(tmp_path, capsys, monkeypatch, beef, anchor_txid):
     from aiguard import cli as cli_module
     from aiguard.anchor import encode_anchor_payload
+    from aiguard.bsv import build_op_return_script
+
+    claimed = encode_anchor_payload(
+        head_hash="11" * 32, start_seq=1, end_seq=3,
+        release_seq=0, prev_txid="0" * 64,
+    )
 
     class FakeWoC:
         def __init__(self, base_url=None):
@@ -506,14 +512,16 @@ def _run_cli_beef(tmp_path, capsys, monkeypatch, beef, anchor_txid):
         def fetch_header(self, height):
             return _header_36722()
 
+        def fetch_tx_full(self, txid):
+            # The claimed payload is what the fetched tx commits to.
+            script = build_op_return_script(claimed)
+            return {"vout": [{"scriptPubKey": {"hex": script.hex()}}]}
+
     monkeypatch.setattr(cli_module, "WoCBlockFetcher", FakeWoC)
     genesis = "0" * 64
     anchor = tmp_path / "a1.json"
     anchor.write_text(json.dumps({
-        "payload_hex": encode_anchor_payload(
-            head_hash="11" * 32, start_seq=1, end_seq=3,
-            release_seq=0, prev_txid=genesis,
-        ).hex(),
+        "payload_hex": claimed.hex(),
         "txid": anchor_txid,
     }))
     beef_file = tmp_path / "envelope.beef"
@@ -539,6 +547,13 @@ def test_cli_beef_file_accepts_hex(tmp_path, capsys, monkeypatch):
     from aiguard.anchor import encode_anchor_payload
 
     beef, anchor_txid, _child = _ttn_beef()
+    from aiguard.bsv import build_op_return_script
+
+    genesis = "0" * 64
+    claimed = encode_anchor_payload(
+        head_hash="11" * 32, start_seq=1, end_seq=3,
+        release_seq=0, prev_txid=genesis,
+    )
 
     class FakeWoC:
         def __init__(self, base_url=None):
@@ -547,14 +562,14 @@ def test_cli_beef_file_accepts_hex(tmp_path, capsys, monkeypatch):
         def fetch_header(self, height):
             return _header_36722()
 
+        def fetch_tx_full(self, txid):
+            script = build_op_return_script(claimed)
+            return {"vout": [{"scriptPubKey": {"hex": script.hex()}}]}
+
     monkeypatch.setattr(cli_module, "WoCBlockFetcher", FakeWoC)
-    genesis = "0" * 64
     anchor = tmp_path / "a1.json"
     anchor.write_text(json.dumps({
-        "payload_hex": encode_anchor_payload(
-            head_hash="11" * 32, start_seq=1, end_seq=3,
-            release_seq=0, prev_txid=genesis,
-        ).hex(),
+        "payload_hex": claimed.hex(),
         "txid": anchor_txid,
     }))
     beef_file = tmp_path / "envelope.hex"

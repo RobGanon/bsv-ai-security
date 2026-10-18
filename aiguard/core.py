@@ -573,6 +573,17 @@ def append_audit_event(journal: Path, event_type: str, detail: str) -> dict:
             # (the locked FD is binary). The lock serialises concurrent writers.
             prior = _read_jsonl(journal)
             _verify_audit_events(prior)
+            # The journal must end with a newline: otherwise the new line
+            # would concatenate onto the last line and corrupt two lines.
+            # A journal missing only its terminator still verifies (its
+            # content is intact), so this refuses to append rather than
+            # treating the journal as corrupt.
+            os.lseek(fd, -1, os.SEEK_END)
+            if os.read(fd, 1) != b"\n":
+                raise VerificationError(
+                    "audit journal does not end with a newline; "
+                    "refusing to append"
+                )
 
         if len(prior) >= MAX_JOURNAL_EVENTS:
             raise VerificationError(
@@ -592,7 +603,22 @@ def append_audit_event(journal: Path, event_type: str, detail: str) -> dict:
         # (UTF-8, sorted keys, no whitespace, ensure_ascii=False), so the
         # stored bytes match the hashed bytes for independent verifiers.
         line = canonical_json_bytes(event).decode("utf-8") + "\n"
-        os.write(fd, line.encode("utf-8"))
+        # Loop until every byte is written: os.write may write short
+        # (signals, disk pressure), and a torn line would brick the
+        # journal on the next verification.
+        data = memoryview(line.encode("utf-8"))
+        try:
+            while data:
+                written = os.write(fd, data)
+                if written == 0:
+                    raise VerificationError(
+                        "short write appending to audit journal"
+                    )
+                data = data[written:]
+        except OSError as exc:
+            raise VerificationError(
+                f"failed writing to audit journal: {exc}"
+            ) from exc
         os.fsync(fd)
         return event
     finally:

@@ -11,6 +11,7 @@ from .core import (
     VerificationError,
     _check_manifest_hash,
     _load_verified_payload,
+    _no_duplicate_object,
     _read_jsonl,
     _verify_audit_events,
     manifest_hash as compute_manifest_hash,
@@ -181,11 +182,11 @@ def _derive_release_seq(
                 "detail must be a JSON string"
             )
         try:
-            parsed = json.loads(detail)
-        except json.JSONDecodeError as exc:
+            parsed = json.loads(detail, object_pairs_hook=_no_duplicate_object)
+        except ValueError as exc:
             raise VerificationError(
                 f"malformed manifest_accepted detail at sequence {seq}: "
-                "detail is not valid JSON"
+                "detail is not valid JSON or has duplicate keys"
             ) from exc
         if not isinstance(parsed, dict):
             raise VerificationError(
@@ -343,6 +344,11 @@ def verify_journal_against_anchor(
         "head_hash": actual_head,
         "prev_txid": fields["prev_txid"].lower(),
         "chain_inclusion_verified": False,
+        # Whether the anchored release_seq was re-derived from bound
+        # acceptances (True) or returned as committed without
+        # re-derivation (False). Callers that need the full binding
+        # check must look for True here, not just "verified".
+        "release_seq_rederived": manifests is not None,
     }
 
 
@@ -422,6 +428,8 @@ def verify_anchor_chain(anchors: Any, genesis_txid: Any) -> dict[str, Any]:
       txid (no skipped anchors, no reordering).
     - Each later anchor's ``start_seq`` equals the previous anchor's
       ``end_seq + 1`` (no gaps, no overlaps).
+    - Each anchor's ``release_seq`` is >= the previous anchor's
+      (release checkpoints are non-decreasing across anchors).
     - No duplicated txid, no duplicated payload.
     - No fork: no two anchors build on the same predecessor (no
       ``prev_txid`` appears twice), including two anchors both claiming
@@ -516,6 +524,13 @@ def verify_anchor_chain(anchors: Any, genesis_txid: Any) -> dict[str, Any]:
                 f"follow previous end_seq {previous['fields']['end_seq']}: "
                 "sequence gap or overlap"
             )
+        if fields["release_seq"] < previous["fields"]["release_seq"]:
+            raise VerificationError(
+                f"anchor {index} release_seq {fields['release_seq']} is "
+                f"below previous anchor release_seq "
+                f"{previous['fields']['release_seq']}: release checkpoints "
+                "must be non-decreasing across anchors"
+            )
     last = normalized[-1]
     return {
         "verified": True,
@@ -557,6 +572,11 @@ def verify_journal_against_anchor_chain(
     The chain check runs first on purpose: a set of anchors that each
     match the journal individually can still be a broken chain (wrong
     genesis, gap, fork), and that must fail verification, not warn.
+
+    The result carries ``unanchored_events``: journal events after the
+    last anchor's ``end_seq`` (0 when the chain covers the whole
+    journal). A non-zero tail is legitimate between anchors; it is
+    reported so callers can see it, not treated as failure.
     """
     chain = verify_anchor_chain(anchors, genesis_txid)
     per_anchor = [
@@ -568,11 +588,20 @@ def verify_journal_against_anchor_chain(
         )
         for summary in chain["anchors"]
     ]
+    if per_anchor:
+        # Last anchor's end_seq vs total journal events: events after the
+        # last anchor exist legitimately between anchors, but the caller
+        # must be able to see the unanchored tail, not infer it.
+        unanchored = per_anchor[-1]["journal_events"] - chain["last_seq"]
+    else:
+        # No anchors: every journal event is unanchored.
+        unanchored = len(_read_jsonl(journal))
     return {
         "verified": True,
         "chain": chain,
         "anchors": per_anchor,
         "chain_inclusion_verified": False,
+        "unanchored_events": unanchored,
     }
 
 
@@ -893,6 +922,147 @@ def apply_anchor_signatures(result: dict, verifier: AnchorSignatureVerifier) -> 
         **result,
         "anchors": merged,
         "anchor_signatures_verified": all_verified,
+    }
+
+
+def extract_anchor_op_return(tx_json: Any) -> bytes:
+    """Extract the anchor payload from a fetched tx's OP_RETURN output.
+
+    Parses WoC ``/tx/hash`` JSON ``vout`` entries, finds OP_RETURN
+    outputs (script starting with ``0x6a``), and decodes the push
+    (direct length byte, ``0x4c`` PUSHDATA1, ``0x4d`` PUSHDATA2 —
+    mirroring :func:`bsv.build_op_return_script`). Anchor txs carry
+    exactly one OP_RETURN output, so zero, multiple, or malformed
+    OP_RETURN outputs all fail closed with VerificationError.
+    """
+    if not isinstance(tx_json, dict) or not isinstance(
+        tx_json.get("vout"), list
+    ):
+        raise VerificationError("tx JSON must carry a vout list")
+    payloads: list[bytes] = []
+    for entry in tx_json["vout"]:
+        try:
+            script = bytes.fromhex(entry["scriptPubKey"]["hex"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise VerificationError("tx JSON has a malformed output") from exc
+        if not script or script[0] != 0x6A:
+            continue
+        if len(script) < 2:
+            raise VerificationError("OP_RETURN output is malformed: no push")
+        opcode = script[1]
+        if opcode <= 75:
+            n = opcode
+            start = 2
+        elif opcode == 0x4C:  # PUSHDATA1
+            if len(script) < 3:
+                raise VerificationError("OP_RETURN PUSHDATA1 is truncated")
+            n = script[2]
+            start = 3
+        elif opcode == 0x4D:  # PUSHDATA2
+            if len(script) < 4:
+                raise VerificationError("OP_RETURN PUSHDATA2 is truncated")
+            n = int.from_bytes(script[2:4], "little")
+            start = 4
+        else:
+            raise VerificationError(
+                f"OP_RETURN uses unsupported push opcode {opcode:#x}"
+            )
+        if start + n != len(script):
+            raise VerificationError(
+                "OP_RETURN push length does not match the output script"
+            )
+        payloads.append(script[start : start + n])
+    if not payloads:
+        raise VerificationError("tx has no OP_RETURN output")
+    if len(payloads) > 1:
+        raise VerificationError(
+            f"tx has {len(payloads)} OP_RETURN outputs, expected exactly one"
+        )
+    return payloads[0]
+
+
+def apply_payload_binding(result: dict, fetcher: "AnchorTxFetcher") -> dict:
+    """Attach per-anchor payload-binding results to a chain-verify result.
+
+    For each anchor, fetch the on-chain tx and require its OP_RETURN
+    output to equal the claimed payload. This closes the hole where a
+    forged payload paired with a real txid verified: chain continuity,
+    journal head, SPV/BUMP/BEEF inclusion, signature, and header-chain
+    checks all look only at the txid, never at what the tx committed
+    to. Fetch failures are fail-closed (``verified: False`` + reason),
+    never an exception.
+
+    Same two result shapes and non-mutating contract as
+    :func:`apply_anchor_signatures`. Top-level
+    ``payload_binding_verified`` is True only when every anchor binds.
+    """
+    def _binding_for(summary: dict) -> dict:
+        txid = summary.get("txid", "")
+        try:
+            tx_json = fetcher.fetch_tx_full(txid)
+        except Exception as exc:  # fetcher maps its own errors; stay closed
+            return {
+                "verified": False,
+                "reason": f"fetch failed: {exc}",
+            }
+        try:
+            actual = extract_anchor_op_return(tx_json)
+            claimed = bytes.fromhex(summary.get("payload_hex", ""))
+        except (VerificationError, ValueError, TypeError) as exc:
+            return {
+                "verified": False,
+                "reason": f"OP_RETURN extraction failed: {exc}",
+            }
+        if actual != claimed:
+            return {
+                "verified": False,
+                "reason": (
+                    "OP_RETURN payload does not match claimed anchor payload: "
+                    "the on-chain tx never committed to this payload"
+                ),
+            }
+        return {
+            "verified": True,
+            "reason": "OP_RETURN payload matches claimed anchor payload",
+        }
+
+    if "chain" in result:
+        chain = dict(result["chain"])
+        summaries = chain.get("anchors", [])
+        merged = []
+        all_verified = True
+        for summary in summaries:
+            binding = _binding_for(summary)
+            all_verified = all_verified and binding["verified"]
+            merged.append(
+                {
+                    **summary,
+                    "payload_binding_verified": binding["verified"],
+                    "payload_binding": binding,
+                }
+            )
+        chain["anchors"] = merged
+        return {
+            **result,
+            "chain": chain,
+            "payload_binding_verified": all_verified,
+        }
+    merged = []
+    all_verified = True
+    for summary in result.get("anchors", []):
+        binding = _binding_for(summary)
+        all_verified = all_verified and binding["verified"]
+        merged.append(
+            {
+                **summary,
+                "payload_binding_verified": binding["verified"],
+                "payload_binding": binding,
+            }
+        )
+    return {
+        **result,
+        "anchors": merged,
+        "payload_binding_verified": all_verified,
     }
 
 

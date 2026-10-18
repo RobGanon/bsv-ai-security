@@ -169,6 +169,10 @@ def _pubkey_point(pubkey: bytes) -> tuple[int, int]:
     if len(pubkey) != 33 or pubkey[0] not in (0x02, 0x03):
         raise ValueError("pubkey must be a 33-byte compressed secp256k1 key")
     x = int.from_bytes(pubkey[1:], "big")
+    if x >= _P:
+        # pow(x, 3, _P) would silently reduce x mod _P, so an out-of-range
+        # x would decompress to the (x mod _P) point. Reject it instead.
+        raise ValueError("pubkey x-coordinate must be below the field prime")
     y_sq = (pow(x, 3, _P) + 7) % _P
     y = pow(y_sq, (_P + 1) // 4, _P)
     if (y & 1) != (pubkey[0] & 1):
@@ -209,6 +213,25 @@ def _der_encode_signature(r: int, s: int) -> bytes:
     return b"\x30" + bytes([len(body)]) + body
 
 
+def _der_decode_integer(sig: bytes, pos: int, length: int) -> int:
+    """Decode one DER INTEGER with strict minimal-encoding checks.
+
+    Rejects zero-length integers, negative integers (first byte high-bit
+    set), and non-minimal leading zeros (a ``0x00`` pad before a byte
+    whose high bit is clear). A ``0x00`` pad before a high-bit-set byte
+    IS minimal and is accepted. Without these checks, non-canonical
+    encodings of the same (r, s) would verify — signature malleability.
+    """
+    if length == 0:
+        raise ValueError("DER integer has zero length")
+    raw = sig[pos : pos + length]
+    if raw[0] & 0x80:
+        raise ValueError("DER integer is negative")
+    if length > 1 and raw[0] == 0x00 and (raw[1] & 0x80) == 0:
+        raise ValueError("DER integer has a non-minimal leading zero")
+    return int.from_bytes(raw, "big")
+
+
 def _der_decode_signature(sig: bytes) -> tuple[int, int]:
     if len(sig) < 8 or sig[0] != 0x30:
         raise ValueError("signature is not DER")
@@ -223,13 +246,15 @@ def _der_decode_signature(sig: bytes) -> tuple[int, int]:
     # ValueError here, not an IndexError at sig[s_pos].
     if s_pos >= len(sig):
         raise ValueError("DER signature truncated at R")
-    r = int.from_bytes(sig[4 : 4 + r_len], "big")
+    r = _der_decode_integer(sig, 4, r_len)
     if sig[s_pos] != 0x02:
         raise ValueError("DER signature missing S")
     if s_pos + 1 >= len(sig):
         raise ValueError("DER signature truncated at S")
     s_len = sig[s_pos + 1]
-    s = int.from_bytes(sig[s_pos + 2 : s_pos + 2 + s_len], "big")
+    if s_pos + 2 + s_len > len(sig):
+        raise ValueError("DER signature truncated at S")
+    s = _der_decode_integer(sig, s_pos + 2, s_len)
     if s_pos + 2 + s_len != len(sig):
         raise ValueError("DER signature trailing bytes")
     return r, s
@@ -251,7 +276,12 @@ def sign_digest(privkey: "PrivKey", digest: bytes) -> bytes:
         raise ValueError("degenerate signature (s == 0)")
     if s > _N // 2:  # low-S normalization (BIP 62)
         s = _N - s
-    return _der_encode_signature(r, s)
+    der = _der_encode_signature(r, s)
+    # Self-verify: a signing bug must surface here, not as an invalid
+    # signature handed to the caller (or broadcast on-chain).
+    if not verify_sig(privkey.pubkey_compressed(), digest, der):
+        raise ValueError("self-verification of produced signature failed")
+    return der
 
 
 def verify_sig(pubkey: bytes, digest: bytes, der_sig: bytes) -> bool:

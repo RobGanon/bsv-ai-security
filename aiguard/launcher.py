@@ -205,6 +205,25 @@ def resolve_gid(value) -> int | None:
     return _resolve_id(value, kind="gid")
 
 
+def _primary_gid(uid: int) -> int:
+    """Return the passwd primary group for ``uid``.
+
+    Dropping only the uid would leave the process in the caller's primary
+    group (root's, in the privileged case), so a uid without an explicit
+    gid defaults to the user's own group. A uid with no passwd entry has
+    no safe default and fails closed.
+    """
+    import pwd
+
+    try:
+        return pwd.getpwuid(uid).pw_gid
+    except KeyError as exc:
+        raise VerificationError(
+            f"uid {uid} has no passwd entry; pass an explicit --gid so the "
+            f"launched process does not keep the caller's group"
+        ) from exc
+
+
 def launch(
     root: Path,
     envelope: dict,
@@ -232,6 +251,19 @@ def launch(
             "launch requires a command to run (use '-- CMD [ARGS...]')"
         )
 
+    # A uid without a gid would leave the process in the caller's primary
+    # group; default to the target user's own group (fail closed if it has
+    # no passwd entry).
+    if uid is not None and gid is None:
+        gid = _primary_gid(uid)
+
+    # When dropping privilege from a privileged caller, also clear
+    # supplementary groups, or the child keeps root's group memberships.
+    # Clearing them requires privilege, so only do it when we have it.
+    drop_groups: tuple[int, ...] | None = None
+    if (uid is not None or gid is not None) and os.geteuid() == 0:
+        drop_groups = ()
+
     with verified_artifacts(root, envelope, public_key, min_release_seq) as artifacts:
         channels: list[tuple[str, int]] = []
         sealed_fds: list[int] = []
@@ -251,6 +283,7 @@ def launch(
                     env=child_env,
                     user=uid,
                     group=gid,
+                    extra_groups=drop_groups,
                     check=False,
                 )
             except PermissionError as exc:

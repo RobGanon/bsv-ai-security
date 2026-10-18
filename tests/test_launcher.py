@@ -86,14 +86,17 @@ class _RunSpy:
         self.pass_fds = ()
         self.user = None
         self.group = None
+        self.extra_groups = None
         self.reads = None
 
-    def __call__(self, argv, *, pass_fds=(), env=None, user=None, group=None, check=False):
+    def __call__(self, argv, *, pass_fds=(), env=None, user=None, group=None,
+                 extra_groups=None, check=False):
         self.argv = list(argv)
         self.pass_fds = tuple(pass_fds)
         self.env = env
         self.user = user
         self.group = group
+        self.extra_groups = extra_groups
         if self.action is not None:
             self.action(self)
         return subprocess.CompletedProcess(argv, self.returncode)
@@ -413,6 +416,28 @@ def test_launch_refuses_unprivileged_privilege_drop(tmp_path):
                [sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"],
                uid=0, gid=0)
     assert not marker.exists()
+
+
+def test_launch_defaults_gid_to_target_users_group(tmp_path, monkeypatch):
+    root = setup_artifacts(tmp_path)
+    private, envelope = make_signed(root)
+    spy = _RunSpy()
+    install_spy(monkeypatch, spy)
+    rc = launch(root, envelope, private.pubkey_compressed(), ["true"],
+                uid=os.getuid())
+    assert rc == 0
+    assert spy.user == os.getuid()
+    assert spy.group == pwd.getpwuid(os.getuid()).pw_gid
+    # Not privileged in the test, so supplementary groups are left alone.
+    assert spy.extra_groups is None
+
+
+def test_launch_uid_without_passwd_entry_requires_gid(tmp_path):
+    root = setup_artifacts(tmp_path)
+    private, envelope = make_signed(root)
+    with pytest.raises(VerificationError, match="no passwd entry"):
+        launch(root, envelope, private.pubkey_compressed(), ["true"],
+               uid=2 ** 31 - 1)
 
 
 # --------------------------------------------------------------------------

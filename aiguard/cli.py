@@ -45,6 +45,7 @@ from .publisher import (
 )
 from .core import (
     VerificationError,
+    _no_duplicate_object,
     append_audit_event,
     create_manifest,
     generate_keypair,
@@ -59,7 +60,13 @@ from .core import (
 
 
 def _read_json(path: Path):
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_no_duplicate_object,
+        )
+    except ValueError as exc:
+        raise VerificationError(f"invalid JSON in {path}: {exc}") from exc
 
 
 def _read_beef(path: Path):

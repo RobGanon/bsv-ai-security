@@ -90,7 +90,7 @@ from .anchor import (
     decode_anchor_payload,
     verify_anchor_chain,
 )
-from .core import HEX_64, VerificationError, _read_jsonl, _verify_audit_events
+from .core import HEX_64, VerificationError, _no_duplicate_object, _read_jsonl, _verify_audit_events
 
 MANIFEST_ACCEPTED_EVENT_TYPE = "manifest_accepted"
 
@@ -484,7 +484,10 @@ class Publisher:
             if directory.is_dir():
                 for path in sorted(directory.glob("*.json")):
                     try:
-                        envelope = json.loads(path.read_text(encoding="utf-8"))
+                        envelope = json.loads(
+                            path.read_text(encoding="utf-8"),
+                            object_pairs_hook=_no_duplicate_object,
+                        )
                     except (OSError, ValueError) as exc:
                         raise PublisherError(
                             f"cannot read manifest envelope: {path}"

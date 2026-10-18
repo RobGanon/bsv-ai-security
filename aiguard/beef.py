@@ -464,7 +464,10 @@ def apply_beef_inclusion(result: dict, verifier: BeefVerifier, beef: Beef) -> di
     not in the envelope verify as False. Same two result shapes and
     non-mutating contract as apply_bump_inclusion. Top-level
     ``beef_inclusion_verified`` is True only when every anchor's tx
-    is in the envelope and verifies.
+    is in the envelope and verifies. Per-anchor verdicts carry
+    ``verified: True`` with ``status: "ancestry"`` for unmined txs — that
+    means ancestry + amount conservation only, not signature verification;
+    consumers must read ``status``, not the bare ``verified`` flag.
     """
     if not isinstance(beef, Beef):
         raise ValueError("beef must be a Beef")

@@ -28,8 +28,8 @@ The manifest verifier, the journal, and the anchor checks:
   amount conservation; no script evaluation)
 - `aiguard/cli.py` — the `anchor-chain-verify` surface
 
-About 5,508 lines of production Python, 6,101 lines of tests,
-376 tests passing on `main`.
+About 5,717 lines of production Python, 6,745 lines of tests,
+411 tests passing on `main`.
 
 ## What "good" looks like
 
@@ -44,13 +44,14 @@ The review succeeds if it finds — or rules out — any of these:
 ## Out of scope
 
 - Mainnet. Everything chain-related is Teratestnet play money.
-- Compact SPV proofs / BEEF envelope — BUMP (BRC-74) parse/verify/build
+- BUMP / BEEF scope boundaries (not findings) — BUMP (BRC-74) parse/verify/build
   + `anchor-chain-verify --bump-file`, and BEEF (BRC-62) envelope
   parse/verify + `anchor-chain-verify --beef-file`, are implemented;
   no public source serves BUMPs or BEEF, so proofs/envelopes are
   operator-supplied. BEEF verification covers inclusion + ancestry +
   amount conservation; it does NOT evaluate scripts, so an unmined
-  tx's signatures are not checked.
+  tx's signatures are not checked. Do not re-report these scope
+  boundaries as findings.
 - Performance, UX, and the separate BRC-166 paid-endpoint harness.
 - Whether BSV is the "right" chain. The review is about this code's
   correctness, not the choice of backend.
@@ -60,7 +61,7 @@ The review succeeds if it finds — or rules out — any of these:
 ```sh
 git clone https://github.com/RobGanon/bsv-ai-security.git
 cd bsv-ai-security
-python3 -m pytest -q          # expect: 376 passed
+python3 -m pytest -q          # expect: 411 passed
 ```
 
 Full path for reviewers: `docs/reviewer-quickstart.md`.
@@ -90,7 +91,19 @@ What was actually executed, by the author (with AI assistance):
   (sequence gaps, anchor fuzz, torn appends, successive anchors,
   tampered headers, checkpoint mismatch, over-cap walks, fetch
   errors). Zero cases found of the verifier accepting what it
-  should reject.
+  should reject. The probes are scenario-based, not exhaustive,
+  and zero cases found is not evidence of soundness; there is no
+  formal verification.
+- Adversarial BSV verification pass (152 executed probes over
+  anchor/sighash/Merkle/BUMP/header-chain/BEEF/CLI/decimal/
+  broadcaster): no false-accept found. 5 findings, all
+  robustness/scope gaps — exception escapes from fail-closed
+  verifiers, CLI exit code 0 on failed checks, BEEF ancestry
+  accepting consensus-invalid unmined txs, negative `prev_index`
+  reading `vout[-1]`, and prev-txid not validated (already known,
+  still deferred). The first four were fixed in PR #33 with 31
+  regression tests; the prev-txid gap stays deferred pending a
+  complete prev-tx fixture.
 - Full suite runs on exact merged bytes: 369 tests passing on
   `main` @ `137de50`.
 
@@ -103,11 +116,10 @@ What was **not** counted as executed testing:
   executed independently in its environment, and was closed
   unmerged.
 
-The counts above reflect executed tests only. The probes are
-scenario-based, not exhaustive; there is no formal verification.
-The author's own testing above is not independent review — which
-is why this document exists. Independent review has begun (see
-below) and is still in progress.
+The counts above reflect executed tests only. The author's own
+testing above is not independent review — which is why this
+document exists. Independent review has begun (see below) and is
+still in progress.
 
 ## Independent review so far
 

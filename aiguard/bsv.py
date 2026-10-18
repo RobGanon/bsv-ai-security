@@ -10,6 +10,9 @@ verifier's job (ADR 0001).
 
 Signing is RFC 6979 deterministic with low-S normalization: no RNG is
 involved in signature generation, so a bad RNG cannot leak the key.
+The implementation is pure-Python bignum arithmetic and is not
+constant-time; timing side-channels would require local access to
+the signing host.
 
 Sighash is SIGHASH_ALL | SIGHASH_FORKID (0x41), BIP 143.
 """

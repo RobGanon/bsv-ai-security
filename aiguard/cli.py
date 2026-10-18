@@ -11,6 +11,7 @@ from .anchor import (
     AnchorSignatureVerifier,
     apply_anchor_signatures,
     apply_header_chain,
+    apply_payload_binding,
     create_anchor_payload,
     verify_anchor_chain,
     verify_journal_against_anchor,
@@ -428,6 +429,24 @@ def main(argv=None):
                 # whose vacuous-True semantics are unchanged.
                 print("ERROR: no anchors to verify", file=sys.stderr)
                 return 1
+            # Payload binding: whenever any on-chain check is requested,
+            # the claimed payload must equal the OP_RETURN output of the
+            # fetched on-chain tx. Without this, a forged payload paired
+            # with a real txid would pass every other check (they all
+            # look only at the txid). Skipped for local-only runs, where
+            # no on-chain claim is made.
+            on_chain = (
+                args.spv
+                or args.bump_file is not None
+                or args.beef_file is not None
+                or args.anchor_sig
+                or args.header_chain
+            )
+            if on_chain:
+                result = apply_payload_binding(
+                    result,
+                    WoCBlockFetcher(base_url=args.woc_base),
+                )
             if args.spv:
                 result = apply_chain_inclusion(
                     result,
@@ -489,7 +508,20 @@ def main(argv=None):
                     ),
                 )
             print(json.dumps(result, indent=2, sort_keys=True))
-            if args.spv and result.get("chain_inclusion_verified"):
+            # Binding did not run for local-only verification; when it
+            # ran, its VERIFIED banners below must not print on failure.
+            binding_ok = result.get("payload_binding_verified", True)
+            if "payload_binding_verified" in result and not binding_ok:
+                print(
+                    "PAYLOAD BINDING CHECK FAILED: see per-anchor reasons."
+                )
+            tail = result.get("unanchored_events")
+            if tail is not None and tail > 0:
+                print(
+                    f"{tail} journal event(s) after the last anchor "
+                    "are not yet anchored"
+                )
+            if args.spv and binding_ok and result.get("chain_inclusion_verified"):
                 count = result.get("anchor_count") or (
                     result.get("chain", {}).get("anchor_count")
                 )
@@ -501,12 +533,12 @@ def main(argv=None):
                 count = result.get("anchor_count") or (
                     result.get("chain", {}).get("anchor_count")
                 )
-                if result.get("bump_inclusion_verified"):
+                if binding_ok and result.get("bump_inclusion_verified"):
                     print(
                         f"BUMP INCLUSION VERIFIED: {count} anchor(s) proven "
                         "inside their claimed blocks from compact proofs."
                     )
-                else:
+                elif not result.get("bump_inclusion_verified"):
                     print(
                         "BUMP INCLUSION CHECK FAILED: see per-anchor reasons."
                     )
@@ -514,12 +546,12 @@ def main(argv=None):
                 count = result.get("anchor_count") or (
                     result.get("chain", {}).get("anchor_count")
                 )
-                if result.get("beef_inclusion_verified"):
+                if binding_ok and result.get("beef_inclusion_verified"):
                     print(
                         f"BEEF INCLUSION VERIFIED: {count} anchor(s) proven "
                         "inside their claimed blocks from the envelope."
                     )
-                else:
+                elif not result.get("beef_inclusion_verified"):
                     print(
                         "BEEF INCLUSION CHECK FAILED: see per-anchor reasons."
                     )
@@ -533,12 +565,12 @@ def main(argv=None):
                 count = result.get("anchor_count") or (
                     result.get("chain", {}).get("anchor_count")
                 )
-                if result.get("anchor_signatures_verified"):
+                if binding_ok and result.get("anchor_signatures_verified"):
                     print(
                         f"ANCHOR SIGNATURES VERIFIED: {count} anchor(s) "
                         "signed by the trusted anchor key."
                     )
-                else:
+                elif not result.get("anchor_signatures_verified"):
                     print(
                         "ANCHOR SIGNATURE CHECK FAILED: see per-anchor reasons."
                     )
@@ -546,12 +578,12 @@ def main(argv=None):
                 count = result.get("anchor_count") or (
                     result.get("chain", {}).get("anchor_count")
                 )
-                if result.get("header_chain_verified"):
+                if binding_ok and result.get("header_chain_verified"):
                     print(
                         f"HEADER CHAIN VERIFIED: {count} anchor(s) chained "
                         "back to the pinned checkpoint."
                     )
-                else:
+                elif not result.get("header_chain_verified"):
                     print(
                         "HEADER CHAIN CHECK FAILED: see per-anchor reasons."
                     )
@@ -565,6 +597,8 @@ def main(argv=None):
             # the exit code must not read a FAILED line as success.
             chain_result = result.get("chain", result)
             failed = not chain_result.get("verified")
+            if "payload_binding_verified" in result:
+                failed = failed or not result.get("payload_binding_verified")
             if args.spv:
                 failed = failed or not result.get("chain_inclusion_verified")
             if args.bump_file is not None:

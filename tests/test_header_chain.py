@@ -284,6 +284,13 @@ def test_apply_header_chain_journal_shape():
 
 def test_cli_header_chain_verifies_and_prints_line(tmp_path, capsys, monkeypatch):
     from aiguard import cli as cli_module
+    from aiguard.bsv import build_op_return_script
+
+    genesis = "0" * 64
+    claimed = encode_anchor_payload(
+        head_hash="11" * 32, start_seq=1, end_seq=3,
+        release_seq=0, prev_txid=genesis,
+    )
 
     class FakeWoC:
         def __init__(self, base_url=None):
@@ -295,14 +302,14 @@ def test_cli_header_chain_verifies_and_prints_line(tmp_path, capsys, monkeypatch
         def fetch_header(self, height):
             return self.inner.fetch_header(height)
 
+        def fetch_tx_full(self, txid):
+            script = build_op_return_script(claimed)
+            return {"vout": [{"scriptPubKey": {"hex": script.hex()}}]}
+
     monkeypatch.setattr(cli_module, "WoCBlockFetcher", FakeWoC)
     anchor1 = tmp_path / "a1.json"
-    genesis = "0" * 64
     anchor1.write_text(json.dumps({
-        "payload_hex": encode_anchor_payload(
-            head_hash="11" * 32, start_seq=1, end_seq=3,
-            release_seq=0, prev_txid=genesis,
-        ).hex(),
+        "payload_hex": claimed.hex(),
         "txid": TX1,
     }))
     cli_module.main([

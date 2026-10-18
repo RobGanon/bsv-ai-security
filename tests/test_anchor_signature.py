@@ -15,6 +15,7 @@ from aiguard.anchor import (
     _tx_from_woc_json,
     apply_anchor_signatures,
     encode_anchor_payload,
+    extract_anchor_op_return,
     parse_p2pkh_script_sig,
     verify_anchor_chain,
     verify_anchor_tx_signature,
@@ -300,11 +301,11 @@ def test_cli_anchor_sig_verifies_and_prints_line(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(cli_module, "WoCBlockFetcher", FakeWoC)
     anchor1 = tmp_path / "a1.json"
     genesis = "0" * 64
+    # The claimed payload must be the one the fetched tx's OP_RETURN
+    # actually commits to — a synthetic payload paired with the real
+    # txid now (correctly) fails payload binding.
     anchor1.write_text(json.dumps({
-        "payload_hex": encode_anchor_payload(
-            head_hash="11" * 32, start_seq=1, end_seq=3,
-            release_seq=0, prev_txid=genesis,
-        ).hex(),
+        "payload_hex": extract_anchor_op_return(ANCHOR1_TX).hex(),
         "txid": TX1,
     }))
     cli_module.main([

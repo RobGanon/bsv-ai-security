@@ -26,4 +26,30 @@ jobs:
       - name: Install package and test dependencies
         run: python -m pip install -e ".[test]"
       - name: Run test suite
-        run: python -m pytest -q
+        id: tests
+        run: python -m pytest -q --junitxml=test-results.xml
+      - name: Generate test report
+        if: always()
+        env:
+          TEST_RESULT_FILE: test-results.xml
+          TEST_REPORT_FILE: test-report.md
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          RUNNER_OS: ${{ runner.os }}
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: python scripts/summarize_test_results.py
+      - name: Add test summary to workflow run
+        if: always()
+        run: cat test-report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Archive test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-evidence-python-${{ matrix.python-version }}
+          path: |
+            test-results.xml
+            test-report.md
+          if-no-files-found: warn
+          retention-days: 90

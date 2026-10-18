@@ -155,6 +155,14 @@ class WoCBroadcaster:
 
     def _fetch_prev_output(self) -> tuple[str, int]:
         """Return (locking script hex, value sats) for the funding outpoint."""
+        if (
+            not isinstance(self.funding.vout, int)
+            or isinstance(self.funding.vout, bool)
+            or not 0 <= self.funding.vout <= 0xFFFFFFFF
+        ):
+            raise BroadcastRejected(
+                f"funding vout {self.funding.vout!r} is not a uint32 output index"
+            )
         url = f"{self.base_url}/tx/hash/{self.funding.txid}"
         try:
             status, body = self._request("GET", url, None)

@@ -373,7 +373,29 @@ class BeefVerifier:
         reason = "ancestry verified"
         total_in = 0
         if ok:
+            # Consensus validity for unmined txs: a tx with no inputs or
+            # no outputs, a negative output, or a duplicated input pair
+            # can never be mined, so it must not verify as "ancestry
+            # verified" even when the arithmetic happens to balance.
+            # (Mined txs take the BUMP path and are not checked here.)
+            if not parsed_tx.inputs or not parsed_tx.outputs:  # type: ignore[union-attr]
+                ok = False
+                reason = "unmined tx must have at least one input and one output"
+            elif any(out.value < 0 for out in parsed_tx.outputs):  # type: ignore[union-attr]
+                ok = False
+                reason = "unmined tx has a negative output value"
+        if ok:
+            seen_inputs: set[tuple[str, int]] = set()
             for txin in parsed_tx.inputs:  # type: ignore[union-attr]
+                pair = (txin.prev_txid.lower(), txin.prev_index)
+                if pair in seen_inputs:
+                    ok = False
+                    reason = (
+                        f"duplicate input spends {txin.prev_txid}:"
+                        f"{txin.prev_index} twice"
+                    )
+                    break
+                seen_inputs.add(pair)
                 parent_key = txin.prev_txid.lower()
                 parent = by_txid.get(parent_key)
                 if parent is None:
@@ -400,7 +422,11 @@ class BeefVerifier:
                     )
                     break
                 parent_tx = parsed.get(parent_key)
-                if parent_tx is None or txin.prev_index >= len(parent_tx.outputs):  # type: ignore[union-attr]
+                if (
+                    parent_tx is None
+                    or txin.prev_index < 0
+                    or txin.prev_index >= len(parent_tx.outputs)
+                ):  # type: ignore[union-attr]
                     ok = False
                     reason = (
                         f"input references vout {txin.prev_index} of "

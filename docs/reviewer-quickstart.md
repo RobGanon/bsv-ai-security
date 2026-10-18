@@ -8,7 +8,7 @@ No trust needed: run it yourself.
 git clone https://github.com/RobGanon/bsv-ai-security.git
 cd bsv-ai-security
 python3 -m pip install -e ".[test]"
-python3 -m pytest -q          # expect: 482 passed
+python3 -m pytest -q          # expect: 512 passed
 ```
 
 Python 3.10+. CI runs the same suite on 3.10, 3.11, and 3.12 on
@@ -22,12 +22,14 @@ the suite does not pass in yours, that is a finding too; report it.
   known limitations (please don't re-report those as findings).
 - `docs/anchoring-protocol.md` — the protocol: what an anchor proves
   (history integrity and existence — NOT truthfulness).
-- The verifier core: `aiguard/core.py` (manifests, journal), `aiguard/publisher.py`
+- The verifier core: `aiguard/core.py` (manifests, journal), `aiguard/launcher.py`
+  (verify → exec on pinned handles, sealed-memfd freeze, privilege drop),
+  `aiguard/publisher.py`
   and `aiguard/publishing.py` (acceptance + anchor prep),
   `aiguard/anchor.py` (anchor-chain checks), `aiguard/bsv.py` (minimal
   BSV primitives, BIP 143 sighash), `aiguard/spv.py` (Merkle inclusion,
   header-chain walk, BUMP proofs), `aiguard/beef.py` (BEEF envelope
-  parse/verify), `aiguard/cli.py` (the `anchor-chain-verify` surface).
+  parse/verify), `aiguard/cli.py` (the `launch`/`anchor-chain-verify` surfaces).
 
 ## 3. Try to break it
 

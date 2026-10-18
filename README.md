@@ -37,7 +37,7 @@ they have not been altered after recording. It is the provenance
 pillar of AI security: proving what ran, not whether the model
 behaved well.
 
-Status: 482 tests passing on main, plus adversarial spot-checks on
+Status: 512 tests passing on main, plus adversarial spot-checks on
 every feature. Independent security review is still open
 ([issue #4](https://github.com/RobGanon/bsv-ai-security/issues/4)) —
 we state that plainly because it matters.
@@ -122,7 +122,7 @@ open an issue.
 
 ---
 
-## Phase 1: Linux trust core (v0.3.0)
+## Phase 1: Linux trust core (v0.4.0)
 
 This prototype verifies a signed manifest of local AI artifacts and records local
 security events in a hash-chained JSONL audit journal. It is intentionally
@@ -131,8 +131,8 @@ limited in scope:
 - SHA-256 identifies artifact bytes; secp256k1 ECDSA verifies the release manifest.
 - The audit journal is append-only under normal operation and hash-chained so
   that any modification of earlier events is detectable.
-- The manifest verifier does not itself sandbox or launch a model. Do not use
-  this as a complete AI runtime security solution.
+- The manifest verifier does not itself sandbox a model. `aiguard launch`
+  pins the verified bytes across exec, but containment is out of scope.
 - The manifest uses relative artifact paths and rejects path traversal/symlinks.
 
 ### Quick start
@@ -141,34 +141,61 @@ limited in scope:
 pip install -e .
 
 # Generate a key pair (demo only — production keys must be offline / HSM).
-aiguard keygen --private demo/private.wif --public demo/public.pub
+aiguard keygen --private-key demo/private.wif --public-key demo/public.pub
 
 # Create an unsigned manifest template, then sign it.
 aiguard manifest-create \
   --root demo/artifacts \
-  --paths model.bin config.json \
+  --artifact model.bin --artifact config.json \
   --release-id demo-release-001 \
   --release-seq 1 \
   --output demo/manifest.json
 
 aiguard manifest-sign \
   --manifest demo/manifest.json \
-  --private demo/private.wif \
+  --private-key demo/private.wif \
   --output demo/manifest.signed.json
 
 # Verify (paths relative to --root).
 aiguard verify \
   --root demo/artifacts \
   --manifest demo/manifest.signed.json \
-  --public demo/public.pub
+  --public-key demo/public.pub
 
 # Optional rollback protection: reject any manifest older than sequence 1.
 aiguard verify \
   --root demo/artifacts \
   --manifest demo/manifest.signed.json \
-  --public demo/public.pub \
+  --public-key demo/public.pub \
   --min-release-seq 1
+
+# Launch against the verified handles instead of reopening paths.
+aiguard launch \
+  --root demo/artifacts \
+  --manifest demo/manifest.signed.json \
+  --public-key demo/public.pub \
+  -- /bin/sh -c 'cat "$AIGUARD_ARTIFACT_MODEL_BIN"'
 ```
+
+## Launching with verified handles
+
+`aiguard verify` proves the manifest, then exits — a caller that launches
+the model *by path* reopens the artifacts, leaving a window for a path
+swap between check and use. `aiguard launch` closes that window: it runs
+the same verification, keeps the verified descriptors open, and hands
+them to the command via `AIGUARD_ARTIFACT_*` environment variables
+pointing at `/proc/self/fd/N`.
+
+- `--seal` copies each artifact into a sealed `memfd` first, so the child
+  reads a frozen snapshot even if a writer mutates the original (costs a
+  copy in RAM; opt-in).
+- `--uid`/`--gid` drop privilege before exec, so a launcher started as
+  root can make the model run unprivileged. If the drop is not permitted
+  the command does not run; `--uid` alone uses the target user's primary
+  group and supplementary groups are cleared.
+- The launcher pins *what bytes are launched*; it does not sandbox the
+  child. See [`docs/launcher.md`](docs/launcher.md) for the contract and
+  the residual limits.
 
 ## Audit journal
 
@@ -268,7 +295,8 @@ pipeline. Details: [`docs/pilot-brief.md`](docs/pilot-brief.md).
    (testnet default; mainnet behind separate confirmation)~~ — done.
 4. ~~Independent SPV / header-chain verification~~ — done.
 5. ~~Migrate manifest signing from Ed25519 to secp256k1~~ — done.
-6. Privileged launcher that consumes verified artifact handles.
+6. ~~Privileged launcher that consumes verified artifact handles~~ — done
+   (`aiguard launch`; see `docs/launcher.md`).
 
 ## License
 

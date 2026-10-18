@@ -18,6 +18,8 @@ It is a peer review ask, not a paid audit.
 The manifest verifier, the journal, and the anchor checks:
 
 - `aiguard/core.py` — manifest verification, TOCTOU-resistant fd handoff
+- `aiguard/launcher.py` — privileged launcher: verify, pin handles across
+  exec, optional sealed-memfd freeze, privilege drop
 - `aiguard/publisher.py`, `aiguard/publishing.py` — acceptance + anchor prep
 - `aiguard/anchor.py` — anchor-chain verification (continuity, signatures)
 - `aiguard/bsv.py` — minimal BSV primitives: secp256k1, tx build/sign,
@@ -26,10 +28,10 @@ The manifest verifier, the journal, and the anchor checks:
 - `aiguard/spv.py` — inclusion (Merkle recomputation), header-chain walk
 - `aiguard/beef.py` — BEEF envelope parse/verify (inclusion + ancestry +
   amount conservation; no script evaluation)
-- `aiguard/cli.py` — the `anchor-chain-verify` surface
+- `aiguard/cli.py` — the `verify`/`launch`/`anchor-chain-verify` surfaces
 
-About 6,144 lines of production Python, 8,383 lines of tests,
-482 tests passing on `main`.
+About 6,480 lines of production Python, 8,920 lines of tests,
+512 tests passing on `main`.
 
 ## What "good" looks like
 

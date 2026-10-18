@@ -259,8 +259,10 @@ security margin for how much history is exposed to silent rewrite.
 
 - Real-time false-event injection by a compromised admin (detectable only
   after the fact, by out-of-band audit of event *contents*).
-- The verify→launch TOCTOU gap (needs the privileged launcher consuming
-  `verified_artifacts()` handles — see Phase 1 v0.2.0 README).
+- The verify→launch TOCTOU gap is closed by `aiguard launch`, which
+  consumes `verified_artifacts()` handles instead of reopening paths; the
+  residual in-place-mutation window is closed by `--seal` (see
+  `docs/launcher.md`). The launcher does not sandbox the child.
 - Private-key protection on the AI host itself.
 - Liveness of the anchor publisher (monitor it; alert on missed intervals).
 

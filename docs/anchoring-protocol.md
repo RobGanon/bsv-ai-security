@@ -4,12 +4,18 @@ Anchors the Phase 1 local audit journal and rollback checkpoint to the
 Bitcoin SV blockchain, giving them **independent verifiability**: a third
 party holding the journal file, the anchor transactions, and BSV block
 headers can confirm the log was not rewritten — even against the local
-administrator.
+administrator. That holds for an *independent* verifier using
+out-of-band trust anchors (§5) and its own verifier: a local
+administrator who controls the machine can replace the verifier
+binary, the pinned pubkeys, or the launcher, and verification run
+on that machine then proves nothing.
 
 Status: publisher + WoC broadcaster implemented. First live anchor on
 Teratestnet 2026-10-16 (txid ``4111b7cf9d42624be75aa78f5031caaebe4e836665b95fbcdbadbb086b2bf029``,
-OP_RETURN payload committing journal head seq 1–3). SPV / Merkle inclusion
-verification is still out of scope (see §10).
+OP_RETURN payload committing journal head seq 1–3). All §6 verifiers
+are implemented: SPV inclusion, BUMP compact proofs, BEEF envelopes,
+header-chain sync back to a pinned checkpoint, and anchor-input
+signature checks.
 
 ## 1. What this fixes (and why Phase 1 needs it)
 
@@ -123,6 +129,13 @@ itself:
 
 Rotation of any of these is a key-ceremony event, out of scope for v0.1.
 
+There is no in-protocol revocation mechanism. Rotation is a
+key-ceremony event: publish the new trust anchors through the same
+authenticated out-of-band channel; anchors made before rotation
+remain verifiable under the old key; verifiers must pin the key
+valid for each anchor's interval. If a key is compromised, stop
+anchoring under it immediately and rotate out-of-band.
+
 ## 6. Verification procedure (independent verifier)
 
 Inputs: journal file, genesis anchor txid, anchor pubkey, BSV block headers
@@ -176,6 +189,14 @@ the BIP 143 FORKID sighash.
    truncation, detected. A missing journal with anchors present is deletion,
    detected.
 
+Point-in-time verification: an anchor in a block later reorged out
+fails re-verification (fails closed — the inclusion check will not
+find it in the new block at that height). Operators should treat
+anchors as settled only after their chosen confirmation depth (6 is
+a conventional floor; deeper for high-value checkpoints) and
+re-verify inclusion before relying on an anchor. The depth is
+operator guidance, not a protocol rule.
+
 Complexity is O(journal length + anchor count); anchors are small and
 infrequent (§8).
 
@@ -209,6 +230,11 @@ infrequent (§8).
 
 - Trigger: `anchor_every_n_events` (e.g. 100) OR `anchor_every_t_seconds`
   (e.g. 3600), whichever fires first.
+
+The unanchored tail is unverified: events appended after the last
+anchor can be rewritten, and the next anchor will commit to the
+rewritten head undetectably. The anchoring cadence above is the
+security margin for how much history is exposed to silent rewrite.
 - Anchoring is **best-effort and asynchronous**: local verification and
   operation NEVER block on chain availability. If broadcast fails, retry
   with an extended interval — the payload commits to

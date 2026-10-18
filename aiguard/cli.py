@@ -58,6 +58,11 @@ from .core import (
     verify_audit_journal,
     verify_manifest,
 )
+from .launcher import (
+    launch,
+    resolve_gid,
+    resolve_uid,
+)
 
 
 def _read_json(path: Path):
@@ -118,6 +123,26 @@ def main(argv=None):
     p.add_argument("--public-key", required=True, type=Path)
     p.add_argument("--min-release-seq", type=int, default=None,
                    help="reject manifests older than this release sequence (rollback protection)")
+
+    p = sub.add_parser(
+        "launch",
+        help="verify a manifest, then run a command against the verified "
+             "artifact handles (closes the verify-to-launch window)",
+    )
+    p.add_argument("--root", required=True, type=Path)
+    p.add_argument("--manifest", required=True, type=Path)
+    p.add_argument("--public-key", required=True, type=Path)
+    p.add_argument("--min-release-seq", type=int, default=None,
+                   help="reject manifests older than this release sequence (rollback protection)")
+    p.add_argument("--seal", action="store_true",
+                   help="copy each artifact into a sealed memfd before exec, so the "
+                        "child reads a frozen snapshot (costs a copy of every artifact in RAM)")
+    p.add_argument("--uid", default=None,
+                   help="drop to this user (name or numeric id) before exec (needs privilege)")
+    p.add_argument("--gid", default=None,
+                   help="drop to this group (name or numeric id) before exec (needs privilege)")
+    p.add_argument("command_argv", nargs=argparse.REMAINDER, metavar="CMD [ARGS...]",
+                   help="command to run; separate it from options with '--'")
 
     p = sub.add_parser("audit-append", help="append a local audit event")
     p.add_argument("--journal", required=True, type=Path)
@@ -297,6 +322,18 @@ def main(argv=None):
             artifacts = verify_manifest(args.root, envelope, load_public_key(args.public_key),
                                         min_release_seq=args.min_release_seq)
             print(f"VERIFIED: {len(artifacts)} artifact(s): " + ", ".join(artifacts))
+        elif args.command == "launch":
+            envelope = _read_json(args.manifest)
+            return launch(
+                args.root,
+                envelope,
+                load_public_key(args.public_key),
+                args.command_argv,
+                min_release_seq=args.min_release_seq,
+                seal=args.seal,
+                uid=resolve_uid(args.uid),
+                gid=resolve_gid(args.gid),
+            )
         elif args.command == "audit-append":
             event = append_audit_event(args.journal, args.event_type, args.detail)
             print(f"Audit event appended: seq={event['seq']} hash={event['event_hash']}")

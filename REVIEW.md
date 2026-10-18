@@ -24,10 +24,12 @@ The manifest verifier, the journal, and the anchor checks:
   BIP 143 `SIGHASH_ALL|FORKID` sighash
 - `aiguard/broadcast.py` — signer interface, WoC-TTN broadcaster
 - `aiguard/spv.py` — inclusion (Merkle recomputation), header-chain walk
+- `aiguard/beef.py` — BEEF envelope parse/verify (inclusion + ancestry +
+  amount conservation; no script evaluation)
 - `aiguard/cli.py` — the `anchor-chain-verify` surface
 
-About 4,177 lines of production Python, 4,053 lines of tests,
-281 tests passing on `main`.
+About 5,508 lines of production Python, 5,883 lines of tests,
+362 tests passing on `main`.
 
 ## What "good" looks like
 
@@ -58,8 +60,10 @@ The review succeeds if it finds — or rules out — any of these:
 ```sh
 git clone https://github.com/RobGanon/bsv-ai-security.git
 cd bsv-ai-security
-python3 -m pytest -q          # expect: 281 passed
+python3 -m pytest -q          # expect: 362 passed
 ```
+
+Full path for reviewers: `docs/reviewer-quickstart.md`.
 
 Live anchors on Teratestnet (public on-chain data, verify against
 `https://woc-ttn.bsvblockchain.tech`):
@@ -87,8 +91,8 @@ What was actually executed, by the author (with AI assistance):
   tampered headers, checkpoint mismatch, over-cap walks, fetch
   errors). Zero cases found of the verifier accepting what it
   should reject.
-- Full suite runs on exact merged bytes: 281 tests passing on
-  `main` @ `2806882`.
+- Full suite runs on exact merged bytes: 362 tests passing on
+  `main` @ `c5dfedc`.
 
 What was **not** counted as executed testing:
 

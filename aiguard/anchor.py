@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import struct
 from pathlib import Path
 from typing import Any
 
@@ -627,6 +628,10 @@ def _tx_from_woc_json(tx_json: Any) -> Tx:
 
     Only the fields the sighash needs are used: version, locktime,
     inputs (prev txid/vout/scriptSig/sequence), outputs (value/script).
+    Integer fields are range-checked here (version fits int32,
+    locktime/sequence/prev_index fit uint32) so hostile fetcher data
+    fails at parse time instead of escaping as struct.error from the
+    sighash packing below.
     """
     if not isinstance(tx_json, dict):
         raise VerificationError("tx JSON must be an object")
@@ -638,15 +643,23 @@ def _tx_from_woc_json(tx_json: Any) -> Tx:
     for entry in vin:
         try:
             script_hex = entry["scriptSig"]["hex"]
+            prev_index = int(entry["vout"])
+            sequence = int(entry.get("sequence", 0xFFFFFFFF))
+            if not 0 <= prev_index <= UINT32_MAX:
+                raise VerificationError("tx JSON has an out-of-range prev_index")
+            if not 0 <= sequence <= UINT32_MAX:
+                raise VerificationError("tx JSON has an out-of-range sequence")
             inputs.append(
                 TxIn(
                     entry["txid"],
-                    int(entry["vout"]),
+                    prev_index,
                     bytes.fromhex(script_hex),
-                    int(entry.get("sequence", 0xFFFFFFFF)),
+                    sequence,
                 )
             )
         except (KeyError, TypeError, ValueError) as exc:
+            if isinstance(exc, VerificationError):
+                raise
             raise VerificationError("tx JSON has a malformed input") from exc
     outputs = []
     for entry in vout:
@@ -660,6 +673,10 @@ def _tx_from_woc_json(tx_json: Any) -> Tx:
         locktime = int(tx_json.get("locktime", 0))
     except (TypeError, ValueError) as exc:
         raise VerificationError("tx JSON has a malformed version/locktime") from exc
+    if not -(2**31) <= version <= 2**31 - 1:
+        raise VerificationError("tx JSON has an out-of-range version")
+    if not 0 <= locktime <= UINT32_MAX:
+        raise VerificationError("tx JSON has an out-of-range locktime")
     return Tx(version=version, inputs=inputs, outputs=outputs, locktime=locktime)
 
 
@@ -718,7 +735,7 @@ def verify_anchor_tx_signature(
         prev_tx_json.get("vout"), list
     ):
         return fail("previous tx JSON is malformed")
-    if txin.prev_index >= len(prev_tx_json["vout"]):
+    if txin.prev_index < 0 or txin.prev_index >= len(prev_tx_json["vout"]):
         return fail(
             f"previous tx has no output {txin.prev_index}"
         )
@@ -732,8 +749,13 @@ def verify_anchor_tx_signature(
         return fail(
             "spent output is not P2PKH to the anchor pubkey"
         )
-    digest = sighash_forkid(tx, 0, prev_script, prev_value)
-    if not verify_sig(pubkey, digest, der_sig):
+    try:
+        digest = sighash_forkid(tx, 0, prev_script, prev_value)
+        sig_ok = verify_sig(pubkey, digest, der_sig)
+    except (VerificationError, struct.error, ValueError, IndexError,
+            AttributeError, KeyError, TypeError, OverflowError) as exc:
+        return fail(f"sighash or signature check failed: {exc}")
+    if not sig_ok:
         return fail("ECDSA signature does not verify against the sighash")
     return {
         "verified": True,
@@ -781,7 +803,14 @@ class AnchorSignatureVerifier:
             return SignatureResult(
                 False, txid, reason=f"anchor tx malformed: {exc}"
             )
-        if tx.txid() != txid:
+        try:
+            computed = tx.txid()
+        except (VerificationError, struct.error, ValueError, IndexError,
+                AttributeError, KeyError, TypeError, OverflowError) as exc:
+            return SignatureResult(
+                False, txid, reason=f"anchor tx malformed: {exc}"
+            )
+        if computed != txid:
             return SignatureResult(
                 False, txid,
                 reason="fetched anchor transaction ID does not match requested txid",
@@ -795,9 +824,15 @@ class AnchorSignatureVerifier:
             prev_json = self.fetcher.fetch_tx_full(tx.inputs[0].prev_txid)
         except Exception as exc:
             return SignatureResult(False, txid, reason=f"fetch failed: {exc}")
-        checked = verify_anchor_tx_signature(
-            tx_json, prev_json, self.anchor_pubkey_hex
-        )
+        try:
+            checked = verify_anchor_tx_signature(
+                tx_json, prev_json, self.anchor_pubkey_hex
+            )
+        except (VerificationError, struct.error, ValueError, IndexError,
+                AttributeError, KeyError, TypeError, OverflowError) as exc:
+            return SignatureResult(
+                False, txid, reason=f"signature check failed: {exc}"
+            )
         return SignatureResult(
             checked["verified"], txid,
             reason=checked["reason"], pubkey=checked["pubkey"],

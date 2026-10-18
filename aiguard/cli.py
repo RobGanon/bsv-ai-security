@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import struct
 import sys
 from pathlib import Path
 
@@ -359,6 +360,12 @@ def main(argv=None):
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             print("LOCAL CHECK ONLY: BSV transaction inclusion has not been verified.")
+            if args.manifest is None and args.public_key is None:
+                print(
+                    "WARNING: acceptance binding was NOT re-checked: "
+                    "re-run with --manifest and --public-key to re-derive "
+                    "binding from the signed manifests."
+                )
         elif args.command == "anchor-chain-verify":
             anchors: list[dict] = []
             for path in args.anchor or []:
@@ -405,6 +412,15 @@ def main(argv=None):
                 )
             else:
                 result = verify_anchor_chain(anchors, args.genesis_txid)
+            anchor_count = result.get("anchor_count")
+            if anchor_count is None:
+                anchor_count = result.get("chain", {}).get("anchor_count")
+            if anchor_count == 0:
+                # Vacuous verification: nothing was checked. This is an
+                # error at the CLI layer, not in the library functions,
+                # whose vacuous-True semantics are unchanged.
+                print("ERROR: no anchors to verify", file=sys.stderr)
+                return 1
             if args.spv:
                 result = apply_chain_inclusion(
                     result,
@@ -532,6 +548,28 @@ def main(argv=None):
                     print(
                         "HEADER CHAIN CHECK FAILED: see per-anchor reasons."
                     )
+            if args.journal is not None and args.manifest is None and args.public_key is None:
+                print(
+                    "WARNING: acceptance binding was NOT re-checked: "
+                    "re-run with --manifest and --public-key to re-derive "
+                    "binding from the signed manifests."
+                )
+            # A failed check must fail the process: automation keyed on
+            # the exit code must not read a FAILED line as success.
+            chain_result = result.get("chain", result)
+            failed = not chain_result.get("verified")
+            if args.spv:
+                failed = failed or not result.get("chain_inclusion_verified")
+            if args.bump_file is not None:
+                failed = failed or not result.get("bump_inclusion_verified")
+            if args.beef_file is not None:
+                failed = failed or not result.get("beef_inclusion_verified")
+            if args.anchor_sig:
+                failed = failed or not result.get("anchor_signatures_verified")
+            if args.header_chain:
+                failed = failed or not result.get("header_chain_verified")
+            if failed:
+                return 1
         elif args.command == "publish":
             manifests = None
             public_key = None
@@ -611,7 +649,8 @@ def main(argv=None):
                 print(json.dumps(decision, indent=2, sort_keys=True))
             if not args.broadcast:
                 print("DRY RUN: broadcast disabled — payloads prepared, nothing broadcast.")
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, struct.error,
+            IndexError, AttributeError, OverflowError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     return 0

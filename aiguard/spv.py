@@ -535,10 +535,12 @@ def verify_pow(header: bytes, bits: int) -> bool:
 
 def verify_header(header: bytes, expected_hash: str, bits: int) -> bool:
     """True iff the header hashes to ``expected_hash`` and passes PoW."""
+    if not isinstance(expected_hash, str):
+        return False
     try:
         if header_hash(header) != expected_hash.lower():
             return False
-    except ValueError:
+    except (ValueError, TypeError, AttributeError, struct.error):
         return False
     return verify_pow(header, bits)
 
@@ -562,7 +564,7 @@ def verify_header_chain(headers: list[BlockHeader]) -> bool:
             if child.prev_hash.lower() != (parent.hash or "").lower():
                 return False
         return True
-    except (ValueError, TypeError, AttributeError):
+    except (ValueError, TypeError, AttributeError, struct.error):
         return False
 
 
@@ -723,11 +725,21 @@ class SPVVerifier:
             )
         try:
             header, txids = self.fetcher.fetch_block(int(height))
-        except SPVError as exc:
+        except (SPVError, ValueError, TypeError, AttributeError, struct.error) as exc:
             return InclusionResult(
                 False, txid, blockheight=height, blockhash=blockhash,
                 reason=f"fetch failed: {exc}",
             )
+        try:
+            return self._verify_against_block(txid, height, blockhash, header, txids)
+        except (ValueError, TypeError, AttributeError, struct.error) as exc:
+            return InclusionResult(
+                False, txid, blockheight=height, blockhash=blockhash,
+                reason=f"malformed block data: {exc}",
+            )
+
+    @staticmethod
+    def _verify_against_block(txid, height, blockhash, header, txids):
         if (header.hash or "").lower() != str(blockhash).lower():
             return InclusionResult(
                 False, txid, blockheight=height, blockhash=blockhash,
@@ -850,7 +862,14 @@ class BUMPVerifier:
                 False, txid, blockheight=height, blockhash=header.hash,
                 reason="BUMP proof does not reach the header Merkle root",
             )
-        if not verify_pow(header.to_bytes(), header.bits):
+        try:
+            pow_ok = verify_pow(header.to_bytes(), header.bits)
+        except (ValueError, TypeError, AttributeError, struct.error) as exc:
+            return InclusionResult(
+                False, txid, blockheight=height, blockhash=header.hash,
+                reason=f"malformed header data: {exc}",
+            )
+        if not pow_ok:
             return InclusionResult(
                 False, txid, blockheight=height, blockhash=header.hash,
                 reason="header proof-of-work failed",
@@ -984,6 +1003,8 @@ def verify_chain_to_checkpoint(
     """
     if not isinstance(tip_height, int) or not isinstance(checkpoint_height, int):
         return False, 0, "tip/checkpoint heights must be integers"
+    if not isinstance(tip_hash, str):
+        return False, 0, "tip_hash must be a string"
     if checkpoint_height < 0 or tip_height < 0:
         return False, 0, "heights must be non-negative"
     if checkpoint_height > tip_height:
@@ -1041,7 +1062,7 @@ def verify_chain_to_checkpoint(
             expected_hash = header.prev_hash.lower()
     except SPVError as exc:
         return False, checked, f"fetch failed: {exc}"
-    except (ValueError, TypeError, AttributeError) as exc:
+    except (ValueError, TypeError, AttributeError, struct.error) as exc:
         return False, checked, f"malformed header data: {exc}"
     return False, checked, "walk ended without reaching the checkpoint"
 
@@ -1085,9 +1106,17 @@ class HeaderChainVerifier:
                 checkpoint_height=self.checkpoint_height,
                 reason="unconfirmed: no blockheight on record",
             )
+        try:
+            tip_height = int(height)
+        except (ValueError, TypeError, OverflowError) as exc:
+            return HeaderChainResult(
+                False, txid,
+                checkpoint_height=self.checkpoint_height,
+                reason=f"malformed blockheight: {exc}",
+            )
         verified, checked, reason = verify_chain_to_checkpoint(
             self.fetcher,
-            tip_height=int(height),
+            tip_height=tip_height,
             tip_hash=str(blockhash),
             checkpoint_hash=self.checkpoint_hash,
             checkpoint_height=self.checkpoint_height,
@@ -1095,7 +1124,7 @@ class HeaderChainVerifier:
         )
         return HeaderChainResult(
             verified, txid,
-            tip_height=int(height),
+            tip_height=tip_height,
             checkpoint_height=self.checkpoint_height,
             headers_checked=checked,
             reason=reason,

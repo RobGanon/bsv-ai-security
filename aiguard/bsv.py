@@ -29,17 +29,21 @@ _GY = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
 
 SIGHASH_ALL_FORKID = 0x41
 DUST_SATS = 546
+# Consensus maximum: 21,000,000 BTC, in satoshis. Values above this are
+# not real amounts; rejecting them here keeps hostile fetcher data from
+# reaching struct.pack (which would raise struct.error, not ValueError).
+MAX_SATS = 21_000_000 * 100_000_000
 
 
 def sats_from_btc_decimal(value: object) -> int:
     """Convert a WoC decimal BTC value to exact integer satoshis.
 
-    Fail-closed: reject non-numeric, non-finite, negative, and
-    sub-satoshi values. Uses Decimal over the shortest repr of the
-    input so no binary floating-point rounding is involved — a
-    ``float`` 0.000995 becomes exactly 99500, never 99499.99999....
-    Raises ValueError on any deviation; callers map it to their own
-    fail-closed error.
+    Fail-closed: reject non-numeric, non-finite, negative,
+    sub-satoshi, and above-consensus-maximum values. Uses Decimal over
+    the shortest repr of the input so no binary floating-point rounding
+    is involved — a ``float`` 0.000995 becomes exactly 99500, never
+    99499.99999.... Raises ValueError on any deviation; callers map it
+    to their own fail-closed error.
     """
     try:
         sats = Decimal(str(value)) * 10**8
@@ -48,11 +52,12 @@ def sats_from_btc_decimal(value: object) -> int:
     if (
         not sats.is_finite()
         or sats < 0
+        or sats > MAX_SATS
         or sats != sats.to_integral_value()
     ):
         raise ValueError(
             f"BTC decimal value {value!r} is not a whole non-negative "
-            "satoshi amount"
+            "satoshi amount within the consensus maximum"
         )
     return int(sats)
 
@@ -210,10 +215,16 @@ def _der_decode_signature(sig: bytes) -> tuple[int, int]:
     if sig[2] != 0x02:
         raise ValueError("DER signature missing R")
     r_len = sig[3]
-    r = int.from_bytes(sig[4 : 4 + r_len], "big")
     s_pos = 4 + r_len
+    # Bounds-check before indexing: a hostile r_len must yield
+    # ValueError here, not an IndexError at sig[s_pos].
+    if s_pos >= len(sig):
+        raise ValueError("DER signature truncated at R")
+    r = int.from_bytes(sig[4 : 4 + r_len], "big")
     if sig[s_pos] != 0x02:
         raise ValueError("DER signature missing S")
+    if s_pos + 1 >= len(sig):
+        raise ValueError("DER signature truncated at S")
     s_len = sig[s_pos + 1]
     s = int.from_bytes(sig[s_pos + 2 : s_pos + 2 + s_len], "big")
     if s_pos + 2 + s_len != len(sig):
@@ -434,6 +445,22 @@ class Tx:
             raise BroadcastError("anchor payload must be exactly 84 bytes")
         if fee_sats < 0:
             raise BroadcastError("fee_sats must be non-negative")
+        if (
+            not isinstance(funding.vout, int)
+            or isinstance(funding.vout, bool)
+            or not 0 <= funding.vout <= 0xFFFFFFFF
+        ):
+            raise BroadcastError(
+                f"funding vout {funding.vout!r} is not a uint32 output index"
+            )
+        if (
+            not isinstance(funding.value, int)
+            or isinstance(funding.value, bool)
+            or not 0 <= funding.value <= MAX_SATS
+        ):
+            raise BroadcastError(
+                "funding value must be within the consensus range"
+            )
         change = funding.value - fee_sats
         if change < 0:
             raise BroadcastError(
@@ -508,9 +535,20 @@ def parse_tx(raw: bytes) -> Tx:
 
 
 def sighash_forkid(tx: Tx, input_index: int, prev_script: bytes, prev_value: int) -> bytes:
-    """BIP 143 sighash with SIGHASH_ALL | SIGHASH_FORKID."""
+    """BIP 143 sighash with SIGHASH_ALL | SIGHASH_FORKID.
+
+    Raises ValueError on an out-of-range input index or a prev_value
+    outside the consensus range — a negative or above-maximum value
+    must fail here, not as a struct.error from the packing below.
+    """
     if not 0 <= input_index < len(tx.inputs):
         raise ValueError("input_index out of range")
+    if (
+        not isinstance(prev_value, int)
+        or isinstance(prev_value, bool)
+        or not 0 <= prev_value <= MAX_SATS
+    ):
+        raise ValueError("prev_value must be within the consensus range")
     hash_prevouts = sha256d(
         b"".join(
             bytes.fromhex(txin.prev_txid)[::-1] + struct.pack("<I", txin.prev_index)

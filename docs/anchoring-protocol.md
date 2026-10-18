@@ -126,6 +126,12 @@ itself:
 3. **Anchor public key / address.** The verifier checks each anchor
    transaction's input against this key, so an attacker cannot anchor fake
    roots under a different key and claim them as ours.
+4. **Header-chain checkpoint (hash + height).** The verifier walks
+   headers back to this checkpoint, so obtain it from an
+   independent source — never solely from the API being verified
+   against. The walk is only as strong as the checkpoint's
+   provenance. This matters most on Teratestnet, where
+   proof-of-work is cheap enough to fabricate a chain.
 
 Rotation of any of these is a key-ceremony event, out of scope for v0.1.
 
@@ -158,7 +164,11 @@ the BEEF envelope is parsed and verified too — BRC-62 parse/encode in
 the BRC-62 reference envelope and a real Teratestnet anchor + child
 tx; verification covers BUMP inclusion for mined txs plus ancestry
 and amount conservation for unmined ones. It does NOT evaluate
-scripts, so an unmined tx's signatures are not checked. Header-chain sync back to a trusted checkpoint is
+scripts, so an unmined tx's signatures are not checked. Per-anchor
+verdicts carry `verified: True` with `status: "ancestry"` for
+unmined txs — that means ancestry + amount conservation only,
+not signature verification; consumers must read `status`, not
+the bare `verified` flag. Header-chain sync back to a trusted checkpoint is
 implemented in `aiguard/spv.py` (`anchor-chain-verify --header-chain
 --checkpoint-hash --checkpoint-height`): the verifier walks headers
 from each anchor's block back to the operator-pinned checkpoint,

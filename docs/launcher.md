@@ -88,9 +88,18 @@ sudo aiguard launch \
 
 `--uid`/`--gid` accept a name or a numeric id. If the caller lacks the
 privilege to set them, the launcher fails closed with a clear error and
-does **not** run the command. This repository does not ship a setuid
-binary; the operator starts the launcher privileged (sudo, systemd,
-container entrypoint) and is responsible for that install decision.
+does **not** run the command. Two details matter for a real drop:
+
+- `--uid` without `--gid` defaults the group to the target user's primary
+  group, so dropping the uid does not silently keep the caller's (root's)
+  group. A uid with no passwd entry has no safe default and requires an
+  explicit `--gid`.
+- When the launcher is privileged it also clears the supplementary group
+  list before exec, rather than leaving the child in root's groups.
+
+This repository does not ship a setuid binary; the operator starts the
+launcher privileged (sudo, systemd, container entrypoint) and is
+responsible for that install decision.
 
 ## What this does not fix
 

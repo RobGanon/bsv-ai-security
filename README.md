@@ -37,7 +37,7 @@ they have not been altered after recording. It is the provenance
 pillar of AI security: proving what ran, not whether the model
 behaved well.
 
-Status: 191 tests passing on main, plus adversarial spot-checks on
+Status: 376 tests passing on main, plus adversarial spot-checks on
 every feature. Independent security review is still open
 ([issue #4](https://github.com/RobGanon/bsv-ai-security/issues/4)) —
 we state that plainly because it matters.
@@ -85,10 +85,13 @@ Honest tradeoff: Bitcoin has substantially deeper proof-of-work
 security. BSV's case is cost, frequency, and data fit, not
 maximum settlement depth.
 
-**Current status:** the publisher prepares checkpoints, but
-broadcast is still a stub — no anchor has been confirmed on-chain
-yet. The tagline says "anchoring to," not "anchored to," until
-the first real anchor confirms.
+**Current status:** the publisher and broadcaster are live on
+Teratestnet. Two anchors are confirmed on-chain: anchor #1
+(`4111b7cf9d42624be75aa78f5031caaebe4e836665b95fbcdbadbb086b2bf029`,
+block 36722) and anchor #2
+(`d8407bb7a60f23aadcf021e9cb0098c6ae362a519aa04cbd8536265519c09230`,
+block 36723). See `docs/anchoring-protocol.md` for the verifier
+procedure and what anchoring does and does not prove.
 
 ## Training-data provenance
 
@@ -176,8 +179,9 @@ aiguard audit-verify --journal demo/audit.jsonl
 ```
 
 The journal is hash-chained but not protected against an administrator who can
-rewrite the entire file. In a later phase, anchor periodic roots externally (for
-example, on BSV) and retain inclusion proofs/checkpoints separately.
+rewrite the entire file. Anchor periodic roots externally (on BSV) and retain
+inclusion proofs/checkpoints separately — see "How anchoring works" above and
+`docs/anchoring-protocol.md`.
 
 On Unix platforms the append path takes an exclusive advisory lock
 (`fcntl.flock`) across the verify-then-write critical section. Concurrent
@@ -238,15 +242,18 @@ payload. `verify --min-release-seq N` rejects any manifest older than N,
 which defeats rollback attacks (an older legitimately-signed manifest
 verifying cleanly). The mechanism is implemented; the *policy* — where the
 caller obtains and stores the highest accepted sequence — is left to the
-integrating system (and later to on-chain anchors).
+integrating system (on-chain anchors checkpoint it; see
+`docs/anchoring-protocol.md`).
 
-## Phase 2 design: BSV anchoring
+## Phase 2: BSV anchoring (implemented)
 
 `docs/anchoring-protocol.md` specifies how the audit journal and rollback
 checkpoint get anchored to BSV for independent verifiability — including the
 exact 84-byte OP_RETURN payload layout, the on-chain anchor chaining via
 `prev_txid`, the independent verifier procedure, and an explicit list of
-what anchoring does and does not prove.
+what anchoring does and does not prove. The publisher, broadcaster, and
+verifiers (SPV inclusion, BUMP, BEEF, header-chain, anchor-input
+signatures) are implemented and tested.
 
 ## Pilot program
 
@@ -255,11 +262,11 @@ pipeline. Details: [`docs/pilot-brief.md`](docs/pilot-brief.md).
 
 ## Roadmap (high level)
 
-1. Independent review of Phase 1 (this request).
-2. Implement Phase 2 payload creation + local verification (in progress).
-3. Implement publishing interfaces with explicit network selection
-   (testnet default; mainnet behind separate confirmation).
-4. Independent SPV / header-chain verification.
+1. Independent review of Phase 1 (in progress — see `REVIEW.md`).
+2. ~~Implement Phase 2 payload creation + local verification~~ — done.
+3. ~~Implement publishing interfaces with explicit network selection
+   (testnet default; mainnet behind separate confirmation)~~ — done.
+4. ~~Independent SPV / header-chain verification~~ — done.
 5. Migrate manifest signing from Ed25519 to secp256k1 (recommended before
    production).
 6. Privileged launcher that consumes verified artifact handles.

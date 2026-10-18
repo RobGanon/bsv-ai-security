@@ -402,3 +402,32 @@ def test_publisher_broadcasts_through_real_broadcaster(tmp_path):
     assert record["start_seq"] == 1
     assert record["end_seq"] == 2
     assert record["prev_txid"] == "00" * 32  # genesis: no prior anchor
+
+
+def test_broadcaster_rejects_sub_satoshi_funding_value():
+    def request(method, url, body=None):
+        if url.endswith("/tx/hash/" + FAUCET_PREV_TXID):
+            tx = {
+                "vout": [
+                    {"value": 0.0, "scriptPubKey": {"hex": "00"}},
+                    {
+                        "value": 0.000000001,
+                        "scriptPubKey": {"hex": FAUCET_PREV_SCRIPT},
+                    },
+                ]
+            }
+            return 200, json.dumps(tx).encode()
+        raise AssertionError(f"unexpected request {method} {url}")
+
+    bc = WoCBroadcaster(
+        base_url="https://api.woc-ttn.bsvblockchain.tech/v1/bsv/test",
+        signer=WIFSigner.from_wif(VECTOR_WIF),
+        fee_sats=500,
+        funding=FundingUTXO(
+            txid=FAUCET_PREV_TXID, vout=FAUCET_PREV_VOUT,
+            value=FAUCET_PREV_VALUE, script_hex=FAUCET_PREV_SCRIPT,
+        ),
+        request_fn=request,
+    )
+    with pytest.raises(BroadcastRejected):
+        bc.broadcast(PAYLOAD.hex())

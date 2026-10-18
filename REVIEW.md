@@ -28,8 +28,8 @@ The manifest verifier, the journal, and the anchor checks:
   amount conservation; no script evaluation)
 - `aiguard/cli.py` — the `anchor-chain-verify` surface
 
-About 5,508 lines of production Python, 6,004 lines of tests,
-369 tests passing on `main`.
+About 5,508 lines of production Python, 6,101 lines of tests,
+376 tests passing on `main`.
 
 ## What "good" looks like
 
@@ -60,7 +60,7 @@ The review succeeds if it finds — or rules out — any of these:
 ```sh
 git clone https://github.com/RobGanon/bsv-ai-security.git
 cd bsv-ai-security
-python3 -m pytest -q          # expect: 369 passed
+python3 -m pytest -q          # expect: 376 passed
 ```
 
 Full path for reviewers: `docs/reviewer-quickstart.md`.
@@ -91,8 +91,8 @@ What was actually executed, by the author (with AI assistance):
   tampered headers, checkpoint mismatch, over-cap walks, fetch
   errors). Zero cases found of the verifier accepting what it
   should reject.
-- Full suite runs on exact merged bytes: 362 tests passing on
-  `main` @ `d8cebcd`.
+- Full suite runs on exact merged bytes: 369 tests passing on
+  `main` @ `137de50`.
 
 What was **not** counted as executed testing:
 
@@ -104,10 +104,19 @@ What was **not** counted as executed testing:
   unmerged.
 
 The counts above reflect executed tests only. The probes are
-scenario-based, not exhaustive; there is no formal verification;
-and no independent party has executed the suite. This is the
-author's own testing, not independent review — which is why this
-document exists.
+scenario-based, not exhaustive; there is no formal verification.
+The author's own testing above is not independent review — which
+is why this document exists. Independent review has begun (see
+below) and is still in progress.
+
+## Independent review so far
+
+- TruthMachine (Oct 2026) cloned the repo, ran the suite, and found
+  a real validation gap: `AnchorSignatureVerifier` did not compare
+  the reconstructed txid against the requested txid. Reproduced,
+  fixed with an explicit check + regression test. He also flagged
+  float-based satoshi parsing; replaced with exact Decimal parsing
+  in all three spots (anchor verification ×2, broadcaster ×1).
 
 ## Known limitations (please don't re-report these as findings)
 

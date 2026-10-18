@@ -12,12 +12,14 @@ import pytest
 
 from aiguard.anchor import (
     AnchorSignatureVerifier,
+    _tx_from_woc_json,
     apply_anchor_signatures,
     encode_anchor_payload,
     parse_p2pkh_script_sig,
     verify_anchor_chain,
     verify_anchor_tx_signature,
 )
+from aiguard.core import VerificationError
 from aiguard.spv import SPVUnavailable
 
 ANCHOR_PUBKEY = "0397315d0180c5f4cf1ea2cd19d683becdb4a978827ab6d8c6cb74b18df29eb58d"
@@ -332,3 +334,69 @@ def test_cli_anchor_sig_without_pubkey_is_rejected(tmp_path, capsys):
         "--anchor", str(anchor1), "--anchor-sig",
     ]) == 1
     assert "ERROR" in capsys.readouterr().err
+
+
+# --- txid consistency (independent review finding, TruthMachine) -----------
+
+
+class MismatchedTxFetcher:
+    """Returns anchor #1 no matter which txid was requested."""
+
+    def fetch_tx_full(self, txid):
+        if txid == FAUCET_TX:
+            return copy.deepcopy(FAUCET_TX_JSON)
+        return copy.deepcopy(ANCHOR1_TX)
+
+
+def test_verifier_rejects_transaction_with_mismatched_requested_txid():
+    result = AnchorSignatureVerifier(
+        MismatchedTxFetcher(), ANCHOR_PUBKEY
+    ).verify_signature("00" * 32)
+    assert result.verified is False
+    assert "does not match requested txid" in result.reason
+
+
+# --- exact satoshi parsing (independent review hardening) ------------------
+
+
+def _tx_json_with_values(values):
+    return {
+        "version": 1,
+        "locktime": 0,
+        "vin": [],
+        "vout": [
+            {"value": value, "scriptPubKey": {"hex": "00"}}
+            for value in values
+        ],
+    }
+
+
+def test_tx_from_woc_json_parses_decimal_values_exactly():
+    tx = _tx_from_woc_json(
+        _tx_json_with_values([0, 0.000995, 0.001, 0.03057933, 1])
+    )
+    assert [out.value for out in tx.outputs] == [0, 99500, 100000, 3057933, 100000000]
+
+
+def test_tx_from_woc_json_rejects_sub_satoshi_value():
+    with pytest.raises(VerificationError):
+        _tx_from_woc_json(_tx_json_with_values([0.000000001]))
+
+
+def test_tx_from_woc_json_rejects_negative_value():
+    with pytest.raises(VerificationError):
+        _tx_from_woc_json(_tx_json_with_values([-0.001]))
+
+
+def test_prev_value_sub_satoshi_rejected():
+    prev = copy.deepcopy(FAUCET_TX_JSON)
+    prev["vout"][0]["value"] = 0.000000001
+    result = verify_anchor_tx_signature(ANCHOR1_TX, prev, ANCHOR_PUBKEY)
+    assert result["verified"] is False
+
+
+def test_prev_value_negative_rejected():
+    prev = copy.deepcopy(FAUCET_TX_JSON)
+    prev["vout"][0]["value"] = -0.001
+    result = verify_anchor_tx_signature(ANCHOR1_TX, prev, ANCHOR_PUBKEY)
+    assert result["verified"] is False

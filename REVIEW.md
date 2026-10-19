@@ -34,8 +34,12 @@ The manifest verifier, the journal, and the anchor checks:
   amount conservation; no script evaluation)
 - `sealrun/cli.py` — the `verify`/`launch`/`anchor-chain-verify` surfaces
 
-About 7,768 lines of production Python, 10,109 lines of tests,
-582 tests passing on `main`.
+About 7,775 lines of production Python, 10,122 lines of tests,
+583 tests passing on `main`.
+
+These counts are the single source of truth for test and line counts
+in this repo — other docs point here instead of copying the numbers,
+so a count update touches this file only.
 
 ## What "good" looks like
 
@@ -67,7 +71,7 @@ The review succeeds if it finds — or rules out — any of these:
 ```sh
 git clone https://github.com/RobGanon/bsv-ai-security.git
 cd bsv-ai-security
-python3 -m pytest -q          # expect: 582 passed
+python3 -m pytest -q          # expect: 583 passed
 ```
 
 Full path for reviewers: `docs/reviewer-quickstart.md`.

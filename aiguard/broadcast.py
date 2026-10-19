@@ -155,33 +155,9 @@ class WoCBroadcaster:
 
     def _fetch_prev_output(self) -> tuple[str, int]:
         """Return (locking script hex, value sats) for the funding outpoint."""
-        if (
-            not isinstance(self.funding.vout, int)
-            or isinstance(self.funding.vout, bool)
-            or not 0 <= self.funding.vout <= 0xFFFFFFFF
-        ):
-            raise BroadcastRejected(
-                f"funding vout {self.funding.vout!r} is not a uint32 output index"
-            )
-        url = f"{self.base_url}/tx/hash/{self.funding.txid}"
-        try:
-            status, body = self._request("GET", url, None)
-        except ConnectionError as exc:
-            raise BroadcastUnavailable(str(exc)) from exc
-        if status != 200:
-            raise BroadcastRejected(
-                f"cannot fetch funding tx {self.funding.txid}: HTTP {status}"
-            )
-        try:
-            tx = json.loads(body)
-            vout = tx["vout"][self.funding.vout]
-            script = vout["scriptPubKey"]["hex"]
-            value = sats_from_btc_decimal(vout["value"])
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
-            raise BroadcastRejected(
-                f"funding tx {self.funding.txid} has no output {self.funding.vout}"
-            ) from exc
-        return script, value
+        return fetch_prev_output(
+            self.base_url, self.funding.txid, self.funding.vout, self._request
+        )
 
     def broadcast(self, payload_hex: str) -> str:
         """Build, sign, and broadcast the anchor tx for ``payload_hex``."""
@@ -205,33 +181,91 @@ class WoCBroadcaster:
             signer=self.signer,
             network=self.network,
         )
-        raw_hex = tx.serialize().hex()
+        return post_raw_tx(self.base_url, tx.serialize().hex(), self._request,
+                           local_txid=tx.txid())
+
+
+def fetch_prev_output(
+    base_url: str, txid: str, vout: int,
+    request_fn: RequestFn | None = None,
+) -> tuple[str, int]:
+    """Return (locking script hex, value sats) for one outpoint.
+
+    The previous output comes from the chain (WoC ``/tx/hash``) — on-chain
+    truth, not the caller's claim. Shared by :class:`WoCBroadcaster` and
+    the offline-signing publisher paths, which need the funding output
+    without a signer.
+    """
+    request = request_fn or _urllib_request
+    if (
+        not isinstance(vout, int)
+        or isinstance(vout, bool)
+        or not 0 <= vout <= 0xFFFFFFFF
+    ):
+        raise BroadcastRejected(
+            f"funding vout {vout!r} is not a uint32 output index"
+        )
+    url = f"{base_url.rstrip('/')}/tx/hash/{txid}"
+    try:
+        status, body = request("GET", url, None)
+    except ConnectionError as exc:
+        raise BroadcastUnavailable(str(exc)) from exc
+    if status != 200:
+        raise BroadcastRejected(
+            f"cannot fetch funding tx {txid}: HTTP {status}"
+        )
+    try:
+        tx = json.loads(body)
+        vout_data = tx["vout"][vout]
+        script = vout_data["scriptPubKey"]["hex"]
+        value = sats_from_btc_decimal(vout_data["value"])
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise BroadcastRejected(
+            f"funding tx {txid} has no output {vout}"
+        ) from exc
+    return script, value
+
+
+def post_raw_tx(
+    base_url: str, raw_hex: str, request_fn: RequestFn | None = None,
+    *, local_txid: str,
+) -> str:
+    """POST one raw transaction hex and return its txid.
+
+    Shared by :class:`WoCBroadcaster` and the offline-signing
+    ``broadcast-signed`` path. An already-known response is success and
+    returns ``local_txid`` (derived from the exact bytes just sent); a
+    200 response returns the network-echoed txid, which the caller must
+    compare against the txid it verified — a mismatch is the caller's
+    to refuse, not this helper's to paper over.
+    """
+    request = request_fn or _urllib_request
+    try:
+        status, body = request(
+            "POST",
+            f"{base_url.rstrip('/')}/tx/raw",
+            json.dumps({"txhex": raw_hex}).encode(),
+        )
+    except ConnectionError as exc:
+        raise BroadcastUnavailable(str(exc)) from exc
+    text = body.decode("utf-8", "replace").strip()
+    lowered = text.lower()
+    if "already" in lowered or "txn-already-known" in lowered or "258:" in lowered:
+        # Already in the mempool: success. The echoed body is not a
+        # txid, so return the locally computed one (it is derived
+        # from the exact bytes we just sent).
+        return local_txid
+    if status == 200:
         try:
-            status, body = self._request(
-                "POST",
-                f"{self.base_url}/tx/raw",
-                json.dumps({"txhex": raw_hex}).encode(),
+            parsed = json.loads(text)
+        except ValueError as exc:
+            raise BroadcastRejected(
+                f"broadcast success body is not JSON: {text[:200]}"
+            ) from exc
+        txid = parsed if isinstance(parsed, str) else parsed.get("txid")
+        if not isinstance(txid, str) or len(txid) != 64:
+            raise BroadcastRejected(
+                f"broadcast returned an unusable txid: {text[:200]}"
             )
-        except ConnectionError as exc:
-            raise BroadcastUnavailable(str(exc)) from exc
-        text = body.decode("utf-8", "replace").strip()
-        lowered = text.lower()
-        if "already" in lowered or "txn-already-known" in lowered or "258:" in lowered:
-            # Already in the mempool: success. The echoed body is not a
-            # txid, so return the locally computed one (it is derived
-            # from the exact bytes we just sent).
-            return tx.txid()
-        if status == 200:
-            try:
-                parsed = json.loads(text)
-            except ValueError as exc:
-                raise BroadcastRejected(
-                    f"broadcast success body is not JSON: {text[:200]}"
-                ) from exc
-            txid = parsed if isinstance(parsed, str) else parsed.get("txid")
-            if not isinstance(txid, str) or len(txid) != 64:
-                raise BroadcastRejected(
-                    f"broadcast returned an unusable txid: {text[:200]}"
-                )
-            return txid.lower()
-        raise BroadcastRejected(f"broadcast rejected: HTTP {status}: {text[:500]}")
+        return txid.lower()
+    raise BroadcastRejected(f"broadcast rejected: HTTP {status}: {text[:500]}")

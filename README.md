@@ -37,7 +37,7 @@ they have not been altered after recording. It is the provenance
 pillar of AI security: proving what ran, not whether the model
 behaved well.
 
-Status: 512 tests passing on main, plus adversarial spot-checks on
+Status: 535 tests passing on main, plus adversarial spot-checks on
 every feature. Independent security review is still open
 ([issue #4](https://github.com/RobGanon/bsv-ai-security/issues/4)) —
 we state that plainly because it matters.
@@ -91,7 +91,11 @@ Teratestnet. Two anchors are confirmed on-chain: anchor #1
 block 36722) and anchor #2
 (`d8407bb7a60f23aadcf021e9cb0098c6ae362a519aa04cbd8536265519c09230`,
 block 36723). See `docs/anchoring-protocol.md` for the verifier
-procedure and what anchoring does and does not prove.
+procedure and what anchoring does and does not prove. Anchor signing
+goes through the offline-signing ceremony — the publisher exports an
+unsigned tx, a human-side signer signs it, and the publisher verifies
+and broadcasts it — documented in
+`docs/offline-signing-handoff.md`.
 
 ## Training-data provenance
 

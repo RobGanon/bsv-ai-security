@@ -493,19 +493,18 @@ class Tx:
         return sha256d(self.serialize())[::-1].hex()
 
     @staticmethod
-    def build_anchor(
+    def build_anchor_unsigned(
         *, funding: "FundingUTXO", payload: bytes, change_address: str,
-        fee_sats: int, signer: "Signer", network: str = "testnet",
+        fee_sats: int, network: str = "testnet",
     ) -> "Tx":
-        """Build + sign a 1-input anchor tx (OP_RETURN payload + change).
+        """Build the unsigned 1-input anchor tx (OP_RETURN payload + change).
 
-        ``funding`` is the outpoint being spent (value + locking script
-        taken from it). ``signer`` signs the FORKID sighash; its pubkey
-        must match the funding output's P2PKH script (checked by the
-        caller-side sighash, not re-derived here — the network rejects
-        a mismatched signature, and the broadcaster surfaces that).
-        ``network`` selects the change-address version; it must match
-        the address given.
+        This is the handoff artifact for the offline signing ceremony:
+        the publisher exports exactly this transaction, the human-side
+        signer signs it, and ``broadcast-signed`` verifies the signed
+        transaction against a freshly rebuilt copy of it. The input's
+        ``script_sig`` is empty. All validation is shared with
+        :meth:`build_anchor` — there is one builder, not two.
         """
         from .broadcast import BroadcastError  # local import: avoid a cycle
 
@@ -543,9 +542,32 @@ class Tx:
                 )
             )
         # Dust change is absorbed into the fee (no change output).
-        tx = Tx(
+        return Tx(
             inputs=[TxIn(funding.txid, funding.vout)],
             outputs=outputs,
+        )
+
+    @staticmethod
+    def build_anchor(
+        *, funding: "FundingUTXO", payload: bytes, change_address: str,
+        fee_sats: int, signer: "Signer", network: str = "testnet",
+    ) -> "Tx":
+        """Build + sign a 1-input anchor tx (OP_RETURN payload + change).
+
+        ``funding`` is the outpoint being spent (value + locking script
+        taken from it). ``signer`` signs the FORKID sighash; its pubkey
+        must match the funding output's P2PKH script (checked by the
+        caller-side sighash, not re-derived here — the network rejects
+        a mismatched signature, and the broadcaster surfaces that).
+        ``network`` selects the change-address version; it must match
+        the address given.
+        """
+        tx = Tx.build_anchor_unsigned(
+            funding=funding,
+            payload=payload,
+            change_address=change_address,
+            fee_sats=fee_sats,
+            network=network,
         )
         digest = sighash_forkid(
             tx, 0, bytes.fromhex(funding.script_hex), funding.value

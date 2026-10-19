@@ -1,6 +1,6 @@
 """Privileged launcher: run a command against verified artifact handles.
 
-``aiguard verify`` proves a signed manifest before launch, but a caller
+``sealrun verify`` proves a signed manifest before launch, but a caller
 that then launches the model *by path* re-opens the artifacts, leaving a
 check-to-use window: an attacker with write access to the artifact tree
 can swap bytes between verification and the model's ``open()``. The
@@ -17,10 +17,10 @@ it under sudo/systemd and passes ``--uid``/``--gid``.
 
 Environment contract for the child::
 
-    AIGUARD_MANIFEST_HASH   sha256 over the verified signed envelope
-    AIGUARD_RELEASE_ID      release_id from the verified payload
-    AIGUARD_RELEASE_SEQ     release_seq from the verified payload
-    AIGUARD_ARTIFACT_<P>    /proc/self/fd/<N> for each artifact, where
+    SEALRUN_MANIFEST_HASH   sha256 over the verified signed envelope
+    SEALRUN_RELEASE_ID      release_id from the verified payload
+    SEALRUN_RELEASE_SEQ     release_seq from the verified payload
+    SEALRUN_ARTIFACT_<P>    /proc/self/fd/<N> for each artifact, where
                             <P> is the artifact path upper-cased with
                             every run of non-alphanumeric characters
                             collapsed to a single underscore
@@ -68,7 +68,7 @@ try:
 except ImportError:  # pragma: no cover - non-Unix platforms
     fcntl = None  # type: ignore[assignment]
 
-_ENV_PREFIX = "AIGUARD_ARTIFACT_"
+_ENV_PREFIX = "SEALRUN_ARTIFACT_"
 _NON_ALNUM = re.compile(r"[^A-Za-z0-9]+")
 
 # F_SEAL_* values (linux/memfd.h). The fallbacks let the module import on
@@ -84,7 +84,7 @@ _SEAL_BITS = (
 def artifact_env_name(path: str) -> str:
     """Map an artifact path to its child environment variable name.
 
-    ``"model.bin"`` -> ``AIGUARD_ARTIFACT_MODEL_BIN``. The mapping is
+    ``"model.bin"`` -> ``SEALRUN_ARTIFACT_MODEL_BIN``. The mapping is
     many-to-one; callers detect collisions before launch.
     """
     collapsed = _NON_ALNUM.sub("_", path).strip("_").upper()
@@ -110,7 +110,7 @@ def _seal_fd(src_fd: int, *, chunk: int = 1 << 20) -> int:
     if fcntl is None or not hasattr(fcntl, "F_ADD_SEALS"):
         raise VerificationError("sealing requires fcntl.F_ADD_SEALS (Linux)")
     os.lseek(src_fd, 0, os.SEEK_SET)
-    mem_fd = os.memfd_create("aiguard-artifact", os.MFD_ALLOW_SEALING)
+    mem_fd = os.memfd_create("sealrun-artifact", os.MFD_ALLOW_SEALING)
     try:
         while True:
             data = os.read(src_fd, chunk)
@@ -128,7 +128,7 @@ def _seal_fd(src_fd: int, *, chunk: int = 1 << 20) -> int:
 def _artifact_environment(
     channels: Sequence[tuple[str, int]],
 ) -> dict[str, str]:
-    """Build the ``AIGUARD_ARTIFACT_*`` variables, refusing collisions."""
+    """Build the ``SEALRUN_ARTIFACT_*`` variables, refusing collisions."""
     env: dict[str, str] = {}
     seen: dict[str, str] = {}
     for path, fd in channels:
@@ -155,14 +155,14 @@ def build_child_environment(
     """
     env = dict(os.environ if base is None else base)
     payload = envelope.get("payload") if isinstance(envelope, dict) else None
-    env["AIGUARD_MANIFEST_HASH"] = manifest_hash(envelope)
+    env["SEALRUN_MANIFEST_HASH"] = manifest_hash(envelope)
     if isinstance(payload, dict):
         release_id = payload.get("release_id")
         if isinstance(release_id, str) and release_id:
-            env["AIGUARD_RELEASE_ID"] = release_id
+            env["SEALRUN_RELEASE_ID"] = release_id
         release_seq = payload.get("release_seq")
         if isinstance(release_seq, int) and not isinstance(release_seq, bool):
-            env["AIGUARD_RELEASE_SEQ"] = str(release_seq)
+            env["SEALRUN_RELEASE_SEQ"] = str(release_seq)
     env.update(_artifact_environment(channels))
     return env
 

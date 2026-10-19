@@ -26,7 +26,7 @@ three steps fit together.
 ## Step 1 — export
 
 ```
-aiguard publish --journal audit.jsonl --anchor-record anchors.json \
+sealrun publish --journal audit.jsonl --anchor-record anchors.json \
   --export-unsigned unsigned.hex \
   --funding-txid <prev anchor change txid> --funding-vout <vout> \
   --change-address <anchor address> [--fee-sats 500]
@@ -60,7 +60,7 @@ and the publisher never learns the key.
 ## Step 3 — broadcast-signed
 
 ```
-aiguard publish --journal audit.jsonl --anchor-record anchors.json \
+sealrun publish --journal audit.jsonl --anchor-record anchors.json \
   --broadcast-signed signed.hex \
   --funding-txid <same> --funding-vout <same> \
   --change-address <same> [--fee-sats <same>]

@@ -2,6 +2,11 @@
 
 **Prove what your AI actually ran.**
 
+> Note: the package and CLI were formerly named `aiguard`; renamed to
+> `sealrun` on 2026-10-19 to avoid a collision with an unrelated product
+> of the same name. The on-chain `AIGUARD1` payload magic is retained
+> for anchor-chain continuity.
+
 AI systems run as black boxes: you cannot prove *which* model and
 configuration produced an output, or that the audit log describing it was
 not rewritten afterwards. When an auditor, a regulator, or a customer
@@ -135,7 +140,7 @@ limited in scope:
 - SHA-256 identifies artifact bytes; secp256k1 ECDSA verifies the release manifest.
 - The audit journal is append-only under normal operation and hash-chained so
   that any modification of earlier events is detectable.
-- The manifest verifier does not itself sandbox a model. `aiguard launch`
+- The manifest verifier does not itself sandbox a model. `sealrun launch`
   pins the verified bytes across exec, but containment is out of scope.
 - The manifest uses relative artifact paths and rejects path traversal/symlinks.
 
@@ -145,49 +150,49 @@ limited in scope:
 pip install -e .
 
 # Generate a key pair (demo only — production keys must be offline / HSM).
-aiguard keygen --private-key demo/private.wif --public-key demo/public.pub
+sealrun keygen --private-key demo/private.wif --public-key demo/public.pub
 
 # Create an unsigned manifest template, then sign it.
-aiguard manifest-create \
+sealrun manifest-create \
   --root demo/artifacts \
   --artifact model.bin --artifact config.json \
   --release-id demo-release-001 \
   --release-seq 1 \
   --output demo/manifest.json
 
-aiguard manifest-sign \
+sealrun manifest-sign \
   --manifest demo/manifest.json \
   --private-key demo/private.wif \
   --output demo/manifest.signed.json
 
 # Verify (paths relative to --root).
-aiguard verify \
+sealrun verify \
   --root demo/artifacts \
   --manifest demo/manifest.signed.json \
   --public-key demo/public.pub
 
 # Optional rollback protection: reject any manifest older than sequence 1.
-aiguard verify \
+sealrun verify \
   --root demo/artifacts \
   --manifest demo/manifest.signed.json \
   --public-key demo/public.pub \
   --min-release-seq 1
 
 # Launch against the verified handles instead of reopening paths.
-aiguard launch \
+sealrun launch \
   --root demo/artifacts \
   --manifest demo/manifest.signed.json \
   --public-key demo/public.pub \
-  -- /bin/sh -c 'cat "$AIGUARD_ARTIFACT_MODEL_BIN"'
+  -- /bin/sh -c 'cat "$SEALRUN_ARTIFACT_MODEL_BIN"'
 ```
 
 ## Launching with verified handles
 
-`aiguard verify` proves the manifest, then exits — a caller that launches
+`sealrun verify` proves the manifest, then exits — a caller that launches
 the model *by path* reopens the artifacts, leaving a window for a path
-swap between check and use. `aiguard launch` closes that window: it runs
+swap between check and use. `sealrun launch` closes that window: it runs
 the same verification, keeps the verified descriptors open, and hands
-them to the command via `AIGUARD_ARTIFACT_*` environment variables
+them to the command via `SEALRUN_ARTIFACT_*` environment variables
 pointing at `/proc/self/fd/N`.
 
 - `--seal` copies each artifact into a sealed `memfd` first, so the child
@@ -204,8 +209,8 @@ pointing at `/proc/self/fd/N`.
 ## Audit journal
 
 ```bash
-aiguard audit-append --journal demo/audit.jsonl --event-type "verification" --detail "demo check"
-aiguard audit-verify --journal demo/audit.jsonl
+sealrun audit-append --journal demo/audit.jsonl --event-type "verification" --detail "demo check"
+sealrun audit-verify --journal demo/audit.jsonl
 ```
 
 The journal is hash-chained but not protected against an administrator who can
@@ -242,7 +247,7 @@ base64. Example:
 
 ```json
 {
-  "schema": "aiguard-manifest-v2",
+  "schema": "sealrun-manifest-v1",
   "release_id": "demo-release-001",
   "release_seq": 1,
   "artifacts": [
@@ -301,7 +306,7 @@ pipeline. Details: [`docs/pilot-brief.md`](docs/pilot-brief.md).
 4. ~~Independent SPV / header-chain verification~~ — done.
 5. ~~Migrate manifest signing from Ed25519 to secp256k1~~ — done.
 6. ~~Privileged launcher that consumes verified artifact handles~~ — done
-   (`aiguard launch`; see `docs/launcher.md`).
+   (`sealrun launch`; see `docs/launcher.md`).
 
 ## License
 

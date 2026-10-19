@@ -1,6 +1,6 @@
 # Offline anchor signer CLI
 
-`aiguard signer` is the human side of the anchor signing ceremony
+`sealrun signer` is the human side of the anchor signing ceremony
 (see the ceremony design doc):
 the AI/publisher prepares an unsigned anchor transaction, and this
 signer — running on the human's machine, outside the builder's reach —
@@ -15,7 +15,7 @@ signed transaction separately.
 ## Setup
 
 ```sh
-aiguard signer init --config ~/signer/signer.json --key-file ~/signer/anchor-key.txt
+sealrun signer init --config ~/signer/signer.json --key-file ~/signer/anchor-key.txt
 ```
 
 `init` generates a fresh **testnet** anchor key, sets your username and
@@ -26,7 +26,7 @@ files. The key file and config are written with `0600` permissions.
 Before each anchor, record what the next anchor must spend and anchor:
 
 ```sh
-aiguard signer expect --config ~/signer/signer.json \
+sealrun signer expect --config ~/signer/signer.json \
   --prev-txid <previous anchor txid> \
   --utxo-txid <funding UTXO txid> --utxo-vout <vout> --utxo-value <sats> \
   --expected-payload <84-byte anchor payload hex>
@@ -39,7 +39,7 @@ transaction's OP_RETURN bytes to it exactly.
 ## Signing
 
 ```sh
-aiguard signer sign --config ~/signer/signer.json --tx <unsigned tx hex>
+sealrun signer sign --config ~/signer/signer.json --tx <unsigned tx hex>
 # or: --tx-file <file holding the unsigned tx hex>
 # or: --expected-payload <hex>  (overrides the config value for this signing)
 ```

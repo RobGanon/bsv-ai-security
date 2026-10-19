@@ -16,13 +16,13 @@ including a well-formed forgery for a release that never existed —
 fails closed.
 
 ```bash
-aiguard audit-verify --journal demo/audit.jsonl
-aiguard audit-manifest-accepted \
+sealrun audit-verify --journal demo/audit.jsonl
+sealrun audit-manifest-accepted \
   --journal demo/audit.jsonl \
   --release-seq 3 \
   --release-id demo-release-003 \
   --manifest demo/manifest-signed.json
-aiguard anchor-payload \
+sealrun anchor-payload \
   --journal demo/audit.jsonl \
   --start-seq 1 \
   --manifest demo/manifest-signed.json \
@@ -76,7 +76,7 @@ adopts.
 ## Compare a journal with the saved payload
 
 ```bash
-aiguard anchor-verify \
+sealrun anchor-verify \
   --journal demo/audit.jsonl \
   --payload demo/anchor-payload.json
 ```
@@ -93,7 +93,7 @@ To also re-check acceptance binding on verify, supply the same inputs
 the anchor was created with:
 
 ```bash
-aiguard anchor-verify \
+sealrun anchor-verify \
   --journal demo/audit.jsonl \
   --payload demo/anchor-payload.json \
   --manifest demo/manifest-signed.json \
@@ -107,7 +107,7 @@ the payload's checkpoint is returned as committed, without re-derivation.
 
 ## Anchor-chain continuity (issue #8)
 
-`aiguard.anchor.verify_anchor_chain(anchors, genesis_txid)` enforces that a
+`sealrun.anchor.verify_anchor_chain(anchors, genesis_txid)` enforces that a
 sequence of anchors forms one continuous, fork-free chain. Each anchor is a
 `{"payload": bytes, "txid": str}` entry (or `payload_hex`, or a
 `(payload, txid)` tuple); publisher anchor records pass through directly.
@@ -137,17 +137,17 @@ a broken chain, and that must fail verification.
 
 ```bash
 # Chain-only check: anchor JSON files carry payload_hex + txid, in chain order.
-aiguard anchor-chain-verify --genesis-txid <pinned-genesis> \
+sealrun anchor-chain-verify --genesis-txid <pinned-genesis> \
   --anchor demo/anchor-1.json --anchor demo/anchor-2.json
 
 # Full check: journal against every anchor in the chain.
-aiguard anchor-chain-verify --genesis-txid <pinned-genesis> \
+sealrun anchor-chain-verify --genesis-txid <pinned-genesis> \
   --journal demo/audit.jsonl \
   --anchor demo/anchor-1.json --anchor demo/anchor-2.json
 
 # Check a publisher store's broadcast records (pending/superseded
 # drafts are not chain members).
-aiguard anchor-chain-verify --genesis-txid <pinned-genesis> \
+sealrun anchor-chain-verify --genesis-txid <pinned-genesis> \
   --anchor-record demo/anchors.json
 ```
 
@@ -190,7 +190,7 @@ Never put event details, prompts, model bytes, secrets, or private keys on-chain
 
 ## Publisher: anchor-on-release + scheduled checkpoints
 
-`aiguard.publisher.Publisher` turns the design above into running code.
+`sealrun.publisher.Publisher` turns the design above into running code.
 Broadcast stays **disabled by default** and no real broadcaster exists in
 this build: the publisher prepares anchor payloads and records them
 locally. Nothing is signed, spent, or sent to any network unless the
@@ -198,14 +198,14 @@ operator explicitly enables broadcast *and* supplies a broadcaster.
 
 ```bash
 # One scheduler tick (dry-run): anchor if a release landed or the interval elapsed.
-aiguard publish --journal demo/audit.jsonl --anchor-record demo/anchors.json
+sealrun publish --journal demo/audit.jsonl --anchor-record demo/anchors.json
 
 # Anchor immediately after recording an acceptance.
-aiguard publish --journal demo/audit.jsonl --anchor-record demo/anchors.json \
+sealrun publish --journal demo/audit.jsonl --anchor-record demo/anchors.json \
   --mode on-release --manifest demo/manifest-signed.json --public-key demo/public.pub
 
 # Long-running loop: re-reads the manifests directory at every checkpoint.
-aiguard publish --journal demo/audit.jsonl --anchor-record demo/anchors.json \
+sealrun publish --journal demo/audit.jsonl --anchor-record demo/anchors.json \
   --mode loop --interval-seconds 3600 \
   --manifest-dir demo/manifests --public-key demo/public.pub
 ```

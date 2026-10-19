@@ -15,23 +15,23 @@ import json
 
 import pytest
 
-from aiguard.anchor import encode_anchor_payload
-from aiguard.broadcast import (
+from sealrun.anchor import encode_anchor_payload
+from sealrun.broadcast import (
     FundingUTXO,
     WIFSigner,
     WoCBroadcaster,
     WOC_MAINNET_BASE,
     WOC_TTN_BASE,
 )
-from aiguard.bsv import (
+from sealrun.bsv import (
     PrivKey,
     build_p2pkh_script_for_address,
     parse_tx,
     sighash_forkid,
     verify_sig,
 )
-from aiguard.cli import main
-from aiguard.core import append_audit_event
+from sealrun.cli import main
+from sealrun.core import append_audit_event
 
 # Private key 1: the canonical key-1 vector. Compressed pubkey ->
 # mainnet address 1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH.
@@ -55,7 +55,7 @@ def test_privkey_mainnet_vector():
     assert key.address(network="mainnet") == KEY1_MAINNET_ADDRESS
     assert key.wif(network="mainnet") == _key1_mainnet_wif()
     # The mainnet address round-trips through base58check decoding.
-    from aiguard.bsv import base58check_decode, hash160
+    from sealrun.bsv import base58check_decode, hash160
 
     version, payload = base58check_decode(KEY1_MAINNET_ADDRESS)
     assert version == 0x00
@@ -67,7 +67,7 @@ def test_base58_encode_pads_leading_zero_bytes_with_ones():
     # (not a base58 character) instead of "1". Testnet never hit it
     # (nonzero version bytes); every mainnet address (version 0x00)
     # would have been mis-encoded.
-    from aiguard.bsv import base58_decode, base58_encode
+    from sealrun.bsv import base58_decode, base58_encode
 
     assert base58_encode(b"\x00") == "1"
     assert base58_encode(b"\x00\x00\x01") == "112"
@@ -122,7 +122,7 @@ def test_p2pkh_script_for_address_network():
 
 
 def test_build_anchor_mainnet_change_signature_verifies():
-    from aiguard.bsv import Tx
+    from sealrun.bsv import Tx
 
     key = PrivKey(1)
     signer = WIFSigner.from_wif(_key1_mainnet_wif(), network="mainnet")
@@ -158,7 +158,7 @@ def test_build_anchor_mainnet_change_signature_verifies():
 
 
 def test_build_anchor_rejects_mismatched_change_address():
-    from aiguard.bsv import Tx
+    from sealrun.bsv import Tx
 
     signer = WIFSigner.from_wif(_key1_testnet_wif(), network="testnet")
     payload = encode_anchor_payload(
@@ -291,7 +291,7 @@ def test_cli_publish_mainnet_broadcast_wires_mainnet(tmp_path, monkeypatch):
         def broadcast(self, payload_hex):
             return "bb" * 32
 
-    monkeypatch.setattr("aiguard.cli.WoCBroadcaster", FakeBroadcaster)
+    monkeypatch.setattr("sealrun.cli.WoCBroadcaster", FakeBroadcaster)
     monkeypatch.setenv("ANCHOR_WIF", _key1_mainnet_wif())
     journal = tmp_path / "audit.jsonl"
     append_audit_event(journal, "test", "first")
@@ -324,7 +324,7 @@ def test_cli_publish_testnet_broadcast_stays_testnet(tmp_path, monkeypatch):
         def broadcast(self, payload_hex):
             return "bb" * 32
 
-    monkeypatch.setattr("aiguard.cli.WoCBroadcaster", FakeBroadcaster)
+    monkeypatch.setattr("sealrun.cli.WoCBroadcaster", FakeBroadcaster)
     monkeypatch.setenv("ANCHOR_WIF", _key1_testnet_wif())
     journal = tmp_path / "audit.jsonl"
     append_audit_event(journal, "test", "first")
@@ -382,7 +382,7 @@ def test_cli_publish_explicit_woc_base_wins(tmp_path, monkeypatch):
         def broadcast(self, payload_hex):
             return "bb" * 32
 
-    monkeypatch.setattr("aiguard.cli.WoCBroadcaster", FakeBroadcaster)
+    monkeypatch.setattr("sealrun.cli.WoCBroadcaster", FakeBroadcaster)
     monkeypatch.setenv("ANCHOR_WIF", _key1_mainnet_wif())
     journal = tmp_path / "audit.jsonl"
     append_audit_event(journal, "test", "first")

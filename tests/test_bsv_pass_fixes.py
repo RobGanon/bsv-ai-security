@@ -17,19 +17,19 @@ import struct
 
 import pytest
 
-from aiguard.anchor import (
+from sealrun.anchor import (
     AnchorSignatureVerifier,
     _tx_from_woc_json,
     encode_anchor_payload,
     verify_anchor_tx_signature,
 )
-from aiguard.beef import Beef, BeefTx, BeefVerifier
-from aiguard.broadcast import (
+from sealrun.beef import Beef, BeefTx, BeefVerifier
+from sealrun.broadcast import (
     BroadcastRejected,
     FundingUTXO,
     WoCBroadcaster,
 )
-from aiguard.bsv import (
+from sealrun.bsv import (
     Tx,
     TxIn,
     TxOut,
@@ -37,9 +37,9 @@ from aiguard.bsv import (
     sats_from_btc_decimal,
     sighash_forkid,
 )
-from aiguard.cli import main
-from aiguard.core import VerificationError, append_audit_event
-from aiguard.spv import (
+from sealrun.cli import main
+from sealrun.core import VerificationError, append_audit_event
+from sealrun.spv import (
     BlockHeader,
     HeaderChainVerifier,
     SPVVerifier,
@@ -330,7 +330,7 @@ def test_f1_broadcaster_rejects_negative_funding_vout():
 
 
 def test_f1_cli_returns_1_not_traceback_on_struct_error(monkeypatch):
-    import aiguard.cli as cli_mod
+    import sealrun.cli as cli_mod
 
     class BoomFetcher:
         def __init__(self, base_url=None):
@@ -435,7 +435,7 @@ def test_f2_cli_valid_chain_still_returns_0(tmp_path):
 def test_f2_cli_journal_without_binding_warns(tmp_path, capsys):
     journal = tmp_path / "audit.jsonl"
     append_audit_event(journal, "test", "first")
-    from aiguard.anchor import create_anchor_payload
+    from sealrun.anchor import create_anchor_payload
 
     payload = create_anchor_payload(journal, start_seq=1, prev_txid=GENESIS)
     anchor = tmp_path / "anchor.json"
@@ -481,7 +481,7 @@ def _beef_with(anchor_txid, extra_txs):
     """Envelope: mined anchor (with BUMP) + the given unmined txs."""
     from test_beef import _ttn_beef
 
-    from aiguard.spv import build_bump
+    from sealrun.spv import build_bump
     from test_spv import BLOCK_36722
 
     bump = build_bump(BLOCK_36722["tx"], [2], block_height=36722)
@@ -531,7 +531,7 @@ def test_f3_beef_rejects_negative_output():
         [TxOut(150, script)], 0,
     )
     beef0, _a, _c = _ttn_beef()
-    from aiguard.spv import build_bump
+    from sealrun.spv import build_bump
     from test_spv import BLOCK_36722
 
     bump = build_bump(BLOCK_36722["tx"], [2], block_height=36722)
@@ -578,7 +578,7 @@ def test_f4_beef_rejects_negative_prev_index():
     # hand-built Tx — defense-in-depth, same as the adversarial probe.
     from test_beef import _ttn_beef
 
-    from aiguard.bsv import parse_tx_prefix
+    from sealrun.bsv import parse_tx_prefix
 
     script = bytes.fromhex("76a9142e640e26bcb812790c2517d49d660c44e1b3ae6c88ac")
     anchor_txid = "4111b7cf9d42624be75aa78f5031caaebe4e836665b95fbcdbadbb086b2bf029"

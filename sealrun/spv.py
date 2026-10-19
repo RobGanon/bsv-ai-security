@@ -610,7 +610,7 @@ def _urllib_get(method: str, url: str) -> tuple[int, bytes]:
     req = urllib.request.Request(url, method=method)
     # WoC-TTN rejects the default "Python-urllib/..." User-Agent with 403
     # (verified live 2026-10-16). Identify the client honestly.
-    req.add_header("User-Agent", "aiguard/1.0")
+    req.add_header("User-Agent", "sealrun/1.0")
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             return resp.status, resp.read()

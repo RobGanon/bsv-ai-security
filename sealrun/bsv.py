@@ -1,7 +1,7 @@
 """Minimal BSV primitives for the live anchor: secp256k1, P2PKH, tx build/sign.
 
 Stdlib only, no external dependency — the same posture as the rest of
-aiguard and the same approach the BRC-166 harness proved in Go. This
+sealrun and the same approach the BRC-166 harness proved in Go. This
 module is deliberately narrow: one input (P2PKH), one OP_RETURN output
 (the 84-byte anchor payload), one change output. It does not implement
 script verification, fee estimation, or SPV — the publisher verifies
@@ -73,7 +73,7 @@ def hash160(data: bytes) -> bytes:
     except ValueError as exc:  # pragma: no cover - environment-dependent
         raise RuntimeError(
             "RIPEMD-160 is not available in this Python's hashlib; "
-            "aiguard/bsv.py cannot derive addresses without it"
+            "sealrun/bsv.py cannot derive addresses without it"
         ) from exc
 
 

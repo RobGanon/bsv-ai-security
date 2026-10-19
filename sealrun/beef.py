@@ -16,7 +16,7 @@ Verification (:meth:`BeefVerifier.verify_beef`):
 
 * every tx carrying a BUMP must prove against the block header at the
   BUMP's height (Merkle root + proof-of-work, via
-  :class:`aiguard.spv.BUMPVerifier`);
+  :class:`sealrun.spv.BUMPVerifier`);
 * every tx without a BUMP must have all of its inputs' parent txs
   present in the envelope and verified (BUMP or ancestry), each
   referenced output must exist, and input value must cover output
@@ -24,7 +24,7 @@ Verification (:meth:`BeefVerifier.verify_beef`):
 
 What this does NOT do: script evaluation. BRC-62's local-validation
 step also requires that the scripts of unmined transactions evaluate
-to TRUE; aiguard has no script interpreter, so an unmined tx's
+to TRUE; sealrun has no script interpreter, so an unmined tx's
 signatures are not checked here. A BEEF that verifies proves
 inclusion and ancestry, not script validity. Envelopes are
 operator-supplied: no public WhatsOnChain endpoint serves BEEF
@@ -37,8 +37,8 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-from aiguard.bsv import parse_tx_prefix
-from aiguard.spv import (
+from sealrun.bsv import parse_tx_prefix
+from sealrun.spv import (
     BUMPVerifier,
     BlockFetcher,
     bump_to_bytes,

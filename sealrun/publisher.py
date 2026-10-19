@@ -7,7 +7,7 @@ records them locally. Nothing is signed, spent, or sent to any network
 unless the operator explicitly enables broadcast *and* supplies a
 broadcaster (see :class:`NullBroadcaster` and :func:`Publisher.__init__`).
 The real broadcaster implementation is
-:class:`aiguard.broadcast.WoCBroadcaster` (build + sign + send via
+:class:`sealrun.broadcast.WoCBroadcaster` (build + sign + send via
 WhatsOnChain); the CLI wires it up under ``publish --broadcast``.
 
 What the publisher does
@@ -63,8 +63,8 @@ Explicitly out of scope (documented, not faked)
   a broken chain. On-chain confirmation of those anchors is still
   unverified (see above).
 - Transaction construction / signing / real broadcast: implemented in
-  :mod:`aiguard.bsv` (stdlib-only secp256k1 + tx build/sign) and
-  :mod:`aiguard.broadcast` (:class:`WoCBroadcaster` via WhatsOnChain).
+  :mod:`sealrun.bsv` (stdlib-only secp256k1 + tx build/sign) and
+  :mod:`sealrun.broadcast` (:class:`WoCBroadcaster` via WhatsOnChain).
   First live anchor on Teratestnet 2026-10-16 (txid
   ``4111b7cf…2bf029``). The ``publish --broadcast`` CLI path wires it up;
   broadcast stays opt-in and fail-closed without ``ANCHOR_WIF`` +
@@ -115,7 +115,7 @@ RECORD_STATUSES = ("pending", "broadcast", "superseded")
 
 # O_NOFOLLOW makes open(2) fail on a trailing symlink instead of following
 # it. It is Unix-only; where unavailable the value is 0 (a no-op flag),
-# matching aiguard.core.
+# matching sealrun.core.
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 try:

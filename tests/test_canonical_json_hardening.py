@@ -9,7 +9,7 @@ surface that as VerificationError.
 
 import pytest
 
-from aiguard.core import (
+from sealrun.core import (
     VerificationError,
     canonical_json_bytes,
     verify_audit_journal,

@@ -4,7 +4,7 @@ This branch adds the first code foundation for the Phase 2 publishing design. It
 
 ## Implemented
 
-- `aiguard.publishing.PublishingConfig` and `load_publishing_config()` validate a testnet-only configuration.
+- `sealrun.publishing.PublishingConfig` and `load_publishing_config()` validate a testnet-only configuration.
 - The backend selection is explicit: `provider` or `node`.
 - Provider endpoints must use HTTPS. Node RPC may use HTTP only on loopback; remote node RPC requires HTTPS.
 - Credentials embedded in endpoint URLs are rejected. Configuration representations redact tokens, credentials, and endpoint URLs.
@@ -17,23 +17,23 @@ This branch adds the first code foundation for the Phase 2 publishing design. It
 Provider backend:
 
 ```sh
-export AIGUARD_BSV_NETWORK=testnet
-export AIGUARD_BSV_BACKEND=provider
-export AIGUARD_BSV_PROVIDER_URL=https://your-provider.example/api
-export AIGUARD_BSV_PROVIDER_TOKEN='set-outside-the-repository'
-export AIGUARD_BSV_FEE_RATE=1
-export AIGUARD_BSV_MAX_FEE_SAT=10000
+export SEALRUN_BSV_NETWORK=testnet
+export SEALRUN_BSV_BACKEND=provider
+export SEALRUN_BSV_PROVIDER_URL=https://your-provider.example/api
+export SEALRUN_BSV_PROVIDER_TOKEN='set-outside-the-repository'
+export SEALRUN_BSV_FEE_RATE=1
+export SEALRUN_BSV_MAX_FEE_SAT=10000
 ```
 
 Self-hosted node backend:
 
 ```sh
-export AIGUARD_BSV_NETWORK=testnet
-export AIGUARD_BSV_BACKEND=node
-export AIGUARD_BSV_NODE_RPC_URL=http://127.0.0.1:8332
+export SEALRUN_BSV_NETWORK=testnet
+export SEALRUN_BSV_BACKEND=node
+export SEALRUN_BSV_NODE_RPC_URL=http://127.0.0.1:8332
 # If required, set username/password using a local secret manager or shell.
-export AIGUARD_BSV_NODE_RPC_USERNAME='operator'
-export AIGUARD_BSV_NODE_RPC_PASSWORD='set-outside-the-repository'
+export SEALRUN_BSV_NODE_RPC_USERNAME='operator'
+export SEALRUN_BSV_NODE_RPC_PASSWORD='set-outside-the-repository'
 ```
 
 These examples are illustrative only. No adapter consumes these settings yet. Do not paste real credentials into source files, issues, pull requests, or chat. Do not use mainnet values; the configuration loader rejects any network except `testnet`.

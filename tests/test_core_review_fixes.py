@@ -17,10 +17,10 @@ import threading
 from pathlib import Path
 
 import pytest
-from aiguard.bsv import PrivKey
+from sealrun.bsv import PrivKey
 
-from aiguard.cli import _read_json
-from aiguard.core import (
+from sealrun.cli import _read_json
+from sealrun.core import (
     VerificationError,
     _open_verified_fd,
     canonical_json_bytes,
@@ -64,7 +64,7 @@ def test_manifest_hash_canonicalizes_signature_spelling():
     private = PrivKey.from_bytes(b"\x11" * 32)
     for release_seq in (1, 2, 3, 4):
         payload = {
-            "schema": "aiguard-manifest-v2",
+            "schema": "sealrun-manifest-v1",
             "release_id": "r1",
             "release_seq": release_seq,
             "artifacts": [],
@@ -105,7 +105,7 @@ def test_verify_manifest_rejects_huge_release_seq(tmp_path):
     digest, size = sha256_file(root / "a.txt")
     private = PrivKey.generate()
     payload = {
-        "schema": "aiguard-manifest-v2",
+        "schema": "sealrun-manifest-v1",
         "release_id": "r1",
         "release_seq": 2**32,
         "artifacts": [{"path": "a.txt", "sha256": digest, "size": size}],
@@ -143,7 +143,7 @@ def test_verified_artifacts_lseek_failure_closes_fd(tmp_path, monkeypatch):
     digest, size = sha256_file(root / "a.txt")
     private = PrivKey.generate()
     payload = {
-        "schema": "aiguard-manifest-v2",
+        "schema": "sealrun-manifest-v1",
         "release_id": "r1",
         "release_seq": 1,
         "artifacts": [{"path": "a.txt", "sha256": digest, "size": size}],

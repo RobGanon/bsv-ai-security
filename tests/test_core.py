@@ -3,9 +3,9 @@ import json
 from pathlib import Path
 
 import pytest
-from aiguard.bsv import PrivKey
+from sealrun.bsv import PrivKey
 
-from aiguard.core import (
+from sealrun.core import (
     VerificationError,
     append_audit_event,
     create_manifest,
@@ -66,7 +66,7 @@ def test_path_traversal_rejected(tmp_path):
     root = setup_artifacts(tmp_path)
     private = PrivKey.generate()
     payload = {
-        "schema": "aiguard-manifest-v2",
+        "schema": "sealrun-manifest-v1",
         "release_id": "bad",
         "release_seq": 1,
         "artifacts": [{"path": "../outside", "sha256": "0" * 64, "size": 0}],
@@ -178,7 +178,7 @@ def test_verified_artifacts_rejects_symlink(tmp_path):
     digest, size = sha256_file(root / "model.bin")
     (root / "link.bin").symlink_to("model.bin")
     payload = {
-        "schema": "aiguard-manifest-v2",
+        "schema": "sealrun-manifest-v1",
         "release_id": "r",
         "release_seq": 1,
         "artifacts": [{"path": "link.bin", "sha256": digest, "size": size}],
@@ -317,7 +317,7 @@ def test_sequential_locked_appends_produce_valid_chain(tmp_path):
 
 
 def test_appended_line_matches_canonical_hash_bytes(tmp_path):
-    from aiguard.core import canonical_json_bytes
+    from sealrun.core import canonical_json_bytes
 
     journal = tmp_path / "audit.jsonl"
     event = append_audit_event(journal, "test", "données ✓ 温度")

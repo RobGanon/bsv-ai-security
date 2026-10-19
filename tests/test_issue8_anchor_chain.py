@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from aiguard.anchor import (
+from sealrun.anchor import (
     create_anchor_payload,
     decode_anchor_payload,
     encode_anchor_payload,
@@ -19,9 +19,9 @@ from aiguard.anchor import (
     verify_journal_against_anchor,
     verify_journal_against_anchor_chain,
 )
-from aiguard.cli import main
-from aiguard.core import VerificationError, append_audit_event
-from aiguard.publisher import Publisher, PublisherConfig, PublisherError
+from sealrun.cli import main
+from sealrun.core import VerificationError, append_audit_event
+from sealrun.publisher import Publisher, PublisherConfig, PublisherError
 
 GENESIS = "aa" * 32
 

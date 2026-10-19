@@ -409,7 +409,7 @@ def check_hard_rules(tx: Tx, config: dict[str, Any],
         raise Refusal(
             "expected_payload",
             "no expected payload supplied: pass --expected-payload or set it "
-            "with `aiguard signer expect`",
+            "with `sealrun signer expect`",
         )
     try:
         expected_bytes = bytes.fromhex(expected_payload_hex)
@@ -430,7 +430,7 @@ def check_hard_rules(tx: Tx, config: dict[str, Any],
     if not isinstance(utxo, dict):
         raise Refusal(
             "utxo",
-            "config has no expected UTXO: set it with `aiguard signer expect`",
+            "config has no expected UTXO: set it with `sealrun signer expect`",
         )
     if txin.prev_txid.lower() != utxo["txid"].lower() or txin.prev_index != utxo["vout"]:
         raise Refusal(
@@ -708,7 +708,7 @@ def init_signer(config_path: str | Path, key_path: str | Path, *,
         "TOTP secret (shown once — add it to your authenticator app now): "
         f"{totp_secret}"
     )
-    output_fn("Next: `aiguard signer expect` to set the expected UTXO and payload.")
+    output_fn("Next: `sealrun signer expect` to set the expected UTXO and payload.")
 
 
 def set_expectation(config_path: str | Path, *, prev_txid: str, utxo_txid: str,
@@ -751,9 +751,9 @@ def set_expectation(config_path: str | Path, *, prev_txid: str, utxo_txid: str,
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point: ``aiguard signer <init|expect|sign> ...``."""
+    """Entry point: ``sealrun signer <init|expect|sign> ...``."""
     parser = argparse.ArgumentParser(
-        prog="aiguard signer",
+        prog="sealrun signer",
         description="Offline anchor-transaction signer (human-side signing ceremony).",
     )
     sub = parser.add_subparsers(dest="command", required=True)

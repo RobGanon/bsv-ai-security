@@ -9,8 +9,8 @@ import json
 
 import pytest
 
-from aiguard.anchor import apply_header_chain, encode_anchor_payload, verify_anchor_chain
-from aiguard.spv import (
+from sealrun.anchor import apply_header_chain, encode_anchor_payload, verify_anchor_chain
+from sealrun.spv import (
     BlockHeader,
     HeaderChainResult,
     HeaderChainVerifier,
@@ -94,7 +94,7 @@ class FakeHeaderFetcher:
         return {"blockheight": None, "blockhash": None}
 
     def _pow_fail_hash(self):
-        from aiguard.spv import header_hash
+        from sealrun.spv import header_hash
 
         header = self._pow_fail_header()
         return header_hash(header.to_bytes())
@@ -283,8 +283,8 @@ def test_apply_header_chain_journal_shape():
 
 
 def test_cli_header_chain_verifies_and_prints_line(tmp_path, capsys, monkeypatch):
-    from aiguard import cli as cli_module
-    from aiguard.bsv import build_op_return_script
+    from sealrun import cli as cli_module
+    from sealrun.bsv import build_op_return_script
 
     genesis = "0" * 64
     claimed = encode_anchor_payload(
@@ -325,7 +325,7 @@ def test_cli_header_chain_verifies_and_prints_line(tmp_path, capsys, monkeypatch
 
 
 def test_cli_header_chain_missing_checkpoint_args_is_rejected(tmp_path, capsys):
-    from aiguard import cli as cli_module
+    from sealrun import cli as cli_module
 
     anchor1 = tmp_path / "a1.json"
     genesis = "0" * 64

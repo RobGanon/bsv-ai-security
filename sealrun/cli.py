@@ -97,7 +97,7 @@ def _write_json(path: Path, obj):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="aiguard", description="Local AI artifact trust core")
+    parser = argparse.ArgumentParser(prog="sealrun", description="Local AI artifact trust core")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("keygen", help="generate a development secp256k1 keypair")

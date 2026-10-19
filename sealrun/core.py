@@ -20,10 +20,14 @@ except ImportError:  # pragma: no cover - non-Unix platforms
 
 HEX_64 = re.compile(r"^[0-9a-fA-F]{64}$")
 
-#: Signed-manifest payload schema. Version 2 is secp256k1/ECDSA
-#: (RFC 6979, low-S, DER over SHA-256 of the canonical payload bytes);
-#: version 1 (Ed25519) envelopes fail closed with "unsupported schema".
-MANIFEST_SCHEMA = "aiguard-manifest-v2"
+#: Signed-manifest payload schema. ``sealrun-manifest-v1`` is current
+#: (secp256k1/ECDSA: RFC 6979, low-S, DER over SHA-256 of the
+#: canonical payload bytes), format-identical to legacy
+#: ``aiguard-manifest-v2`` (still accepted for existing manifests).
+#: The original ``aiguard-manifest-v1`` (Ed25519) envelopes fail
+#: closed with "unsupported schema".
+MANIFEST_SCHEMA = "sealrun-manifest-v1"
+LEGACY_MANIFEST_SCHEMA = "aiguard-manifest-v2"
 
 # Limits for the local audit journal (Phase 1 DoS hardening).
 MAX_EVENT_DETAIL_BYTES = 4096
@@ -268,7 +272,7 @@ def _load_verified_payload(envelope: dict, public_key: bytes) -> dict:
     if not isinstance(envelope, dict) or set(envelope) != {"payload", "signature"}:
         raise VerificationError("invalid signed envelope fields")
     payload = envelope["payload"]
-    if not isinstance(payload, dict) or payload.get("schema") != MANIFEST_SCHEMA:
+    if not isinstance(payload, dict) or payload.get("schema") not in (MANIFEST_SCHEMA, LEGACY_MANIFEST_SCHEMA):
         raise VerificationError("unsupported manifest schema")
     try:
         signature = base64.b64decode(envelope["signature"], validate=True)
@@ -510,7 +514,7 @@ def record_manifest_acceptance(
     verify path: the operator has decided this release is the one to run,
     and the acceptance event is what later anchors commit to. The
     ``release_seq`` in an anchor payload is derived from these events
-    (see ``aiguard.anchor.create_anchor_payload``); it is never supplied
+    (see ``sealrun.anchor.create_anchor_payload``); it is never supplied
     by the anchoring caller, so a publisher cannot anchor an arbitrary
     checkpoint value.
 

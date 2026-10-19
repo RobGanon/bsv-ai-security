@@ -17,6 +17,9 @@ from .core import (
     manifest_hash as compute_manifest_hash,
 )
 
+# On-chain OP_RETURN magic. Deliberately NOT renamed: live anchors
+# (Teratestnet #1/#2) carry AIGUARD1, and the anchor chain must stay
+# continuous. The magic is wire-format data, not the package name.
 MAGIC = b"AIGUARD1"
 PAYLOAD_SIZE = 84
 ZERO_TXID = "0" * 64
@@ -437,7 +440,7 @@ def verify_anchor_chain(anchors: Any, genesis_txid: Any) -> dict[str, Any]:
 
     What this does NOT prove: that any anchor is really on-chain. This
     is continuity of the *claimed* chain — inclusion in a mined block
-    is a separate check, available via ``aiguard.spv`` (``--spv`` on
+    is a separate check, available via ``sealrun.spv`` (``--spv`` on
     ``anchor-chain-verify``), which recomputes the Merkle root from the
     claimed block's tx list and checks the header hash + proof-of-work.
 
@@ -1077,7 +1080,7 @@ def apply_header_chain(result: dict, verifier: Any) -> dict:
     ``verifier`` must provide ``verify_chain_for_tx(txid)`` returning
     an object with ``verified``, ``tip_height``,
     ``checkpoint_height``, ``headers_checked`` and ``reason``
-    (see ``aiguard.spv.HeaderChainVerifier``).
+    (see ``sealrun.spv.HeaderChainVerifier``).
 
     Handles both shapes: ``verify_anchor_chain`` (``result["anchors"]``)
     and ``verify_journal_against_anchor_chain`` (``result["chain"]``

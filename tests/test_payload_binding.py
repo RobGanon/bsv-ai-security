@@ -17,7 +17,7 @@ import json
 
 import pytest
 
-from aiguard.anchor import (
+from sealrun.anchor import (
     _derive_release_seq,
     apply_payload_binding,
     decode_anchor_payload,
@@ -27,7 +27,7 @@ from aiguard.anchor import (
     verify_journal_against_anchor,
     verify_journal_against_anchor_chain,
 )
-from aiguard.bsv import (
+from sealrun.bsv import (
     _P,
     _der_decode_signature,
     _pubkey_point,
@@ -35,8 +35,8 @@ from aiguard.bsv import (
     sign_digest,
     verify_sig,
 )
-from aiguard.cli import main
-from aiguard.core import (
+from sealrun.cli import main
+from sealrun.core import (
     VerificationError,
     _read_jsonl,
     _verify_audit_events,
@@ -214,7 +214,7 @@ def _write_anchor_json(path, payload_hex, txid):
 def test_cli_binding_failure_exits_1_and_suppresses_banners(
     tmp_path, capsys, monkeypatch
 ):
-    monkeypatch.setattr("aiguard.cli.WoCBlockFetcher", _FakeWoC)
+    monkeypatch.setattr("sealrun.cli.WoCBlockFetcher", _FakeWoC)
     journal = _journal_with_events(
         tmp_path / "journal.jsonl",
         ["attacker event one", "attacker event two", "attacker event three"],
@@ -246,7 +246,7 @@ def test_cli_binding_failure_exits_1_and_suppresses_banners(
 def test_cli_binding_passes_and_sig_banner_prints(
     tmp_path, capsys, monkeypatch
 ):
-    monkeypatch.setattr("aiguard.cli.WoCBlockFetcher", _FakeWoC)
+    monkeypatch.setattr("sealrun.cli.WoCBlockFetcher", _FakeWoC)
     # Chain-only path (no journal): claimed payload is the real anchor #1
     # payload, which the fetched tx's OP_RETURN equals, so binding passes
     # and the signature banner prints.
@@ -378,7 +378,7 @@ def test_rederived_flag_true_with_manifests(tmp_path):
     key = PrivKey.generate()
     envelope = sign_manifest(
         {
-            "schema": "aiguard-manifest-v2",
+            "schema": "sealrun-manifest-v1",
             "release_id": "r",
             "release_seq": 1,
             "artifacts": [{"path": "a.txt", "sha256": "a" * 64, "size": 1}],
@@ -409,14 +409,14 @@ def test_derive_release_seq_rejects_duplicate_keys():
     key = PrivKey.generate()
     envelope = sign_manifest(
         {
-            "schema": "aiguard-manifest-v2",
+            "schema": "sealrun-manifest-v1",
             "release_id": "r",
             "release_seq": 1,
             "artifacts": [{"path": "a.txt", "sha256": "a" * 64, "size": 1}],
         },
         key,
     )
-    from aiguard.core import manifest_hash
+    from sealrun.core import manifest_hash
 
     detail = (
         '{"release_seq": 1, "release_seq": 1, "release_id": "r", '
@@ -491,7 +491,7 @@ def _minimal_int_bytes(value: int) -> bytes:
 
 
 def _valid_sig_parts():
-    from aiguard.bsv import PrivKey
+    from sealrun.bsv import PrivKey
 
     key = PrivKey.from_bytes(bytes(range(1, 33)))
     digest = bytes(range(32))
@@ -513,7 +513,7 @@ def test_der_nonminimal_r_rejected():
 
 def test_der_negative_r_rejected():
     # Find a signature whose r has the high bit set.
-    from aiguard.bsv import PrivKey
+    from sealrun.bsv import PrivKey
 
     base_key = PrivKey.from_bytes(bytes(range(1, 33)))
     found = None
@@ -553,7 +553,7 @@ def test_der_zero_length_rejected():
 
 def test_der_minimal_high_bit_still_accepted():
     # A leading 0x00 before a high-bit-set integer IS minimal and must pass.
-    from aiguard.bsv import PrivKey
+    from sealrun.bsv import PrivKey
 
     base_key = PrivKey.from_bytes(bytes(range(1, 33)))
     for i in range(64):
@@ -597,8 +597,8 @@ def test_pubkey_x_at_or_above_p_rejected():
 
 
 def test_sign_digest_self_verify_failure_raises(monkeypatch):
-    from aiguard.bsv import PrivKey
-    import aiguard.bsv as bsv_mod
+    from sealrun.bsv import PrivKey
+    import sealrun.bsv as bsv_mod
 
     monkeypatch.setattr(bsv_mod, "verify_sig", lambda *a: False)
     key = PrivKey.from_bytes(bytes(range(1, 33)))
@@ -607,7 +607,7 @@ def test_sign_digest_self_verify_failure_raises(monkeypatch):
 
 
 def test_sign_digest_produces_verifiable_signature():
-    from aiguard.bsv import PrivKey
+    from sealrun.bsv import PrivKey
 
     key = PrivKey.from_bytes(bytes(range(1, 33)))
     digest = bytes(range(32))

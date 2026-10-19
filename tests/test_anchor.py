@@ -1,15 +1,15 @@
 import pytest
 from pathlib import Path
 
-from aiguard.bsv import PrivKey
+from sealrun.bsv import PrivKey
 
-from aiguard.anchor import (
+from sealrun.anchor import (
     create_anchor_payload,
     decode_anchor_payload,
     encode_anchor_payload,
     verify_journal_against_anchor,
 )
-from aiguard.core import (
+from sealrun.core import (
     VerificationError,
     append_audit_event,
     manifest_hash,
@@ -28,7 +28,7 @@ def test_payload_has_protocol_layout_and_round_trips(tmp_path):
     journal = write_journal(tmp_path / "audit.jsonl")
     key = PrivKey.generate()
     payload = {
-        "schema": "aiguard-manifest-v2",
+        "schema": "sealrun-manifest-v1",
         "release_id": "release-7",
         "release_seq": 7,
         "artifacts": [{"path": "a.txt", "sha256": "a" * 64, "size": 1}],
@@ -134,7 +134,7 @@ def test_create_payload_rejects_empty_journal(tmp_path):
 
 
 def test_encoder_accepts_uppercase_hex_and_stores_lowercase():
-    from aiguard.anchor import encode_anchor_payload, decode_anchor_payload
+    from sealrun.anchor import encode_anchor_payload, decode_anchor_payload
     upper = "A" * 64
     payload = encode_anchor_payload(
         head_hash=upper,

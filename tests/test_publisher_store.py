@@ -19,7 +19,7 @@ import threading
 
 import pytest
 
-from aiguard.publisher import Publisher, PublisherConfig
+from sealrun.publisher import Publisher, PublisherConfig
 
 
 def _config(tmp_path, *, genesis="0" * 64):

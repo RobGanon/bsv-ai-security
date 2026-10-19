@@ -16,7 +16,7 @@ class PublishingConfigurationError(ValueError):
     """Raised when publishing configuration is missing or unsafe."""
 
 
-#: Exact value required in ``AIGUARD_BSV_MAINNET_CONFIRM`` to enable
+#: Exact value required in ``SEALRUN_BSV_MAINNET_CONFIRM`` to enable
 #: mainnet publishing. A long literal, so it cannot be set by accident
 #: or by a stray "1"/"true".
 MAINNET_CONFIRM_VALUE = "I_UNDERSTAND_MAINNET_RISK"
@@ -62,32 +62,32 @@ def load_publishing_config(
     """Load and validate publishing configuration from environment variables.
 
     Mainnet is never enabled by a single variable or by accident: it
-    requires ``AIGUARD_BSV_NETWORK=mainnet`` *and* the separate
-    confirmation value ``AIGUARD_BSV_MAINNET_CONFIRM``.
+    requires ``SEALRUN_BSV_NETWORK=mainnet`` *and* the separate
+    confirmation value ``SEALRUN_BSV_MAINNET_CONFIRM``.
     """
     env = os.environ if environ is None else environ
-    network = env.get("AIGUARD_BSV_NETWORK", "testnet").strip().lower()
+    network = env.get("SEALRUN_BSV_NETWORK", "testnet").strip().lower()
     if network not in {"testnet", "mainnet"}:
         raise PublishingConfigurationError(
-            "AIGUARD_BSV_NETWORK must be 'testnet' or 'mainnet'"
+            "SEALRUN_BSV_NETWORK must be 'testnet' or 'mainnet'"
         )
     if network == "mainnet":
-        confirm = env.get("AIGUARD_BSV_MAINNET_CONFIRM", "")
+        confirm = env.get("SEALRUN_BSV_MAINNET_CONFIRM", "")
         if confirm != MAINNET_CONFIRM_VALUE:
             raise PublishingConfigurationError(
                 "mainnet publishing requires explicit confirmation: set "
-                f"AIGUARD_BSV_MAINNET_CONFIRM={MAINNET_CONFIRM_VALUE}"
+                f"SEALRUN_BSV_MAINNET_CONFIRM={MAINNET_CONFIRM_VALUE}"
             )
 
-    backend = env.get("AIGUARD_BSV_BACKEND", "provider").strip().lower()
+    backend = env.get("SEALRUN_BSV_BACKEND", "provider").strip().lower()
     if backend not in {"provider", "node"}:
         raise PublishingConfigurationError(
-            "AIGUARD_BSV_BACKEND must be 'provider' or 'node'"
+            "SEALRUN_BSV_BACKEND must be 'provider' or 'node'"
         )
 
     if backend == "provider":
-        endpoint = env.get("AIGUARD_BSV_PROVIDER_URL", "").strip()
-        token = env.get("AIGUARD_BSV_PROVIDER_TOKEN") or None
+        endpoint = env.get("SEALRUN_BSV_PROVIDER_URL", "").strip()
+        token = env.get("SEALRUN_BSV_PROVIDER_TOKEN") or None
         username = password = None
         parsed = urlparse(endpoint)
         if parsed.scheme != "https" or not parsed.hostname:
@@ -96,10 +96,10 @@ def load_publishing_config(
             )
         _reject_url_credentials(parsed, "provider")
     else:
-        endpoint = env.get("AIGUARD_BSV_NODE_RPC_URL", "").strip()
+        endpoint = env.get("SEALRUN_BSV_NODE_RPC_URL", "").strip()
         token = None
-        username = env.get("AIGUARD_BSV_NODE_RPC_USERNAME") or None
-        password = env.get("AIGUARD_BSV_NODE_RPC_PASSWORD") or None
+        username = env.get("SEALRUN_BSV_NODE_RPC_USERNAME") or None
+        password = env.get("SEALRUN_BSV_NODE_RPC_PASSWORD") or None
         parsed = urlparse(endpoint)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise PublishingConfigurationError(
@@ -118,8 +118,8 @@ def load_publishing_config(
             )
 
     try:
-        fee_rate = int(env.get("AIGUARD_BSV_FEE_RATE", "1"))
-        max_fee = int(env.get("AIGUARD_BSV_MAX_FEE_SAT", "10000"))
+        fee_rate = int(env.get("SEALRUN_BSV_FEE_RATE", "1"))
+        max_fee = int(env.get("SEALRUN_BSV_MAX_FEE_SAT", "10000"))
     except (TypeError, ValueError) as exc:
         raise PublishingConfigurationError(
             "fee rate and maximum fee must be integers"

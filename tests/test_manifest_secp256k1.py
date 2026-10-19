@@ -1,4 +1,4 @@
-"""Manifest signing on secp256k1 (schema v2): migration hazards.
+"""Manifest signing on secp256k1: migration hazards.
 
 Manifest signing moved from Ed25519 to the same RFC 6979 ECDSA used for
 anchor inputs, so the whole system has one signature scheme and one
@@ -10,6 +10,7 @@ attestation). These tests pin the migration-specific fail-closed rules:
   canonical low-S form. Without that, one payload would hash as two
   "exact signed manifests".
 * Legacy schema-v1 (Ed25519) envelopes fail closed.
+* Legacy `aiguard-manifest-v2` envelopes (same format) still verify.
 * Key files are plain text (WIF private / compressed-hex public) and
   every malformed shape is rejected at load time, loudly.
 """
@@ -19,7 +20,7 @@ import hashlib
 
 import pytest
 
-from aiguard.bsv import (
+from sealrun.bsv import (
     _N,
     _P,
     _der_decode_signature,
@@ -29,10 +30,11 @@ from aiguard.bsv import (
     sign_digest,
     verify_sig,
 )
-from aiguard.core import (
+from sealrun.core import (
     MANIFEST_SCHEMA,
     VerificationError,
     canonical_json_bytes,
+    create_manifest,
     generate_keypair,
     load_private_key,
     load_public_key,
@@ -118,6 +120,17 @@ def test_legacy_v1_envelope_rejected(tmp_path):
     envelope = sign_manifest(legacy_payload, private)  # perfectly signed
     with pytest.raises(VerificationError, match="unsupported manifest schema"):
         verify_manifest(root, envelope, private.pubkey_compressed())
+
+
+def test_legacy_aiguard_v2_envelope_still_accepted(tmp_path):
+    # Rename compat: pre-rename manifests (aiguard-manifest-v2, same
+    # format) keep verifying after the package rename.
+    root = setup_artifacts(tmp_path)
+    private = PrivKey.generate()
+    payload = create_manifest(root, ["model.bin"], "r1", 1)
+    legacy_payload = {**payload, "schema": "aiguard-manifest-v2"}
+    envelope = sign_manifest(legacy_payload, private)
+    verify_manifest(root, envelope, private.pubkey_compressed())
 
 
 # --- sign/verify round-trip determinism ---------------------------------------

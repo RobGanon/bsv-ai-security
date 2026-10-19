@@ -31,7 +31,7 @@ import struct
 
 import pytest
 
-from aiguard.beef import (
+from sealrun.beef import (
     Beef,
     BeefError,
     BeefTx,
@@ -40,8 +40,8 @@ from aiguard.beef import (
     beef_to_bytes,
     parse_beef,
 )
-from aiguard.bsv import Tx, TxIn, TxOut
-from aiguard.spv import (
+from sealrun.bsv import Tx, TxIn, TxOut
+from sealrun.spv import (
     build_bump,
     bump_to_bytes,
     merkle_root,
@@ -438,7 +438,7 @@ def test_fuzz_parse_beef():
         assert isinstance(result, Beef), result
         # Every txid must match its raw bytes (the parser guarantees this,
         # but the fuzzer re-checks the invariant rather than trusting it).
-        from aiguard.bsv import parse_tx
+        from sealrun.bsv import parse_tx
 
         for tx in result.txs:
             assert parse_tx(tx.raw).txid() == tx.txid

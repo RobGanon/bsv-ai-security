@@ -8,7 +8,7 @@ No trust needed: run it yourself.
 git clone https://github.com/RobGanon/bsv-ai-security.git
 cd bsv-ai-security
 python3 -m pip install -e ".[test]"
-python3 -m pytest -q          # expect: 512 passed
+python3 -m pytest -q          # expect: 557 passed
 ```
 
 Python 3.10+. CI runs the same suite on 3.10, 3.11, and 3.12 on

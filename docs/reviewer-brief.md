@@ -6,7 +6,7 @@ would have to break, and where to spend your first hour. It complements
 [`REVIEW.md`](../REVIEW.md) (the formal ask and scope) — read this first,
 then `REVIEW.md`.
 
-You do not need to trust us. Clone it, run `pytest -q` (expect 512
+You do not need to trust us. Clone it, run `pytest -q` (expect 582
 passed), and try to break a claim below.
 
 ## What it is, in one paragraph

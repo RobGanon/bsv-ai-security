@@ -18,6 +18,8 @@ the suite does not pass in yours, that is a finding too; report it.
 
 ## 2. Know what you are looking at
 
+- `docs/reviewer-brief.md` — the 15-minute orientation: claims, trusted
+  base, adversaries, and where to spend your first hour.
 - `REVIEW.md` — the review ask: scope, what "good" looks like, and
   known limitations (please don't re-report those as findings).
 - `docs/anchoring-protocol.md` — the protocol: what an anchor proves

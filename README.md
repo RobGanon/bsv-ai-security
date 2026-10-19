@@ -226,7 +226,8 @@ pytest -q
 ```
 
 Tests are not claimed to have passed until you run them in your environment.
-Reviewing? See `docs/reviewer-quickstart.md` for the 5-minute path.
+Reviewing? See `docs/reviewer-brief.md` for a 15-minute orientation and
+`docs/reviewer-quickstart.md` for the 5-minute path.
 
 ## Manifest format
 

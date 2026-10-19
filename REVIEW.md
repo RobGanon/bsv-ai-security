@@ -13,6 +13,10 @@ This document scopes the independent review requested in
 [issue #4](https://github.com/RobGanon/bsv-ai-security/issues/4).
 It is a peer review ask, not a paid audit.
 
+**New here?** Start with [`docs/reviewer-brief.md`](docs/reviewer-brief.md)
+— a 15-minute orientation (claims, trusted base, adversaries, known gaps,
+where to spend your first hour). This file is the formal scope.
+
 ## Scope
 
 The manifest verifier, the journal, and the anchor checks:

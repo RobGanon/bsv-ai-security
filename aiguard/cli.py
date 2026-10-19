@@ -301,6 +301,30 @@ def main(argv=None):
     p.add_argument("--public-key", type=Path, default=None,
                    help="trusted manifest-signing public key (compressed hex); "
                    "required with --manifest when the journal contains acceptances")
+    p.add_argument("--export-unsigned", type=Path, default=None,
+                   help="offline-signing ceremony: build the unsigned anchor "
+                   "tx for the current head, write its hex to this file, and "
+                   "stop. Never signs, never broadcasts. Requires "
+                   "--funding-txid/--funding-vout + --change-address. "
+                   "Refuses mainnet and refuses when ANCHOR_WIF is set.")
+    p.add_argument("--broadcast-signed", type=Path, default=None,
+                   help="offline-signing ceremony: read a human-signed tx "
+                   "hex from this file, verify it against a freshly "
+                   "rebuilt unsigned tx, then broadcast it. Requires "
+                   "--funding-txid/--funding-vout + --change-address. "
+                   "Refuses mainnet and refuses when ANCHOR_WIF is set.")
+    p.add_argument("--change-address", default=None,
+                   help="anchor address receiving change (required with "
+                   "--export-unsigned / --broadcast-signed)")
+
+    p = sub.add_parser(
+        "signer",
+        help="offline anchor-transaction signer: human-side signing ceremony "
+             "(init / expect / sign; testnet only)",
+    )
+    p.add_argument("signer_argv", nargs=argparse.REMAINDER,
+                   metavar="SIGNER-CMD [ARGS...]",
+                   help="signer subcommand; separate it from options with '--'")
 
     p = sub.add_parser(
         "signer",
@@ -673,6 +697,105 @@ def main(argv=None):
                     )
                 manifests = [_read_json(path) for path in args.manifest or []]
                 public_key = load_public_key(args.public_key)
+            if args.export_unsigned is not None or args.broadcast_signed is not None:
+                # One-shot offline-signing modes. They never combine
+                # with each other, with --broadcast, or with a
+                # non-once --mode; they never touch signing material.
+                if (
+                    args.export_unsigned is not None
+                    and args.broadcast_signed is not None
+                ):
+                    raise PublisherError(
+                        "--export-unsigned and --broadcast-signed cannot "
+                        "be combined: export first, sign, then broadcast"
+                    )
+                if args.broadcast:
+                    raise PublisherError(
+                        "--export-unsigned / --broadcast-signed cannot be "
+                        "combined with --broadcast: the ceremony never "
+                        "signs and broadcasts in one motion"
+                    )
+                if args.mode != "once":
+                    raise PublisherError(
+                        "--export-unsigned / --broadcast-signed are "
+                        "one-shot modes; --mode must be 'once'"
+                    )
+                if args.network != "testnet":
+                    raise PublisherError(
+                        "--export-unsigned / --broadcast-signed refuse "
+                        "mainnet: the offline-signing flow is testnet-only "
+                        "until a witnessed mainnet-key step exists"
+                    )
+                if os.environ.get("ANCHOR_WIF"):
+                    raise PublisherError(
+                        "--export-unsigned / --broadcast-signed refuse "
+                        "when ANCHOR_WIF is set: the builder side of the "
+                        "ceremony must never hold signing material"
+                    )
+                if not args.funding_txid or not args.change_address:
+                    raise PublisherError(
+                        "--export-unsigned / --broadcast-signed require "
+                        "--funding-txid and --change-address"
+                    )
+                woc_base = args.woc_base or WOC_TTN_BASE
+                config = PublisherConfig(
+                    journal=args.journal,
+                    anchor_record=args.anchor_record,
+                    genesis_txid=args.genesis_txid,
+                    checkpoint_interval_seconds=args.interval_seconds,
+                    broadcast_enabled=False,
+                    manifests=tuple(manifests) if manifests is not None else (),
+                    public_key=public_key,
+                    manifests_dir=args.manifest_dir,
+                )
+                publisher = Publisher(config)
+                if args.export_unsigned is not None:
+                    result = publisher.export_unsigned(
+                        funding_txid=args.funding_txid,
+                        funding_vout=args.funding_vout,
+                        change_address=args.change_address,
+                        fee_sats=args.fee_sats,
+                        woc_base=woc_base,
+                        network=args.network,
+                    )
+                    args.export_unsigned.write_text(
+                        result["unsigned_hex"] + "\n", encoding="utf-8"
+                    )
+                    print(json.dumps({
+                        "action": "exported-unsigned",
+                        "unsigned_file": str(args.export_unsigned),
+                        "unsigned_txid": result["unsigned_txid"],
+                        "payload": result["payload"],
+                        "fee_sats": result["fee_sats"],
+                        "change_address": result["change_address"],
+                        "funding_txid": result["funding_txid"],
+                        "funding_vout": result["funding_vout"],
+                        "funding_value": result["funding_value"],
+                        "network": result["network"],
+                        "record": result["record"],
+                    }, indent=2, sort_keys=True))
+                    print(
+                        "Cross-check the unsigned_txid + payload above "
+                        "against the signer display before approving."
+                    )
+                else:
+                    signed_hex = args.broadcast_signed.read_text(
+                        encoding="utf-8"
+                    ).strip()
+                    record = publisher.broadcast_signed(
+                        signed_hex=signed_hex,
+                        funding_txid=args.funding_txid,
+                        funding_vout=args.funding_vout,
+                        change_address=args.change_address,
+                        fee_sats=args.fee_sats,
+                        woc_base=woc_base,
+                        network=args.network,
+                    )
+                    print(json.dumps(
+                        {"action": "broadcast-signed", "record": record},
+                        indent=2, sort_keys=True,
+                    ))
+                return 0
             if args.broadcast:
                 anchor_wif = os.environ.get("ANCHOR_WIF")
                 if not anchor_wif:

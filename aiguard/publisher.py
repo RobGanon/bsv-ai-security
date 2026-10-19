@@ -90,6 +90,23 @@ from .anchor import (
     decode_anchor_payload,
     verify_anchor_chain,
 )
+from .broadcast import (
+    BroadcastError,
+    FundingUTXO,
+    fetch_prev_output,
+    post_raw_tx,
+)
+from .bsv import (
+    SIGHASH_ALL_FORKID,
+    Tx,
+    TxIn,
+    build_p2pkh_script,
+    build_p2pkh_script_for_address,
+    parse_tx,
+    sighash_forkid,
+    validate_network,
+    verify_sig,
+)
 from .core import HEX_64, VerificationError, _no_duplicate_object, _read_jsonl, _verify_audit_events
 
 MANIFEST_ACCEPTED_EVENT_TYPE = "manifest_accepted"
@@ -184,6 +201,42 @@ class NullBroadcaster:
             "no broadcaster configured: broadcast is disabled. Supply a "
             "broadcaster explicitly to enable broadcast."
         )
+
+
+def _parse_anchor_script_sig(script_sig: bytes) -> tuple[bytes, bytes]:
+    """Split an anchor input script_sig into (DER signature, pubkey).
+
+    The script_sig must be exactly ``push(DER || sighash-byte) +
+    push(pubkey)`` with single-byte push opcodes — anchor signatures
+    (~71-72 bytes + 1 hashtype byte) and compressed pubkeys (33 bytes)
+    both fit. The sighash byte must be SIGHASH_ALL | SIGHASH_FORKID
+    and the pubkey 33-byte compressed. Anything else is refused: the
+    publisher only ever broadcasts anchor transactions in exactly
+    this shape.
+    """
+    if len(script_sig) < 2:
+        raise PublisherError("anchor script_sig is too short")
+    first_len = script_sig[0]
+    if first_len <= 1 or 1 + first_len > len(script_sig):
+        raise PublisherError("anchor script_sig has a malformed first push")
+    sig_plus = script_sig[1:1 + first_len]
+    rest = script_sig[1 + first_len:]
+    if len(rest) < 2 or rest[0] != len(rest) - 1:
+        raise PublisherError("anchor script_sig has a malformed pubkey push")
+    pubkey = rest[1:]
+    if len(pubkey) != 33 or pubkey[0] not in (0x02, 0x03):
+        raise PublisherError(
+            "anchor script_sig pubkey must be 33-byte compressed"
+        )
+    der, sighash_byte = sig_plus[:-1], sig_plus[-1]
+    if sighash_byte != SIGHASH_ALL_FORKID:
+        raise PublisherError(
+            f"anchor sighash byte 0x{sighash_byte:02x} is not "
+            f"SIGHASH_ALL|FORKID (0x{SIGHASH_ALL_FORKID:02x})"
+        )
+    if not der:
+        raise PublisherError("anchor script_sig carries an empty signature")
+    return der, pubkey
 
 
 def _check_txid(value: Any, field: str) -> str:
@@ -640,6 +693,240 @@ class Publisher:
             failed = dict(record)
             failed["broadcast_error"] = str(exc)
             return failed
+
+    # -- offline signing ceremony (export / broadcast-signed) -----------
+
+    @_locked
+    def export_unsigned(
+        self,
+        *,
+        funding_txid: str,
+        funding_vout: int,
+        change_address: str,
+        fee_sats: int = 500,
+        woc_base: str,
+        network: str = "testnet",
+        request_fn: Any = None,
+    ) -> dict:
+        """Build the unsigned anchor tx for the current head and stop.
+
+        The offline-signing ceremony's handoff: the publisher prepares
+        everything up to the signature and exports the unsigned tx hex.
+        This method never signs and never broadcasts — it takes no
+        signer and makes no POST. The caller writes ``unsigned_hex`` to
+        the file the human carries to the signer, and cross-checks
+        ``unsigned_txid`` + the payload summary against the signer's
+        display.
+
+        The funding UTXO must pay to ``change_address`` (the anchor
+        address): the previous anchor's change output is the funding
+        source, so a funding claim pointing elsewhere is operator error
+        and fails here instead of producing an unusable unsigned tx.
+        Mainnet is refused unconditionally.
+        """
+        if validate_network(network) != "testnet":
+            raise PublisherError(
+                "export-unsigned refuses mainnet: the offline-signing "
+                "flow is testnet-only until a witnessed mainnet-key "
+                "step exists"
+            )
+        record = self.build_checkpoint("scheduled")
+        payload = bytes.fromhex(record["payload_hex"])
+        try:
+            script_hex, value = fetch_prev_output(
+                woc_base, funding_txid, funding_vout, request_fn
+            )
+        except BroadcastError as exc:
+            raise PublisherError(
+                f"cannot fetch funding output: {exc}"
+            ) from exc
+        funding_script = bytes.fromhex(script_hex)
+        if funding_script != build_p2pkh_script_for_address(
+            change_address, network=network
+        ):
+            raise PublisherError(
+                "funding UTXO does not pay to the change/anchor address: "
+                "the funding outpoint must be the previous anchor's change"
+            )
+        try:
+            unsigned = Tx.build_anchor_unsigned(
+                funding=FundingUTXO(
+                    txid=funding_txid,
+                    vout=funding_vout,
+                    value=value,
+                    script_hex=script_hex,
+                ),
+                payload=payload,
+                change_address=change_address,
+                fee_sats=fee_sats,
+                network=network,
+            )
+        except BroadcastError as exc:
+            raise PublisherError(
+                f"cannot build unsigned anchor tx: {exc}"
+            ) from exc
+        return {
+            "unsigned_hex": unsigned.serialize().hex(),
+            # Hash of the UNSIGNED tx. NOT the final txid: adding the
+            # signature changes the bytes, so the broadcast txid will
+            # differ. The human cross-checks this hash against the
+            # signer's display, which binds approval to it.
+            "unsigned_txid": unsigned.txid(),
+            "payload": decode_anchor_payload(payload),
+            "record": dict(record),
+            "fee_sats": fee_sats,
+            "change_address": change_address,
+            "funding_txid": funding_txid,
+            "funding_vout": funding_vout,
+            "funding_value": value,
+            "network": network,
+        }
+
+    @_locked
+    def broadcast_signed(
+        self,
+        *,
+        signed_hex: str,
+        funding_txid: str,
+        funding_vout: int,
+        change_address: str,
+        fee_sats: int = 500,
+        woc_base: str,
+        network: str = "testnet",
+        request_fn: Any = None,
+    ) -> dict:
+        """Verify a human-signed anchor tx, then broadcast it.
+
+        Verification rebuilds the expected unsigned tx fresh from the
+        journal + record store (same inputs as :meth:`export_unsigned`)
+        and requires: the signed tx, with its script_sig stripped,
+        serializes byte-identically to the expected unsigned tx; the
+        script_sig is exactly ``push(DER || SIGHASH_ALL|FORKID) +
+        push(pubkey)``; the pubkey matches the funding output's P2PKH
+        script; and the signature verifies against the FORKID sighash.
+        Any mismatch refuses, with no broadcast. On success the
+        canonical re-serialization of the verified tx is posted, so
+        the recorded txid is exactly the broadcast tx's txid.
+
+        A retry of the same signed tx is idempotent (the network
+        answers already-known). A different signed tx for an
+        already-broadcast head is refused.
+        Mainnet is refused unconditionally.
+        """
+        if validate_network(network) != "testnet":
+            raise PublisherError(
+                "broadcast-signed refuses mainnet: the offline-signing "
+                "flow is testnet-only until a witnessed mainnet-key "
+                "step exists"
+            )
+        try:
+            signed = parse_tx(bytes.fromhex(signed_hex))
+        except ValueError as exc:
+            raise PublisherError(f"signed tx does not decode: {exc}") from exc
+        if len(signed.inputs) != 1:
+            raise PublisherError(
+                f"signed tx must have exactly 1 input, has {len(signed.inputs)}"
+            )
+        script_sig = signed.inputs[0].script_sig
+        if not script_sig:
+            raise PublisherError(
+                "signed tx input has an empty script_sig: nothing was signed"
+            )
+        record = self.build_checkpoint("scheduled")
+        payload = bytes.fromhex(record["payload_hex"])
+        try:
+            script_hex, value = fetch_prev_output(
+                woc_base, funding_txid, funding_vout, request_fn
+            )
+        except BroadcastError as exc:
+            raise PublisherError(
+                f"cannot fetch funding output: {exc}"
+            ) from exc
+        funding_script = bytes.fromhex(script_hex)
+        if funding_script != build_p2pkh_script_for_address(
+            change_address, network=network
+        ):
+            raise PublisherError(
+                "funding UTXO does not pay to the change/anchor address: "
+                "the funding outpoint must be the previous anchor's change"
+            )
+        try:
+            expected = Tx.build_anchor_unsigned(
+                funding=FundingUTXO(
+                    txid=funding_txid,
+                    vout=funding_vout,
+                    value=value,
+                    script_hex=script_hex,
+                ),
+                payload=payload,
+                change_address=change_address,
+                fee_sats=fee_sats,
+                network=network,
+            )
+        except BroadcastError as exc:
+            raise PublisherError(
+                f"cannot rebuild expected unsigned tx: {exc}"
+            ) from exc
+        stripped = Tx(
+            version=signed.version,
+            inputs=[
+                TxIn(
+                    signed.inputs[0].prev_txid,
+                    signed.inputs[0].prev_index,
+                    b"",
+                    signed.inputs[0].sequence,
+                )
+            ],
+            outputs=signed.outputs,
+            locktime=signed.locktime,
+        )
+        if stripped.serialize() != expected.serialize():
+            raise PublisherError(
+                "signed tx does not match the expected unsigned tx: "
+                "version, input outpoint, outputs, or locktime differ"
+            )
+        der, pubkey = _parse_anchor_script_sig(script_sig)
+        if funding_script != build_p2pkh_script(pubkey):
+            raise PublisherError(
+                "signing pubkey does not match the funding output's "
+                "locking script"
+            )
+        digest = sighash_forkid(expected, 0, funding_script, value)
+        if not verify_sig(pubkey, digest, der):
+            raise PublisherError(
+                "anchor input signature does not verify against the "
+                "funding output"
+            )
+        signed_txid = signed.txid()
+        if record["status"] == "broadcast" and record["txid"] != signed_txid:
+            raise PublisherError(
+                f"head already broadcast as {record['txid']}, refusing "
+                "a different tx for the same head"
+            )
+        canonical_hex = signed.serialize().hex()
+        try:
+            txid = post_raw_tx(
+                woc_base, canonical_hex, request_fn, local_txid=signed_txid
+            )
+        except BroadcastError as exc:
+            raise PublisherError(f"broadcast failed: {exc}") from exc
+        if txid != signed_txid:
+            raise PublisherError(
+                f"broadcast returned txid {txid}, expected {signed_txid}: "
+                "refusing to record a txid that is not the verified tx"
+            )
+        store = self._load_store()
+        for stored in store["anchors"]:
+            if stored["head_hash"] == record["head_hash"] and stored[
+                "status"
+            ] in ("pending", "broadcast"):
+                stored["txid"] = txid
+                stored["status"] = "broadcast"
+                self._save_store(store)
+                return dict(stored)
+        raise PublisherError(  # pragma: no cover - store changed under lock
+            "internal error: anchor record vanished after broadcast"
+        )
 
     def on_release_accepted(self) -> dict:
         """Anchor immediately when a new release acceptance lands."""

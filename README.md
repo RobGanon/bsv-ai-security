@@ -91,7 +91,11 @@ Teratestnet. Two anchors are confirmed on-chain: anchor #1
 block 36722) and anchor #2
 (`d8407bb7a60f23aadcf021e9cb0098c6ae362a519aa04cbd8536265519c09230`,
 block 36723). See `docs/anchoring-protocol.md` for the verifier
-procedure and what anchoring does and does not prove.
+procedure and what anchoring does and does not prove. Anchor signing
+goes through the offline-signing ceremony — the publisher exports an
+unsigned tx, a human-side signer signs it, and the publisher verifies
+and broadcasts it — documented in
+`docs/offline-signing-handoff.md`.
 
 ## Training-data provenance
 

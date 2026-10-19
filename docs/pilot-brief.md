@@ -27,7 +27,8 @@ written summary they can use internally.
 
 ## Honest limits
 
-- 582 tests passing.
+- Test suite passing — see [`REVIEW.md`](../REVIEW.md) for the current
+  count and evidence.
 - Independent security review still open (issue #4).
 - Two live anchors confirmed on Teratestnet (demo chain); mainnet
   anchoring is a later step, not part of the pilot.

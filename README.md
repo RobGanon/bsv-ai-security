@@ -42,8 +42,10 @@ they have not been altered after recording. It is the provenance
 pillar of AI security: proving what ran, not whether the model
 behaved well.
 
-Status: 582 tests passing on main, plus adversarial spot-checks on
-every feature. Independent security review is still open
+Status: test suite passing on main (see
+[`REVIEW.md`](REVIEW.md) for the current count and evidence), plus
+adversarial spot-checks on every feature. Independent security review
+is still open
 ([issue #4](https://github.com/RobGanon/bsv-ai-security/issues/4)) —
 we state that plainly because it matters.
 

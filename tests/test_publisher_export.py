@@ -11,8 +11,8 @@ import json
 
 import pytest
 
-from aiguard.anchor import decode_anchor_payload
-from aiguard.bsv import (
+from sealrun.anchor import decode_anchor_payload
+from sealrun.bsv import (
     PrivKey,
     Tx,
     build_p2pkh_script,
@@ -20,9 +20,9 @@ from aiguard.bsv import (
     sighash_forkid,
     sign_digest,
 )
-from aiguard.broadcast import FundingUTXO, WIFSigner
-from aiguard.core import append_audit_event
-from aiguard.publisher import Publisher, PublisherConfig, PublisherError
+from sealrun.broadcast import FundingUTXO, WIFSigner
+from sealrun.core import append_audit_event
+from sealrun.publisher import Publisher, PublisherConfig, PublisherError
 
 # Synthetic test key (secret 0x22..22) — a throwaway fixture, never a
 # real key. Its P2PKH script is the funding output in these tests.
@@ -164,8 +164,8 @@ def _malleate_sig(signed_hex):
 
 
 def test_build_anchor_unsigned_equals_signed_minus_signature():
-    from aiguard.anchor import encode_anchor_payload
-    from aiguard.broadcast import FundingUTXO as FU
+    from sealrun.anchor import encode_anchor_payload
+    from sealrun.broadcast import FundingUTXO as FU
 
     payload = encode_anchor_payload(
         head_hash="11" * 32, start_seq=1, end_seq=1, release_seq=0,
@@ -193,7 +193,7 @@ def test_build_anchor_unsigned_equals_signed_minus_signature():
 
 
 def test_build_anchor_unsigned_rejects_bad_payload_and_fee():
-    from aiguard.broadcast import FundingUTXO as FU
+    from sealrun.broadcast import FundingUTXO as FU
 
     funding = FU(
         txid=FUNDING_TXID, vout=FUNDING_VOUT,
@@ -463,8 +463,8 @@ def test_broadcast_signed_refuses_fee_mismatch_with_export(tmp_path):
 def test_cli_export_writes_unsigned_hex_and_prints_summary(
     tmp_path, monkeypatch, capsys
 ):
-    from aiguard import cli as cli_mod
-    from aiguard import broadcast as broadcast_mod
+    from sealrun import cli as cli_mod
+    from sealrun import broadcast as broadcast_mod
 
     journal = _journal(tmp_path)
     record_path = tmp_path / "anchors.json"
@@ -492,7 +492,7 @@ def test_cli_export_writes_unsigned_hex_and_prints_summary(
 
 
 def test_cli_export_refuses_signing_material(tmp_path, monkeypatch):
-    from aiguard import cli as cli_mod
+    from sealrun import cli as cli_mod
 
     journal = _journal(tmp_path)
     monkeypatch.setenv("ANCHOR_WIF", "cN9spWsvaxA8taS7DFMxnk1yJD2gaF2PX1npuTpy3vuZFJdwavaw")
@@ -508,7 +508,7 @@ def test_cli_export_refuses_signing_material(tmp_path, monkeypatch):
 
 
 def test_cli_export_refuses_mainnet_and_broadcast_combo(tmp_path, monkeypatch):
-    from aiguard import cli as cli_mod
+    from sealrun import cli as cli_mod
 
     journal = _journal(tmp_path)
     base = [
@@ -528,8 +528,8 @@ def test_cli_export_refuses_mainnet_and_broadcast_combo(tmp_path, monkeypatch):
 def test_cli_broadcast_signed_broadcasts_and_records(
     tmp_path, monkeypatch, capsys
 ):
-    from aiguard import cli as cli_mod
-    from aiguard import broadcast as broadcast_mod
+    from sealrun import cli as cli_mod
+    from sealrun import broadcast as broadcast_mod
 
     journal = _journal(tmp_path)
     record_path = tmp_path / "anchors.json"
@@ -570,7 +570,7 @@ def test_cli_broadcast_signed_broadcasts_and_records(
 
 
 def test_cli_broadcast_signed_refuses_signing_material(tmp_path, monkeypatch):
-    from aiguard import cli as cli_mod
+    from sealrun import cli as cli_mod
 
     journal = _journal(tmp_path)
     monkeypatch.setenv("ANCHOR_WIF", "cN9spWsvaxA8taS7DFMxnk1yJD2gaF2PX1npuTpy3vuZFJdwavaw")

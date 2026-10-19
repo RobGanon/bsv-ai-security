@@ -1,4 +1,4 @@
-"""Tests for the offline anchor signer CLI (aiguard/signer_cli.py).
+"""Tests for the offline anchor signer CLI (sealrun/signer_cli.py).
 
 Test-first: these tests were written before the implementation. All
 key material here is freshly generated throwaway keys; no real key
@@ -14,8 +14,8 @@ import stat
 
 import pytest
 
-from aiguard.anchor import decode_anchor_payload, encode_anchor_payload
-from aiguard.bsv import (
+from sealrun.anchor import decode_anchor_payload, encode_anchor_payload
+from sealrun.bsv import (
     SIGHASH_ALL_FORKID,
     PrivKey,
     Tx,
@@ -27,7 +27,7 @@ from aiguard.bsv import (
     sighash_forkid,
     verify_sig,
 )
-from aiguard.signer_cli import (
+from sealrun.signer_cli import (
     Refusal,
     SignerError,
     check_hard_rules,
@@ -587,7 +587,7 @@ def test_signer_module_has_no_network_access():
     import pathlib
     import re
 
-    source = pathlib.Path(__file__).parent.parent.joinpath("aiguard", "signer_cli.py").read_text()
+    source = pathlib.Path(__file__).parent.parent.joinpath("sealrun", "signer_cli.py").read_text()
     # Match import statements, not prose (the word "requests" is legitimate
     # in "signing requests").
     for match in re.finditer(r"^\s*(?:import|from)\s+([a-zA-Z0-9_.]+)", source, re.M):

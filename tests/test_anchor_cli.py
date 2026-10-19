@@ -1,7 +1,7 @@
 import json
 
-from aiguard.cli import main
-from aiguard.core import append_audit_event
+from sealrun.cli import main
+from sealrun.core import append_audit_event
 
 
 def test_cli_anchor_payload_and_verify_round_trip(tmp_path, capsys):

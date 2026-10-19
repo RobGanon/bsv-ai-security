@@ -2,14 +2,14 @@
 
 ## The gap this closes
 
-`aiguard verify` proves a signed manifest, then exits. A caller that
+`sealrun verify` proves a signed manifest, then exits. A caller that
 subsequently launches the model **by path** has to reopen the artifact
 files. Between the verification and those opens there is a
 check-to-use window: anyone with write access to the artifact tree can
 swap the bytes, and the model runs on attacker-chosen input while the
 verification record still looks clean.
 
-`aiguard launch` removes the reopen. It runs the same verification
+`sealrun launch` removes the reopen. It runs the same verification
 in-process, keeps the artifact descriptors open, and hands those
 descriptors to the launched process. The descriptors pin the inodes that
 were hashed, so a path swap after verification cannot change what the
@@ -21,11 +21,11 @@ handles" from the Phase 1 roadmap.
 ## Usage
 
 ```bash
-aiguard launch \
+sealrun launch \
   --root demo/artifacts \
   --manifest demo/manifest.signed.json \
   --public-key demo/public.pub \
-  -- /usr/bin/python3 train.py --config "$AIGUARD_ARTIFACT_CONFIG_JSON"
+  -- /usr/bin/python3 train.py --config "$SEALRUN_ARTIFACT_CONFIG_JSON"
 ```
 
 `--min-release-seq N` applies the same rollback rejection as `verify`.
@@ -39,19 +39,19 @@ verified bytes:
 
 | Variable | Meaning |
 | --- | --- |
-| `AIGUARD_MANIFEST_HASH` | SHA-256 over the verified signed envelope |
-| `AIGUARD_RELEASE_ID` | `release_id` from the verified payload |
-| `AIGUARD_RELEASE_SEQ` | `release_seq` from the verified payload |
-| `AIGUARD_ARTIFACT_<P>` | `/proc/self/fd/<N>`, the verified handle for the artifact whose manifest path maps to `<P>` |
+| `SEALRUN_MANIFEST_HASH` | SHA-256 over the verified signed envelope |
+| `SEALRUN_RELEASE_ID` | `release_id` from the verified payload |
+| `SEALRUN_RELEASE_SEQ` | `release_seq` from the verified payload |
+| `SEALRUN_ARTIFACT_<P>` | `/proc/self/fd/<N>`, the verified handle for the artifact whose manifest path maps to `<P>` |
 
 `<P>` is the artifact path upper-cased with every run of non-alphanumeric
 characters collapsed to a single underscore, so `weights/part-01.ckpt`
-becomes `AIGUARD_ARTIFACT_WEIGHTS_PART_01_CKPT`. The mapping is
+becomes `SEALRUN_ARTIFACT_WEIGHTS_PART_01_CKPT`. The mapping is
 many-to-one: if two artifact paths would collapse to the same variable
 name, the launcher refuses to run rather than guess which is which.
 
 The child reads the descriptor, not the path — e.g. `open(os.environ
-["AIGUARD_ARTIFACT_MODEL_BIN"], "rb")`. Because the descriptor is
+["SEALRUN_ARTIFACT_MODEL_BIN"], "rb")`. Because the descriptor is
 already open, it also works when the artifact tree is not readable by the
 child's user.
 
@@ -79,9 +79,9 @@ trusted public key and the artifact tree, then drop to an unprivileged
 user before exec so the model itself never runs with privileged access.
 
 ```bash
-sudo aiguard launch \
+sudo sealrun launch \
   --root /srv/artifacts --manifest /srv/manifest.signed.json \
-  --public-key /etc/aiguard/public.pub \
+  --public-key /etc/sealrun/public.pub \
   --uid model --gid model \
   -- /usr/bin/python3 /srv/train.py
 ```

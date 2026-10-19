@@ -17,16 +17,16 @@ import hashlib
 import json
 
 import pytest
-from aiguard.bsv import PrivKey
+from sealrun.bsv import PrivKey
 
-from aiguard.anchor import (
+from sealrun.anchor import (
     create_anchor_payload,
     decode_anchor_payload,
     encode_anchor_payload,
     verify_journal_against_anchor,
 )
-from aiguard.cli import main
-from aiguard.core import (
+from sealrun.cli import main
+from sealrun.core import (
     VerificationError,
     append_audit_event,
     canonical_json_bytes,
@@ -62,7 +62,7 @@ def _make_key():
 def _accept(journal, key, manifests, release_seq, release_id):
     """Record a bound acceptance for a freshly signed manifest; stash the envelope."""
     payload = {
-        "schema": "aiguard-manifest-v2",
+        "schema": "sealrun-manifest-v1",
         "release_id": release_id,
         "release_seq": release_seq,
         "artifacts": [{"path": "a.txt", "sha256": "a" * 64, "size": 1}],

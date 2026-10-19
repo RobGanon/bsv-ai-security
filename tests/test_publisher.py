@@ -9,17 +9,17 @@ import hashlib
 import json
 
 import pytest
-from aiguard.bsv import PrivKey
+from sealrun.bsv import PrivKey
 
-from aiguard.cli import main
-from aiguard.core import (
+from sealrun.cli import main
+from sealrun.core import (
     VerificationError,
     append_audit_event,
     manifest_hash,
     record_manifest_acceptance,
     sign_manifest,
 )
-from aiguard.publisher import (
+from sealrun.publisher import (
     Publisher,
     PublisherConfig,
     PublisherError,
@@ -28,7 +28,7 @@ from aiguard.publisher import (
 
 def _envelope(key, release_seq, release_id):
     payload = {
-        "schema": "aiguard-manifest-v2",
+        "schema": "sealrun-manifest-v1",
         "release_id": release_id,
         "release_seq": release_seq,
         "artifacts": [{"path": "a.txt", "sha256": "a" * 64, "size": 1}],

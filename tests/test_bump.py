@@ -1,4 +1,4 @@
-"""Tests for BUMP (BRC-74) compact Merkle proofs in aiguard/spv.py.
+"""Tests for BUMP (BRC-74) compact Merkle proofs in sealrun/spv.py.
 
 The spec fixtures are the BRC-74 reference BUMP for block 813706: all
 three client txids must fold to the spec's stated root. The hex string
@@ -10,8 +10,8 @@ import json
 
 import pytest
 
-from aiguard.anchor import encode_anchor_payload
-from aiguard.spv import (
+from sealrun.anchor import encode_anchor_payload
+from sealrun.spv import (
     BUMPVerifier,
     BlockHeader,
     SPVUnavailable,
@@ -256,7 +256,7 @@ def _spec_header(bits=0x207FFFFF, grind=True):
     """Stub header carrying the spec root. With grind=True the nonce is
     advanced until the header meets its (easiest) target, so the stub
     passes proof-of-work the way a real header does."""
-    from aiguard.spv import verify_pow
+    from sealrun.spv import verify_pow
 
     nonce = 0
     while True:
@@ -365,8 +365,8 @@ def test_apply_bump_inclusion_rejects_non_dict():
 
 
 def test_cli_bump_file_verifies_and_prints_line(tmp_path, capsys, monkeypatch):
-    from aiguard import cli as cli_module
-    from aiguard.bsv import build_op_return_script
+    from sealrun import cli as cli_module
+    from sealrun.bsv import build_op_return_script
 
     genesis = "0" * 64
     claimed = encode_anchor_payload(
@@ -405,7 +405,7 @@ def test_cli_bump_file_verifies_and_prints_line(tmp_path, capsys, monkeypatch):
 
 
 def test_cli_bump_file_failure_prints_failed_line(tmp_path, capsys, monkeypatch):
-    from aiguard import cli as cli_module
+    from sealrun import cli as cli_module
 
     class FakeWoC:
         def __init__(self, base_url=None):

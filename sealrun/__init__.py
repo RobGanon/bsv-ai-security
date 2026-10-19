@@ -1,0 +1,1 @@
+"""Phase 1 AI artifact verification prototype."""

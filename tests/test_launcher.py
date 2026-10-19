@@ -22,11 +22,11 @@ import types
 from pathlib import Path
 
 import pytest
-from aiguard.bsv import PrivKey
+from sealrun.bsv import PrivKey
 
-import aiguard.launcher as launcher
-from aiguard.cli import main
-from aiguard.core import (
+import sealrun.launcher as launcher
+from sealrun.cli import main
+from sealrun.core import (
     VerificationError,
     create_manifest,
     generate_keypair,
@@ -34,7 +34,7 @@ from aiguard.core import (
     manifest_hash,
     sign_manifest,
 )
-from aiguard.launcher import (
+from sealrun.launcher import (
     _seal_fd,
     artifact_env_name,
     build_child_environment,
@@ -111,11 +111,11 @@ def install_spy(monkeypatch, spy: _RunSpy) -> None:
 # --------------------------------------------------------------------------
 
 def test_artifact_env_name_collapses_paths():
-    assert artifact_env_name("model.bin") == "AIGUARD_ARTIFACT_MODEL_BIN"
-    assert artifact_env_name("weights-01.ckpt") == "AIGUARD_ARTIFACT_WEIGHTS_01_CKPT"
-    assert artifact_env_name("a/b.bin") == "AIGUARD_ARTIFACT_A_B_BIN"
+    assert artifact_env_name("model.bin") == "SEALRUN_ARTIFACT_MODEL_BIN"
+    assert artifact_env_name("weights-01.ckpt") == "SEALRUN_ARTIFACT_WEIGHTS_01_CKPT"
+    assert artifact_env_name("a/b.bin") == "SEALRUN_ARTIFACT_A_B_BIN"
     # Deliberately the same variable name: callers must refuse this pair.
-    assert artifact_env_name("a_b.bin") == "AIGUARD_ARTIFACT_A_B_BIN"
+    assert artifact_env_name("a_b.bin") == "SEALRUN_ARTIFACT_A_B_BIN"
 
 
 def test_child_environment_reports_verified_provenance():
@@ -123,18 +123,18 @@ def test_child_environment_reports_verified_provenance():
                 "signature": "eA=="}
     env = build_child_environment(envelope, [("model.bin", 7)], base={"PATH": "/bin"})
     assert env["PATH"] == "/bin"
-    assert env["AIGUARD_MANIFEST_HASH"] == manifest_hash(envelope)
-    assert env["AIGUARD_RELEASE_ID"] == "rel-9"
-    assert env["AIGUARD_RELEASE_SEQ"] == "9"
-    assert env["AIGUARD_ARTIFACT_MODEL_BIN"] == "/proc/self/fd/7"
+    assert env["SEALRUN_MANIFEST_HASH"] == manifest_hash(envelope)
+    assert env["SEALRUN_RELEASE_ID"] == "rel-9"
+    assert env["SEALRUN_RELEASE_SEQ"] == "9"
+    assert env["SEALRUN_ARTIFACT_MODEL_BIN"] == "/proc/self/fd/7"
 
 
 def test_child_environment_ignores_non_string_release_id():
     envelope = {"payload": {"release_id": 42, "release_seq": True, "artifacts": []},
                 "signature": "eA=="}
     env = build_child_environment(envelope, [], base={})
-    assert "AIGUARD_RELEASE_ID" not in env
-    assert "AIGUARD_RELEASE_SEQ" not in env
+    assert "SEALRUN_RELEASE_ID" not in env
+    assert "SEALRUN_RELEASE_SEQ" not in env
 
 
 def test_child_environment_refuses_ambiguous_names():
@@ -153,7 +153,7 @@ def test_launch_runs_command_reading_verified_fd(tmp_path):
     out = tmp_path / "copied.bin"
     script = (
         "import os, sys\n"
-        "with open(os.environ['AIGUARD_ARTIFACT_MODEL_BIN'], 'rb') as src:\n"
+        "with open(os.environ['SEALRUN_ARTIFACT_MODEL_BIN'], 'rb') as src:\n"
         "    data = src.read()\n"
         "with open(sys.argv[1], 'wb') as dst:\n"
         "    dst.write(data)\n"
@@ -170,17 +170,17 @@ def test_launch_inherits_environment_and_sets_provenance(tmp_path):
     out = tmp_path / "env.json"
     script = (
         "import json, os, sys\n"
-        "keys = ('AIGUARD_MANIFEST_HASH', 'AIGUARD_RELEASE_ID',\n"
-        "        'AIGUARD_RELEASE_SEQ', 'PATH')\n"
+        "keys = ('SEALRUN_MANIFEST_HASH', 'SEALRUN_RELEASE_ID',\n"
+        "        'SEALRUN_RELEASE_SEQ', 'PATH')\n"
         "json.dump({k: os.environ.get(k) for k in keys}, open(sys.argv[1], 'w'))\n"
     )
     rc = launch(root, envelope, private.pubkey_compressed(),
                 [sys.executable, "-c", script, str(out)])
     assert rc == 0
     child = json.loads(out.read_text(encoding="utf-8"))
-    assert child["AIGUARD_MANIFEST_HASH"] == manifest_hash(envelope)
-    assert child["AIGUARD_RELEASE_ID"] == "rel-77"
-    assert child["AIGUARD_RELEASE_SEQ"] == "77"
+    assert child["SEALRUN_MANIFEST_HASH"] == manifest_hash(envelope)
+    assert child["SEALRUN_RELEASE_ID"] == "rel-77"
+    assert child["SEALRUN_RELEASE_SEQ"] == "77"
     assert child["PATH"]  # inherited from the launcher's own environment
 
 
@@ -365,8 +365,8 @@ def test_launch_passes_only_artifact_fds(tmp_path, monkeypatch):
     assert len(set(spy.pass_fds)) == 2
     assert unrelated not in spy.pass_fds
     assert set(spy.env) >= {
-        "AIGUARD_ARTIFACT_MODEL_BIN",
-        "AIGUARD_ARTIFACT_CONFIG_JSON",
+        "SEALRUN_ARTIFACT_MODEL_BIN",
+        "SEALRUN_ARTIFACT_CONFIG_JSON",
     }
 
 
@@ -397,9 +397,9 @@ def test_resolve_ids_accept_names_and_numbers():
 
 def test_resolve_ids_reject_unknown_and_malformed():
     with pytest.raises(VerificationError, match="unknown user"):
-        resolve_uid("no-such-user-aiguard-xyz")
+        resolve_uid("no-such-user-sealrun-xyz")
     with pytest.raises(VerificationError, match="unknown group"):
-        resolve_gid("no-such-group-aiguard-xyz")
+        resolve_gid("no-such-group-sealrun-xyz")
     with pytest.raises(VerificationError, match="must be a name or numeric id"):
         resolve_uid("")
     with pytest.raises(VerificationError, match="must be a name or numeric id"):
@@ -461,7 +461,7 @@ def test_cli_launch_round_trip(tmp_path):
     out = tmp_path / "copied.bin"
     script = (
         "import os, sys\n"
-        "with open(os.environ['AIGUARD_ARTIFACT_MODEL_BIN'], 'rb') as src:\n"
+        "with open(os.environ['SEALRUN_ARTIFACT_MODEL_BIN'], 'rb') as src:\n"
         "    data = src.read()\n"
         "open(sys.argv[1], 'wb').write(data)\n"
     )
@@ -481,7 +481,7 @@ def test_cli_launch_seal_flag(tmp_path):
     out = tmp_path / "copied.bin"
     script = (
         "import os, sys\n"
-        "with open(os.environ['AIGUARD_ARTIFACT_MODEL_BIN'], 'rb') as src:\n"
+        "with open(os.environ['SEALRUN_ARTIFACT_MODEL_BIN'], 'rb') as src:\n"
         "    data = src.read()\n"
         "open(sys.argv[1], 'wb').write(data)\n"
     )
@@ -530,7 +530,7 @@ def test_cli_launch_unknown_uid_is_reported(tmp_path, capsys):
         "--root", str(root),
         "--manifest", str(manifest),
         "--public-key", str(pub),
-        "--uid", "no-such-user-aiguard-xyz",
+        "--uid", "no-such-user-sealrun-xyz",
         "--", sys.executable, "-c", "pass",
     ])
     assert rc == 1

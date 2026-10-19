@@ -82,11 +82,11 @@ Both options implement the same adapter contract and run the same conformance te
 - CI uses mocks and deterministic fixtures only. Live testnet tests are opt-in, separately marked, and require explicit configuration.
 
 Suggested environment variables (names illustrative until implementation):
-- `AIGUARD_BSV_NETWORK=testnet`
-- `AIGUARD_BSV_BACKEND=provider|node`
-- `AIGUARD_BSV_PROVIDER_URL` / `AIGUARD_BSV_PROVIDER_TOKEN`
-- `AIGUARD_BSV_NODE_RPC_URL` / external secret for RPC credentials
-- `AIGUARD_BSV_FEE_RATE` and `AIGUARD_BSV_MAX_FEE_SAT`
+- `SEALRUN_BSV_NETWORK=testnet`
+- `SEALRUN_BSV_BACKEND=provider|node`
+- `SEALRUN_BSV_PROVIDER_URL` / `SEALRUN_BSV_PROVIDER_TOKEN`
+- `SEALRUN_BSV_NODE_RPC_URL` / external secret for RPC credentials
+- `SEALRUN_BSV_FEE_RATE` and `SEALRUN_BSV_MAX_FEE_SAT`
 - signer configuration identifying a local development signer or external signer, never a private-key value in a committed file.
 
 ## 5. Transaction construction and publication lifecycle
@@ -106,7 +106,7 @@ If broadcast outcome is ambiguous (timeout after submission), query by the local
 A full verification result must be more than “payload matches local journal.” It should report separate booleans/fields for each proof obligation:
 
 1. **Transaction identity:** parse raw serialized transaction; compute txid according to BSV transaction rules; ensure it equals the requested txid.
-2. **Payload:** parse the output script, identify exactly one valid AIGUARD payload output, and compare all 84 bytes to the expected payload. Reject malformed, duplicate, or ambiguous AIGUARD outputs.
+2. **Payload:** parse the output script, identify exactly one valid SEALRUN payload output, and compare all 84 bytes to the expected payload. Reject malformed, duplicate, or ambiguous SEALRUN outputs.
 3. **Block inclusion:** validate the transaction's Merkle branch against the Merkle root in the claimed block header. Check proof serialization, byte order, index, and duplicate-last-node rules against test vectors.
 4. **Header-chain validity:** validate proof-of-work, target/difficulty transitions, parent linkage, and network genesis/consensus parameters using a maintained BSV implementation or audited library. A Merkle proof without a trusted/validated header chain is not independently sufficient.
 5. **Confirmation policy:** require a configurable minimum depth and report block height/hash and observed depth. Testnet reorgs are expected; re-check the anchor chain after a reorg.

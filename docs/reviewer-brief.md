@@ -46,7 +46,7 @@ anyway).
   beside an untrusted manifest is not a trust anchor.
 - The pinned block checkpoint (a block hash the verifier walks back to).
 - Correctness of SHA-256 and the pure-Python secp256k1 in
-  `aiguard/bsv.py` (RFC 6979 signing; low-S enforced on the manifest path).
+  `sealrun/bsv.py` (RFC 6979 signing; low-S enforced on the manifest path).
 - BSV proof-of-work, for the anchoring layer's history-integrity claim.
 
 ## Adversaries we designed against
@@ -87,12 +87,12 @@ findings:
 
 | File | Why it matters |
 | --- | --- |
-| `aiguard/core.py` | Manifest verification, canonical JSON, journal chain, `verified_artifacts()` fd handoff |
-| `aiguard/launcher.py` | Privileged path: verify → exec on pinned descriptors, sealed-memfd freeze, setuid/setgid drop, env contract |
-| `aiguard/bsv.py` | secp256k1, tx build/sign, BIP 143 `SIGHASH_ALL\|FORKID` sighash |
-| `aiguard/anchor.py` | Anchor-chain continuity, payload binding, signatures |
-| `aiguard/spv.py` / `aiguard/beef.py` | Merkle inclusion, header-chain walk, BUMP/BEEF parsing |
-| `aiguard/cli.py` | The `verify` / `launch` / `anchor-*` surfaces (exit codes, fail-closed behavior) |
+| `sealrun/core.py` | Manifest verification, canonical JSON, journal chain, `verified_artifacts()` fd handoff |
+| `sealrun/launcher.py` | Privileged path: verify → exec on pinned descriptors, sealed-memfd freeze, setuid/setgid drop, env contract |
+| `sealrun/bsv.py` | secp256k1, tx build/sign, BIP 143 `SIGHASH_ALL\|FORKID` sighash |
+| `sealrun/anchor.py` | Anchor-chain continuity, payload binding, signatures |
+| `sealrun/spv.py` / `sealrun/beef.py` | Merkle inclusion, header-chain walk, BUMP/BEEF parsing |
+| `sealrun/cli.py` | The `verify` / `launch` / `anchor-*` surfaces (exit codes, fail-closed behavior) |
 
 ## High-value attacks to try
 

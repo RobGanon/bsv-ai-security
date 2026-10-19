@@ -1,5 +1,5 @@
 """Tests for BEEF (BRC-62) envelope parsing and verification in
-aiguard/beef.py.
+sealrun/beef.py.
 
 The spec fixture is the BRC-62 reference BEEF example: version
 0100BEEF, one BUMP, two transactions — the parent carries the BUMP
@@ -14,7 +14,7 @@ import json
 
 import pytest
 
-from aiguard.beef import (
+from sealrun.beef import (
     BEEF_MAGIC,
     BEEF_VERSION,
     Beef,
@@ -27,7 +27,7 @@ from aiguard.beef import (
     parse_beef,
     parse_beef_hex,
 )
-from aiguard.spv import BlockHeader, SPVUnavailable
+from sealrun.spv import BlockHeader, SPVUnavailable
 
 # --- BRC-62 reference BEEF example -----------------------------------------
 # Transcribed from the BRC-62 spec (Open BSV license). Cross-checked by
@@ -64,7 +64,7 @@ def test_spec_beef_parses_structure():
     # The payment spends the parent: its single input references the
     # parent txid (stored little-endian in the raw input).
     assert payment.raw is not None
-    from aiguard.bsv import parse_tx
+    from sealrun.bsv import parse_tx
 
     payment_tx = parse_tx(payment.raw)
     assert len(payment_tx.inputs) == 1
@@ -131,7 +131,7 @@ def test_parse_beef_rejects_bump_index_out_of_range():
     rebuilt = bytearray()
     rebuilt += BEEF_MAGIC
     rebuilt += bytes([1])
-    from aiguard.spv import bump_to_hex
+    from sealrun.spv import bump_to_hex
 
     rebuilt += bytes.fromhex(bump_to_hex(beef.bumps[0]))
     rebuilt += bytes([2])
@@ -145,7 +145,7 @@ def test_parse_beef_rejects_bump_index_out_of_range():
 def test_parse_beef_rejects_duplicate_txid():
     beef = parse_beef_hex(SPEC_BEEF_HEX)
     parent_raw, payment_raw = beef.txs[0].raw, beef.txs[1].raw
-    from aiguard.spv import bump_to_hex
+    from sealrun.spv import bump_to_hex
 
     raw = (
         BEEF_MAGIC
@@ -186,7 +186,7 @@ def test_beef_to_bytes_rejects_bad_bump_index():
 def _anchor1_raw() -> bytes:
     from test_anchor_signature import ANCHOR1_TX, FAUCET_TX
 
-    from aiguard.bsv import Tx, TxIn, TxOut
+    from sealrun.bsv import Tx, TxIn, TxOut
 
     script_sig = bytes.fromhex(ANCHOR1_TX["vin"][0]["scriptSig"]["hex"])
     op_return = bytes.fromhex(ANCHOR1_TX["vout"][0]["scriptPubKey"]["hex"])
@@ -202,7 +202,7 @@ def _anchor1_raw() -> bytes:
 
 
 def _child_raw() -> bytes:
-    from aiguard.bsv import Tx, TxIn, TxOut
+    from sealrun.bsv import Tx, TxIn, TxOut
 
     change_script = bytes.fromhex(
         "76a9142e640e26bcb812790c2517d49d660c44e1b3ae6c88ac"
@@ -222,12 +222,12 @@ def _child_raw() -> bytes:
 def _ttn_beef():
     from test_spv import BLOCK_36722
 
-    from aiguard.spv import build_bump
+    from sealrun.spv import build_bump
 
     bump = build_bump(BLOCK_36722["tx"], [2], block_height=36722)
     anchor_raw = _anchor1_raw()
     child_raw = _child_raw()
-    from aiguard.bsv import parse_tx
+    from sealrun.bsv import parse_tx
 
     anchor_txid = parse_tx(anchor_raw).txid()
     child_txid = parse_tx(child_raw).txid()
@@ -323,7 +323,7 @@ def test_verify_rejects_tampered_bump_and_header_problems():
 
 def test_verify_rejects_missing_parent_overspend_and_bad_vout():
     beef, anchor_txid, child_txid = _ttn_beef()
-    from aiguard.bsv import Tx, TxIn, TxOut, parse_tx
+    from sealrun.bsv import Tx, TxIn, TxOut, parse_tx
 
     # Child spends a parent that is not in the BEEF.
     orphan = Tx(
@@ -403,7 +403,7 @@ def test_verify_rejects_ancestry_cycle():
     # constructible case is a tx whose input references a txid that no
     # tx in the BEEF has (here, its own would-be txid): it must fail
     # as a missing parent, not loop.
-    from aiguard.bsv import Tx, TxIn, TxOut, parse_tx
+    from sealrun.bsv import Tx, TxIn, TxOut, parse_tx
 
     self_tx = Tx(
         1, [TxIn("00" * 32, 0, b"", 0xFFFFFFFF)], [TxOut(100, b"")], 0
@@ -445,7 +445,7 @@ def test_verify_rejects_empty_beef_and_mined_tx_not_in_bump():
     # the BUMP for one built over a different tx set.
     from test_spv import BLOCK_36722
 
-    from aiguard.spv import build_bump
+    from sealrun.spv import build_bump
 
     other_bump = build_bump(BLOCK_36722["tx"], [0], block_height=36722)
     swapped = Beef(bumps=(other_bump,), txs=beef.txs)
@@ -460,7 +460,7 @@ def test_verify_rejects_empty_beef_and_mined_tx_not_in_bump():
 
 
 def test_apply_beef_inclusion_simple_and_chain_shapes():
-    from aiguard.anchor import encode_anchor_payload
+    from sealrun.anchor import encode_anchor_payload
 
     beef, anchor_txid, _child = _ttn_beef()
     result = {"anchors": [{"txid": anchor_txid, "payload_hex": "00"}]}
@@ -496,9 +496,9 @@ def test_apply_beef_inclusion_rejects_non_beef():
 
 
 def _run_cli_beef(tmp_path, capsys, monkeypatch, beef, anchor_txid):
-    from aiguard import cli as cli_module
-    from aiguard.anchor import encode_anchor_payload
-    from aiguard.bsv import build_op_return_script
+    from sealrun import cli as cli_module
+    from sealrun.anchor import encode_anchor_payload
+    from sealrun.bsv import build_op_return_script
 
     claimed = encode_anchor_payload(
         head_hash="11" * 32, start_seq=1, end_seq=3,
@@ -543,11 +543,11 @@ def test_cli_beef_file_verifies_and_prints_line(tmp_path, capsys, monkeypatch):
 
 
 def test_cli_beef_file_accepts_hex(tmp_path, capsys, monkeypatch):
-    from aiguard import cli as cli_module
-    from aiguard.anchor import encode_anchor_payload
+    from sealrun import cli as cli_module
+    from sealrun.anchor import encode_anchor_payload
 
     beef, anchor_txid, _child = _ttn_beef()
-    from aiguard.bsv import build_op_return_script
+    from sealrun.bsv import build_op_return_script
 
     genesis = "0" * 64
     claimed = encode_anchor_payload(
@@ -599,8 +599,8 @@ def test_cli_beef_file_failure_prints_failed_line(tmp_path, capsys, monkeypatch)
 
 
 def test_two_mined_txs_share_one_bump():
-    from aiguard.bsv import Tx, TxOut, parse_tx
-    from aiguard.spv import build_bump, merkle_root, verify_pow
+    from sealrun.bsv import Tx, TxOut, parse_tx
+    from sealrun.spv import build_bump, merkle_root, verify_pow
 
     raw_a = Tx(1, [], [TxOut(1, b"\x01")], 0).serialize()
     raw_b = Tx(1, [], [TxOut(2, b"\x02")], 0).serialize()
@@ -630,8 +630,8 @@ def test_two_mined_txs_share_one_bump():
 
 
 def test_deep_ancestry_chain_verifies():
-    from aiguard.bsv import Tx, TxIn, TxOut, parse_tx
-    from aiguard.spv import build_bump, verify_pow
+    from sealrun.bsv import Tx, TxIn, TxOut, parse_tx
+    from sealrun.spv import build_bump, verify_pow
 
     # Root is a mined coinbase-like tx (single-tx block, empty BUMP
     # path, root == txid); 59 unmined descendants each spend the
@@ -682,7 +682,7 @@ def test_unreferenced_bump_is_ignored():
     beef, _anchor, _child = _ttn_beef()
     from test_spv import BLOCK_36722
 
-    from aiguard.spv import build_bump
+    from sealrun.spv import build_bump
 
     extra = build_bump(BLOCK_36722["tx"], [0], block_height=36722)
     beef2 = Beef(bumps=beef.bumps + (extra,), txs=beef.txs)
@@ -701,7 +701,7 @@ def test_parse_beef_rejects_huge_counts_without_hanging():
 def test_parse_bump_bytes_offset():
     from test_bump import SPEC_JSON
 
-    from aiguard.spv import bump_to_bytes, parse_bump_bytes
+    from sealrun.spv import bump_to_bytes, parse_bump_bytes
 
     blob = b"PREFIX" + bump_to_bytes(SPEC_JSON) + b"SUFFIX"
     bump, consumed = parse_bump_bytes(blob, 6)
@@ -712,7 +712,7 @@ def test_parse_bump_bytes_offset():
 
 
 def test_parse_tx_prefix_offset():
-    from aiguard.bsv import parse_tx, parse_tx_prefix
+    from sealrun.bsv import parse_tx, parse_tx_prefix
 
     raw = _anchor1_raw()
     blob = b"\x00\x01\x02" + raw + b"\x99"

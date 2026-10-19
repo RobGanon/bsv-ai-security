@@ -1,4 +1,4 @@
-"""Tests for aiguard.spv: Merkle proofs, headers, PoW, inclusion.
+"""Tests for sealrun.spv: Merkle proofs, headers, PoW, inclusion.
 
 Real fixtures: Teratestnet blocks 36721–36723, recorded live from
 WoC-TTN 2026-10-16. Block 36722 holds live anchor #1 (tx index 2),
@@ -10,8 +10,8 @@ import json
 
 import pytest
 
-from aiguard.anchor import encode_anchor_payload, verify_anchor_chain
-from aiguard.spv import (
+from sealrun.anchor import encode_anchor_payload, verify_anchor_chain
+from sealrun.spv import (
     SPVUnavailable,
     SPVVerifier,
     BlockHeader,
@@ -388,8 +388,8 @@ def test_woc_fetcher_maps_http_error_to_unavailable():
 
 
 def test_cli_spv_verifies_chain_and_prints_inclusion_line(tmp_path, capsys, monkeypatch):
-    from aiguard import cli as cli_module
-    from aiguard.bsv import build_op_return_script
+    from sealrun import cli as cli_module
+    from sealrun.bsv import build_op_return_script
 
     class FakeWoC:
         def __init__(self, base_url=None):
@@ -433,7 +433,7 @@ def test_cli_spv_verifies_chain_and_prints_inclusion_line(tmp_path, capsys, monk
 
 
 def test_cli_without_spv_keeps_local_check_only_warning(tmp_path, capsys):
-    from aiguard import cli as cli_module
+    from sealrun import cli as cli_module
 
     anchor1 = tmp_path / "a1.json"
     genesis = "0" * 64

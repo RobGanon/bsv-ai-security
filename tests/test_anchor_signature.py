@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from aiguard.anchor import (
+from sealrun.anchor import (
     AnchorSignatureVerifier,
     _tx_from_woc_json,
     apply_anchor_signatures,
@@ -20,8 +20,8 @@ from aiguard.anchor import (
     verify_anchor_chain,
     verify_anchor_tx_signature,
 )
-from aiguard.core import VerificationError
-from aiguard.spv import SPVUnavailable
+from sealrun.core import VerificationError
+from sealrun.spv import SPVUnavailable
 
 ANCHOR_PUBKEY = "0397315d0180c5f4cf1ea2cd19d683becdb4a978827ab6d8c6cb74b18df29eb58d"
 TX1 = "4111b7cf9d42624be75aa78f5031caaebe4e836665b95fbcdbadbb086b2bf029"
@@ -289,7 +289,7 @@ def test_apply_anchor_signatures_journal_shape():
 
 
 def test_cli_anchor_sig_verifies_and_prints_line(tmp_path, capsys, monkeypatch):
-    from aiguard import cli as cli_module
+    from sealrun import cli as cli_module
 
     class FakeWoC:
         def __init__(self, base_url=None):
@@ -319,7 +319,7 @@ def test_cli_anchor_sig_verifies_and_prints_line(tmp_path, capsys, monkeypatch):
 
 
 def test_cli_anchor_sig_without_pubkey_is_rejected(tmp_path, capsys):
-    from aiguard import cli as cli_module
+    from sealrun import cli as cli_module
 
     anchor1 = tmp_path / "a1.json"
     genesis = "0" * 64

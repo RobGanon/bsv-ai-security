@@ -21,18 +21,18 @@ where to spend your first hour). This file is the formal scope.
 
 The manifest verifier, the journal, and the anchor checks:
 
-- `aiguard/core.py` — manifest verification, TOCTOU-resistant fd handoff
-- `aiguard/launcher.py` — privileged launcher: verify, pin handles across
+- `sealrun/core.py` — manifest verification, TOCTOU-resistant fd handoff
+- `sealrun/launcher.py` — privileged launcher: verify, pin handles across
   exec, optional sealed-memfd freeze, privilege drop
-- `aiguard/publisher.py`, `aiguard/publishing.py` — acceptance + anchor prep
-- `aiguard/anchor.py` — anchor-chain verification (continuity, signatures)
-- `aiguard/bsv.py` — minimal BSV primitives: secp256k1, tx build/sign,
+- `sealrun/publisher.py`, `sealrun/publishing.py` — acceptance + anchor prep
+- `sealrun/anchor.py` — anchor-chain verification (continuity, signatures)
+- `sealrun/bsv.py` — minimal BSV primitives: secp256k1, tx build/sign,
   BIP 143 `SIGHASH_ALL|FORKID` sighash
-- `aiguard/broadcast.py` — signer interface, WoC-TTN broadcaster
-- `aiguard/spv.py` — inclusion (Merkle recomputation), header-chain walk
-- `aiguard/beef.py` — BEEF envelope parse/verify (inclusion + ancestry +
+- `sealrun/broadcast.py` — signer interface, WoC-TTN broadcaster
+- `sealrun/spv.py` — inclusion (Merkle recomputation), header-chain walk
+- `sealrun/beef.py` — BEEF envelope parse/verify (inclusion + ancestry +
   amount conservation; no script evaluation)
-- `aiguard/cli.py` — the `verify`/`launch`/`anchor-chain-verify` surfaces
+- `sealrun/cli.py` — the `verify`/`launch`/`anchor-chain-verify` surfaces
 
 About 7,768 lines of production Python, 10,109 lines of tests,
 582 tests passing on `main`.

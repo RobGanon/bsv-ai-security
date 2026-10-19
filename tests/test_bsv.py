@@ -1,4 +1,4 @@
-"""Tests for the live-anchor BSV layer (aiguard/bsv.py + aiguard/broadcast.py).
+"""Tests for the live-anchor BSV layer (sealrun/bsv.py + sealrun/broadcast.py).
 
 Tests-first for the first live anchor (Teratestnet). The sighash test is
 grounded in a REAL Teratestnet transaction: the faucet payout
@@ -18,8 +18,8 @@ import json
 
 import pytest
 
-from aiguard.anchor import PAYLOAD_SIZE, encode_anchor_payload
-from aiguard.bsv import (
+from sealrun.anchor import PAYLOAD_SIZE, encode_anchor_payload
+from sealrun.bsv import (
     PrivKey,
     Tx,
     TxIn,
@@ -31,7 +31,7 @@ from aiguard.bsv import (
     sign_digest,
     verify_sig,
 )
-from aiguard.broadcast import (
+from sealrun.broadcast import (
     BroadcastError,
     BroadcastRejected,
     BroadcastUnavailable,
@@ -39,7 +39,7 @@ from aiguard.broadcast import (
     WIFSigner,
     WoCBroadcaster,
 )
-from aiguard.publisher import Publisher, PublisherConfig
+from sealrun.publisher import Publisher, PublisherConfig
 
 # --- vectors ------------------------------------------------------------
 
@@ -203,12 +203,12 @@ def test_build_anchor_tx_refuses_dust_change_and_insufficient_funds():
 
 # --- broadcaster ---------------------------------------------------------
 
-def test_urllib_request_sends_aiguard_user_agent():
+def test_urllib_request_sends_sealrun_user_agent():
     """Regression: WoC-TTN 403s the default Python-urllib User-Agent."""
     import threading
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
-    from aiguard.broadcast import _urllib_request
+    from sealrun.broadcast import _urllib_request
 
     seen: dict[str, str] = {}
 
@@ -232,7 +232,7 @@ def test_urllib_request_sends_aiguard_user_agent():
     finally:
         server.server_close()
     assert status == 200
-    assert seen["ua"] == "aiguard/1.0"
+    assert seen["ua"] == "sealrun/1.0"
     assert "Python-urllib" not in seen["ua"]
 
 class FakeTransport:
@@ -328,8 +328,8 @@ def test_broadcaster_rejects_bad_payload():
 # --- CLI publish ---------------------------------------------------------
 
 def test_cli_publish_broadcast_wires_real_broadcaster(tmp_path, monkeypatch, capsys):
-    from aiguard import cli as cli_mod
-    from aiguard.core import append_audit_event
+    from sealrun import cli as cli_mod
+    from sealrun.core import append_audit_event
 
     journal = tmp_path / "journal.jsonl"
     journal.touch()
@@ -362,8 +362,8 @@ def test_cli_publish_broadcast_wires_real_broadcaster(tmp_path, monkeypatch, cap
 
 
 def test_cli_publish_broadcast_refuses_without_wif(tmp_path, monkeypatch):
-    from aiguard import cli as cli_mod
-    from aiguard.core import append_audit_event
+    from sealrun import cli as cli_mod
+    from sealrun.core import append_audit_event
 
     journal = tmp_path / "journal.jsonl"
     journal.touch()
@@ -380,7 +380,7 @@ def test_cli_publish_broadcast_refuses_without_wif(tmp_path, monkeypatch):
 
 
 def test_publisher_broadcasts_through_real_broadcaster(tmp_path):
-    from aiguard.core import append_audit_event
+    from sealrun.core import append_audit_event
 
     journal = tmp_path / "journal.jsonl"
     journal.touch()

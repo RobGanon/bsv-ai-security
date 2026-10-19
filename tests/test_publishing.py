@@ -1,6 +1,6 @@
 import pytest
 
-from aiguard.publishing import (
+from sealrun.publishing import (
     PublishingConfigurationError,
     load_publishing_config,
 )
@@ -13,10 +13,10 @@ def test_defaults_to_testnet_but_requires_provider_endpoint():
 
 def test_provider_configuration_uses_testnet_and_redacts_token():
     config = load_publishing_config({
-        "AIGUARD_BSV_NETWORK": "testnet",
-        "AIGUARD_BSV_BACKEND": "provider",
-        "AIGUARD_BSV_PROVIDER_URL": "https://provider.example/api",
-        "AIGUARD_BSV_PROVIDER_TOKEN": "do-not-print-this-token",
+        "SEALRUN_BSV_NETWORK": "testnet",
+        "SEALRUN_BSV_BACKEND": "provider",
+        "SEALRUN_BSV_PROVIDER_URL": "https://provider.example/api",
+        "SEALRUN_BSV_PROVIDER_TOKEN": "do-not-print-this-token",
     })
     assert config.network == "testnet"
     assert config.backend == "provider"
@@ -28,7 +28,7 @@ def test_provider_configuration_uses_testnet_and_redacts_token():
 def test_provider_rejects_credentials_embedded_in_url():
     with pytest.raises(PublishingConfigurationError, match="must not embed credentials"):
         load_publishing_config({
-            "AIGUARD_BSV_PROVIDER_URL": "https://user:secret@provider.example/api",
+            "SEALRUN_BSV_PROVIDER_URL": "https://user:secret@provider.example/api",
         })
 
 
@@ -37,22 +37,22 @@ def test_mainnet_requires_explicit_confirmation():
     # be enabled by a single variable or by accident.
     with pytest.raises(PublishingConfigurationError, match="confirm"):
         load_publishing_config({
-            "AIGUARD_BSV_NETWORK": "mainnet",
-            "AIGUARD_BSV_PROVIDER_URL": "https://provider.example/api",
+            "SEALRUN_BSV_NETWORK": "mainnet",
+            "SEALRUN_BSV_PROVIDER_URL": "https://provider.example/api",
         })
     with pytest.raises(PublishingConfigurationError, match="confirm"):
         load_publishing_config({
-            "AIGUARD_BSV_NETWORK": "mainnet",
-            "AIGUARD_BSV_MAINNET_CONFIRM": "yes",
-            "AIGUARD_BSV_PROVIDER_URL": "https://provider.example/api",
+            "SEALRUN_BSV_NETWORK": "mainnet",
+            "SEALRUN_BSV_MAINNET_CONFIRM": "yes",
+            "SEALRUN_BSV_PROVIDER_URL": "https://provider.example/api",
         })
 
 
 def test_mainnet_with_confirmation_loads():
     config = load_publishing_config({
-        "AIGUARD_BSV_NETWORK": "mainnet",
-        "AIGUARD_BSV_MAINNET_CONFIRM": "I_UNDERSTAND_MAINNET_RISK",
-        "AIGUARD_BSV_PROVIDER_URL": "https://provider.example/api",
+        "SEALRUN_BSV_NETWORK": "mainnet",
+        "SEALRUN_BSV_MAINNET_CONFIRM": "I_UNDERSTAND_MAINNET_RISK",
+        "SEALRUN_BSV_PROVIDER_URL": "https://provider.example/api",
     })
     assert config.network == "mainnet"
 
@@ -60,22 +60,22 @@ def test_mainnet_with_confirmation_loads():
 def test_unknown_backend_is_rejected():
     with pytest.raises(PublishingConfigurationError, match="must be 'provider' or 'node'"):
         load_publishing_config({
-            "AIGUARD_BSV_BACKEND": "magic",
-            "AIGUARD_BSV_PROVIDER_URL": "https://provider.example/api",
+            "SEALRUN_BSV_BACKEND": "magic",
+            "SEALRUN_BSV_PROVIDER_URL": "https://provider.example/api",
         })
 
 
 def test_provider_requires_https():
     with pytest.raises(PublishingConfigurationError, match="HTTPS"):
         load_publishing_config({
-            "AIGUARD_BSV_PROVIDER_URL": "http://provider.example/api",
+            "SEALRUN_BSV_PROVIDER_URL": "http://provider.example/api",
         })
 
 
 def test_node_allows_loopback_http():
     config = load_publishing_config({
-        "AIGUARD_BSV_BACKEND": "node",
-        "AIGUARD_BSV_NODE_RPC_URL": "http://127.0.0.1:8332",
+        "SEALRUN_BSV_BACKEND": "node",
+        "SEALRUN_BSV_NODE_RPC_URL": "http://127.0.0.1:8332",
     })
     assert config.backend == "node"
     assert config.endpoint == "http://127.0.0.1:8332"
@@ -84,32 +84,32 @@ def test_node_allows_loopback_http():
 def test_node_rejects_remote_unencrypted_rpc():
     with pytest.raises(PublishingConfigurationError, match="loopback"):
         load_publishing_config({
-            "AIGUARD_BSV_BACKEND": "node",
-            "AIGUARD_BSV_NODE_RPC_URL": "http://node.example:8332",
+            "SEALRUN_BSV_BACKEND": "node",
+            "SEALRUN_BSV_NODE_RPC_URL": "http://node.example:8332",
         })
 
 
 def test_node_requires_username_and_password_together():
     with pytest.raises(PublishingConfigurationError, match="configured together"):
         load_publishing_config({
-            "AIGUARD_BSV_BACKEND": "node",
-            "AIGUARD_BSV_NODE_RPC_URL": "https://node.example:8332",
-            "AIGUARD_BSV_NODE_RPC_USERNAME": "operator",
+            "SEALRUN_BSV_BACKEND": "node",
+            "SEALRUN_BSV_NODE_RPC_URL": "https://node.example:8332",
+            "SEALRUN_BSV_NODE_RPC_USERNAME": "operator",
         })
 
 
 @pytest.mark.parametrize(
     ("variable", "value"),
     [
-        ("AIGUARD_BSV_FEE_RATE", "0"),
-        ("AIGUARD_BSV_MAX_FEE_SAT", "0"),
-        ("AIGUARD_BSV_FEE_RATE", "not-an-int"),
-        ("AIGUARD_BSV_MAX_FEE_SAT", "not-an-int"),
+        ("SEALRUN_BSV_FEE_RATE", "0"),
+        ("SEALRUN_BSV_MAX_FEE_SAT", "0"),
+        ("SEALRUN_BSV_FEE_RATE", "not-an-int"),
+        ("SEALRUN_BSV_MAX_FEE_SAT", "not-an-int"),
     ],
 )
 def test_invalid_fee_policy_is_rejected(variable, value):
     with pytest.raises(PublishingConfigurationError):
         load_publishing_config({
-            "AIGUARD_BSV_PROVIDER_URL": "https://provider.example/api",
+            "SEALRUN_BSV_PROVIDER_URL": "https://provider.example/api",
             variable: value,
         })

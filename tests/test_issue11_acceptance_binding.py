@@ -18,11 +18,11 @@ import hashlib
 import json
 
 import pytest
-from aiguard.bsv import PrivKey
+from sealrun.bsv import PrivKey
 
-from aiguard.anchor import create_anchor_payload, verify_journal_against_anchor
-from aiguard.cli import main
-from aiguard.core import (
+from sealrun.anchor import create_anchor_payload, verify_journal_against_anchor
+from sealrun.cli import main
+from sealrun.core import (
     VerificationError,
     append_audit_event,
     canonical_json_bytes,
@@ -52,7 +52,7 @@ def _write_chained_journal(path, raw_events):
 
 def _envelope(key, release_seq, release_id):
     payload = {
-        "schema": "aiguard-manifest-v2",
+        "schema": "sealrun-manifest-v1",
         "release_id": release_id,
         "release_seq": release_seq,
         "artifacts": [{"path": "a.txt", "sha256": "a" * 64, "size": 1}],
@@ -282,7 +282,7 @@ def test_verify_with_binding_rejects_mismatched_checkpoint(tmp_path):
     _accept(journal, key, manifests, 4, "release-4")
     result = _anchor(journal, key, manifests)
     # Forge a payload with the same head but a different release_seq.
-    from aiguard.anchor import encode_anchor_payload
+    from sealrun.anchor import encode_anchor_payload
 
     forged = encode_anchor_payload(
         head_hash=result["head_hash"],

@@ -148,19 +148,19 @@ Inputs: journal file, genesis anchor txid, anchor pubkey, BSV block headers
 (or an SPV source serving Merkle inclusion proofs, e.g. BEEF).
 
 **Status (2026-10-16):** step 1's inclusion check is implemented in
-`aiguard/spv.py` (`anchor-chain-verify --spv`). WoC-TTN serves no
+`sealrun/spv.py` (`anchor-chain-verify --spv`). WoC-TTN serves no
 compact Merkle-proof endpoint, so the verifier recomputes the Merkle
 root from the claimed block's tx list and checks the header hash +
 proof-of-work — stronger evidence than a served proof, heavier on
 bandwidth (fine for Teratestnet's tiny blocks; compact proofs are the
 mainnet path). **Status (2026-10-17):** compact proofs are implemented
-too — BUMP (BRC-74) parse/verify/build in `aiguard/spv.py`
+too — BUMP (BRC-74) parse/verify/build in `sealrun/spv.py`
 (`anchor-chain-verify --bump-file`), checked against the BRC-74
 reference vector and a real Teratestnet anchor; proofs are
 operator-supplied since no public source serves BUMPs, and the BEEF
 envelope (BUMP array + tx array) is not yet parsed. **Status (2026-10-17):**
 the BEEF envelope is parsed and verified too — BRC-62 parse/encode in
-`aiguard/beef.py` (`anchor-chain-verify --beef-file`), checked against
+`sealrun/beef.py` (`anchor-chain-verify --beef-file`), checked against
 the BRC-62 reference envelope and a real Teratestnet anchor + child
 tx; verification covers BUMP inclusion for mined txs plus ancestry
 and amount conservation for unmined ones. It does NOT evaluate
@@ -169,13 +169,13 @@ verdicts carry `verified: True` with `status: "ancestry"` for
 unmined txs — that means ancestry + amount conservation only,
 not signature verification; consumers must read `status`, not
 the bare `verified` flag. Header-chain sync back to a trusted checkpoint is
-implemented in `aiguard/spv.py` (`anchor-chain-verify --header-chain
+implemented in `sealrun/spv.py` (`anchor-chain-verify --header-chain
 --checkpoint-hash --checkpoint-height`): the verifier walks headers
 from each anchor's block back to the operator-pinned checkpoint,
 checking every header's hash + proof-of-work; walks are capped at
 2016 headers and fail closed past the cap.
 anchor-input-signature check (step 1, second bullet) is implemented in
-`aiguard/anchor.py` (`anchor-chain-verify --anchor-sig --anchor-pubkey`):
+`sealrun/anchor.py` (`anchor-chain-verify --anchor-sig --anchor-pubkey`):
 the anchor tx's single input must parse as P2PKH with sighash
 `SIGHASH_ALL|FORKID`, carry the trusted anchor pubkey, spend a P2PKH
 output to that pubkey, and its ECDSA signature must verify against
@@ -231,7 +231,7 @@ infrequent (§8).
   ("testnet" or "mainnet"; testnet is the default). A key's version byte
   must match the selected network — a mainnet WIF is refused for testnet
   use and vice versa — and mainnet publishing requires a separate
-  confirmation (`AIGUARD_BSV_MAINNET_CONFIRM`, `--confirm-mainnet` for
+  confirmation (`SEALRUN_BSV_MAINNET_CONFIRM`, `--confirm-mainnet` for
   the CLI) so it can never happen by default or accident. Mainnet
   addresses use version `0x00`; the base58 encoder pads leading zero
   bytes with `1`, per the base58 spec (a latent encoder bug here was
@@ -259,7 +259,7 @@ security margin for how much history is exposed to silent rewrite.
 
 - Real-time false-event injection by a compromised admin (detectable only
   after the fact, by out-of-band audit of event *contents*).
-- The verify→launch TOCTOU gap is closed by `aiguard launch`, which
+- The verify→launch TOCTOU gap is closed by `sealrun launch`, which
   consumes `verified_artifacts()` handles instead of reopening paths; the
   residual in-place-mutation window is closed by `--seal` (see
   `docs/launcher.md`). The launcher does not sandbox the child.

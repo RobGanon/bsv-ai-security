@@ -326,15 +326,6 @@ def main(argv=None):
                    metavar="SIGNER-CMD [ARGS...]",
                    help="signer subcommand; separate it from options with '--'")
 
-    p = sub.add_parser(
-        "signer",
-        help="offline anchor-transaction signer: human-side signing ceremony "
-             "(init / expect / sign; testnet only)",
-    )
-    p.add_argument("signer_argv", nargs=argparse.REMAINDER,
-                   metavar="SIGNER-CMD [ARGS...]",
-                   help="signer subcommand; separate it from options with '--'")
-
     args = parser.parse_args(argv)
     try:
         if args.command == "keygen":

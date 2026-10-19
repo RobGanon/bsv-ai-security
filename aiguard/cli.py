@@ -302,6 +302,15 @@ def main(argv=None):
                    help="trusted manifest-signing public key (compressed hex); "
                    "required with --manifest when the journal contains acceptances")
 
+    p = sub.add_parser(
+        "signer",
+        help="offline anchor-transaction signer: human-side signing ceremony "
+             "(init / expect / sign; testnet only)",
+    )
+    p.add_argument("signer_argv", nargs=argparse.REMAINDER,
+                   metavar="SIGNER-CMD [ARGS...]",
+                   help="signer subcommand; separate it from options with '--'")
+
     args = parser.parse_args(argv)
     try:
         if args.command == "keygen":
@@ -648,6 +657,10 @@ def main(argv=None):
                 failed = failed or not result.get("header_chain_verified")
             if failed:
                 return 1
+        elif args.command == "signer":
+            from .signer_cli import main as signer_main
+
+            return signer_main(args.signer_argv)
         elif args.command == "publish":
             manifests = None
             public_key = None

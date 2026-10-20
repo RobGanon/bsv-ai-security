@@ -40,6 +40,7 @@ import hmac
 import json
 import os
 import secrets
+import stat
 import struct
 import sys
 import time
@@ -171,14 +172,40 @@ def verify_password(password: str, record: dict[str, Any]) -> bool:
 # --- private files ----------------------------------------------------------
 
 
-def _require_private_perms(path: Path, what: str) -> None:
-    """Refuse a file that is group- or world-readable (same rule as core)."""
+def _read_private_text(path: Path, what: str, *, encoding: str = "utf-8") -> str:
+    """Read a private file through a single descriptor.
+
+    Opens once with O_NOFOLLOW, checks permissions with fstat() on that
+    descriptor, and reads from the same descriptor — the bytes read are
+    the bytes whose permissions were checked, with no stat-then-read
+    window for a path swap or symlink substitution between check and
+    use. Refuses non-regular files and group/world-readable files.
+    """
+    flags = os.O_RDONLY | _O_NOFOLLOW
     try:
-        mode = os.stat(path).st_mode
+        fd = os.open(path, flags)
     except OSError as exc:
+        raise SignerError(f"cannot read {what}: {path}") from exc
+    try:
+        mode = os.fstat(fd).st_mode
+    except OSError as exc:
+        os.close(fd)
         raise SignerError(f"cannot stat {what}: {path}") from exc
+    if not stat.S_ISREG(mode):
+        os.close(fd)
+        raise SignerError(f"{what} is not a regular file: {path}")
     if mode & 0o077:
+        os.close(fd)
         raise SignerError(f"{what} must not be group- or world-readable: {path}")
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        raise SignerError(f"cannot read {what}: {path}") from exc
+    try:
+        return raw.decode(encoding)
+    except UnicodeDecodeError as exc:
+        raise SignerError(f"cannot read {what}: {path}") from exc
 
 
 def _write_private_text(path: Path, text: str) -> None:
@@ -224,10 +251,10 @@ def _require_hex64(value: Any, field: str) -> str:
 def load_config(path: str | Path) -> dict[str, Any]:
     """Load and validate a signer config. Refuses a group/world-readable file."""
     path = Path(path)
-    _require_private_perms(path, "signer config")
+    text = _read_private_text(path, "signer config")
     try:
-        config = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        config = json.loads(text)
+    except json.JSONDecodeError as exc:
         raise SignerError(f"cannot read signer config: {path}") from exc
     if not isinstance(config, dict):
         raise SignerError("signer config must be a JSON object")
@@ -283,11 +310,7 @@ def load_signer_key(config: dict[str, Any], config_dir: Path) -> PrivKey:
     """Load the anchor key: perms-checked, WIF version matches network,
     and the derived address must equal the configured anchor address."""
     key_path = _resolve(config["key_file"], config_dir)
-    _require_private_perms(key_path, "signer key file")
-    try:
-        wif = key_path.read_text(encoding="ascii").strip()
-    except (OSError, UnicodeDecodeError) as exc:
-        raise SignerError(f"cannot read signer key file: {key_path}") from exc
+    wif = _read_private_text(key_path, "signer key file", encoding="ascii").strip()
     try:
         key = PrivKey.from_wif(wif, config["network"])
     except ValueError as exc:

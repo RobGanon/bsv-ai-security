@@ -179,6 +179,23 @@ def test_load_private_key_accepts_0600(tmp_path):
     assert load_private_key(priv_path) is not None
 
 
+def test_load_private_key_refuses_symlink(tmp_path):
+    """Regression (outside review, 2026-10-20): no stat-then-read window.
+
+    The loader opens the key once with O_NOFOLLOW and fstat()s that
+    descriptor, so a symlink in place of the key file is refused
+    outright instead of being checked at one path and read at another.
+    """
+    priv_path = tmp_path / "priv.wif"
+    pub_path = tmp_path / "pub.pub"
+    generate_keypair(priv_path, pub_path)
+    os.chmod(priv_path, 0o600)
+    link = tmp_path / "linked.wif"
+    link.symlink_to(priv_path)
+    with pytest.raises(VerificationError):
+        load_private_key(link)
+
+
 def test_journal_duplicate_keys_rejected(tmp_path):
     body = {
         "seq": 1,

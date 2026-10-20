@@ -313,6 +313,47 @@ def test_launch_with_seal_freezes_bytes(tmp_path, monkeypatch):
     assert spy.reads == [b"model-v1"]
 
 
+def test_launch_with_seal_aborts_when_mutation_lands_before_copy(tmp_path, monkeypatch):
+    """Regression (outside review, 2026-10-20): the verify→copy window.
+
+    Verification hashes the artifact, then the seal copy is made from
+    the same descriptor. A writer who mutates the source inode in
+    between must not get the mutated bytes frozen into the sealed
+    copy: the copy is re-hashed against the manifest, the launch
+    aborts, and the child never runs.
+    """
+    root = setup_artifacts(tmp_path)
+    private, envelope = make_signed(root, paths=("model.bin",))
+    real_seal = launcher._seal_fd
+
+    def mutating_seal(src_fd, **kwargs):
+        with open(root / "model.bin", "r+b") as handle:
+            handle.write(b"HACKED!!")  # same length: a size-only check would miss it
+        return real_seal(src_fd, **kwargs)
+
+    monkeypatch.setattr(launcher, "_seal_fd", mutating_seal)
+    spy = _RunSpy()
+    install_spy(monkeypatch, spy)
+    with pytest.raises(VerificationError):
+        launch(root, envelope, private.pubkey_compressed(), ["true"], seal=True)
+    assert spy.argv is None  # the child never launched
+
+
+def test_seal_fd_rejects_copy_that_differs_from_expected(tmp_path):
+    """Unit level: expected hash/size are enforced on the copied bytes."""
+    import hashlib
+
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"evil-bytes")  # 10 bytes, same length as the expected content
+    expected = hashlib.sha256(b"model-v1!!").hexdigest()
+    src_fd = os.open(src, os.O_RDONLY)
+    try:
+        with pytest.raises(VerificationError):
+            _seal_fd(src_fd, expected_sha256=expected, expected_size=10)
+    finally:
+        os.close(src_fd)
+
+
 def test_seal_fd_copies_and_freezes(tmp_path):
     src = tmp_path / "src.bin"
     src.write_bytes(b"frozen-bytes")

@@ -5,3 +5,7 @@ __pycache__/
 demo/
 
 *.egg-info/
+
+# Local signer material from the ceremony walkthrough — never commit
+signer-key.txt
+signer-config.json

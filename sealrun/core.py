@@ -146,18 +146,42 @@ def load_private_key(path: Path) -> PrivKey:
     container for its checksum; the network version byte is not
     meaningful for off-chain manifest signing, so both known version
     bytes are accepted (chain use validates the network itself).
+
+    The file is opened once (O_NOFOLLOW where available) and the
+    permission check runs with fstat() on that descriptor, so the
+    bytes read are the bytes whose permissions were checked — no
+    stat-then-read window for a path swap between check and use.
     """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        mode = os.stat(path).st_mode
+        fd = os.open(path, flags)
     except OSError as exc:
+        raise VerificationError(f"cannot open private key: {path}") from exc
+    try:
+        mode = os.fstat(fd).st_mode
+    except OSError as exc:
+        os.close(fd)
         raise VerificationError(f"cannot stat private key: {path}") from exc
+    if not stat.S_ISREG(mode):
+        os.close(fd)
+        raise VerificationError(f"private key is not a regular file: {path}")
     if mode & 0o077:
+        os.close(fd)
         raise VerificationError(
             f"private key must not be group- or world-readable: {path}"
         )
     try:
-        return PrivKey.from_wif_any(path.read_text(encoding="ascii").strip())
-    except (ValueError, UnicodeDecodeError) as exc:
+        with os.fdopen(fd, "rb") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        raise VerificationError(f"cannot read private key: {path}") from exc
+    try:
+        text = raw.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise VerificationError("private key is not valid WIF") from exc
+    try:
+        return PrivKey.from_wif_any(text)
+    except ValueError as exc:
         raise VerificationError("private key is not valid WIF") from exc
 
 

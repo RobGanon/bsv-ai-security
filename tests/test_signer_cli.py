@@ -202,6 +202,30 @@ def test_password_record_is_not_plaintext():
     assert PASSWORD.encode() not in json.dumps(record).encode()
 
 
+# --- private file loading: one descriptor, no stat-then-read window --------
+
+
+def test_load_config_refuses_symlink(env):
+    """Regression (outside review, 2026-10-20): the config path is opened
+    once with O_NOFOLLOW and fstat()d on that descriptor, so a symlink
+    in place of the config is refused rather than checked-then-read."""
+    link = env["dir"] / "linked-config.json"
+    link.symlink_to(env["config_path"])
+    with pytest.raises(SignerError):
+        load_config(link)
+
+
+def test_load_signer_key_refuses_symlink(env):
+    from sealrun.signer_cli import load_signer_key
+
+    config = load_config(env["config_path"])
+    link = env["dir"] / "linked-key.txt"
+    link.symlink_to(env["key_path"])
+    config["key_file"] = "linked-key.txt"
+    with pytest.raises(SignerError):
+        load_signer_key(config, env["dir"])
+
+
 # --- hard rules: refused pre-approval, before any credential prompt --------
 
 

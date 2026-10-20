@@ -32,14 +32,19 @@ than guess.
 ``seal=True`` copies each verified artifact into a sealed memfd
 (``F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL``) before
 exec, so the child reads a frozen snapshot: even a writer with access to
-the original inode cannot change what the model sees. Sealing costs a
+the original inode cannot change what the model sees. The copy is
+re-hashed as it is made and compared against the manifest before
+sealing, so a mutation that lands between verification and the copy
+aborts the launch instead of reaching the child. Sealing costs a
 copy of every artifact into RAM, so it is opt-in.
 
 Residual limits are stated plainly because they matter:
 
 * Without ``seal`` the fd pins the *inode*, not its contents — a writer
   with access to the verified inode can still mutate it after hashing,
-  so the child may read changed bytes. ``seal=True`` removes this.
+  so the child may read changed bytes. ``seal=True`` removes this: the
+  sealed copy is verified against the manifest, and a change after the
+  copy cannot reach the frozen snapshot.
 * A swap of an *intermediate directory* component between the
   per-component walk in :func:`core._validated_entries` and the open in
   :func:`core._open_verified_fd` remains a narrow race; closing it fully
@@ -51,6 +56,7 @@ Residual limits are stated plainly because they matter:
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 import subprocess
@@ -98,12 +104,22 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[written:]
 
 
-def _seal_fd(src_fd: int, *, chunk: int = 1 << 20) -> int:
+def _seal_fd(src_fd: int, *, expected_sha256: str | None = None,
+             expected_size: int | None = None,
+             chunk: int = 1 << 20) -> int:
     """Copy the bytes at ``src_fd`` into a sealed memfd; return its fd.
 
     The returned descriptor reads the frozen snapshot: it rejects
     ``write``, ``ftruncate``, and further ``F_ADD_SEALS`` calls. The
     caller owns the descriptor and must close it.
+
+    When ``expected_sha256`` / ``expected_size`` are given (the values
+    the manifest verified), the copy is hashed as it is made and
+    compared before sealing: verification hashed the source earlier,
+    and a writer with access to the source inode could mutate it
+    between that hash and this copy. A mismatch aborts with
+    :class:`VerificationError` — the mutated bytes are never sealed
+    for the child.
     """
     if not hasattr(os, "memfd_create") or not hasattr(os, "MFD_ALLOW_SEALING"):
         raise VerificationError("sealing requires memfd_create (Linux)")
@@ -112,11 +128,25 @@ def _seal_fd(src_fd: int, *, chunk: int = 1 << 20) -> int:
     os.lseek(src_fd, 0, os.SEEK_SET)
     mem_fd = os.memfd_create("sealrun-artifact", os.MFD_ALLOW_SEALING)
     try:
+        digest = hashlib.sha256()
+        copied = 0
         while True:
             data = os.read(src_fd, chunk)
             if not data:
                 break
+            digest.update(data)
+            copied += len(data)
             _write_all(mem_fd, data)
+        if expected_size is not None and copied != expected_size:
+            raise VerificationError(
+                "sealed copy size does not match the verified artifact: "
+                f"{copied} != {expected_size}"
+            )
+        if expected_sha256 is not None and digest.hexdigest() != expected_sha256:
+            raise VerificationError(
+                "sealed copy hash does not match the verified artifact: "
+                "the source changed between verification and sealing"
+            )
         fcntl.fcntl(mem_fd, fcntl.F_ADD_SEALS, _SEAL_BITS)
         os.lseek(mem_fd, 0, os.SEEK_SET)
         return mem_fd
@@ -270,7 +300,11 @@ def launch(
         try:
             for artifact in artifacts:
                 if seal:
-                    fd = _seal_fd(artifact.handle.fileno())
+                    fd = _seal_fd(
+                        artifact.handle.fileno(),
+                        expected_sha256=artifact.sha256,
+                        expected_size=artifact.size,
+                    )
                     sealed_fds.append(fd)
                 else:
                     fd = artifact.handle.fileno()

@@ -14,6 +14,15 @@ asks "show me exactly what ran," most teams have only their word.
 
 This project gives you the evidence.
 
+> **For the non-technical reader.** Think of it as a tamper-proof logbook
+> for your AI. Before a model runs, the tool records a fingerprint of
+> everything about to be used — which model, which data, which settings.
+> After it runs, every security event goes into a chained record, where
+> editing any earlier entry breaks the chain for everything after it. If
+> an auditor or regulator ever asks "prove this is what ran," you show
+> them the logbook. And if you anchor the fingerprints to a public
+> ledger, even the logbook itself can never be quietly rewritten.
+
 ## Why use this
 
 - **Prove what ran, not what was supposed to run.** A signed manifest

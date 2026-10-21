@@ -58,6 +58,10 @@ is still open
 ([issue #4](https://github.com/RobGanon/bsv-ai-security/issues/4)) —
 we state that plainly because it matters.
 
+New to the tool? [`docs/using-sealrun.md`](docs/using-sealrun.md)
+walks the full flow — manifest, sign, launch, journal, proof — with
+a worked example you can run in about ten minutes.
+
 ## What it saves you in money
 
 No quantified case study exists yet — we will not invent savings

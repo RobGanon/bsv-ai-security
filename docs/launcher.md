@@ -32,6 +32,20 @@ sealrun launch \
 The command and its arguments follow `--` and are passed through
 unchanged. The launcher exits with the child's exit status.
 
+## What is bound to the manifest — and what is not
+
+The launcher guarantees the bytes behind the descriptors it passes
+to the child: each one matches the signed manifest, and the child
+also receives the verified manifest hash. The command after `--`
+is the operator's choice, passed through unchanged — the launcher
+does not require the executed program to be one of the manifest
+artifacts, and it cannot vouch for code the child loads outside
+those descriptors (an interpreter's own libraries, for example).
+Operators who want a script or executable itself pinned can list
+it as a manifest artifact and have the child execute or check the
+verified copy it receives. Deciding what to run remains the
+operator's responsibility.
+
 ## Environment contract
 
 The child receives the verified provenance alongside descriptors to the

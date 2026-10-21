@@ -153,6 +153,16 @@ still in progress.
   in the docs.
 - WoC-TTN's unspent index is broken; funding spends a known outpoint
   explicitly.
+- SPV header-chain verification validates each header's proof of
+  work against that header's own declared `bits`; it does not
+  validate the bits against BSV's difficulty-retarget rules or
+  compare cumulative work across competing chains. A fabricated
+  chain extending the pinned checkpoint could therefore declare
+  easier targets. This bounds the anchoring-evidence tier only —
+  the local verifier is unaffected — and Teratestnet proof of work
+  is minimal regardless. Validating the bits schedule is required
+  before any mainnet reliance. (Surfaced by an outside AI review
+  pass, Oct 2026; verified against `sealrun/spv.py`.)
 
 ## How to report
 

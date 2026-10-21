@@ -106,11 +106,15 @@ security. BSV's case is cost, frequency, and data fit, not
 maximum settlement depth.
 
 **Current status:** the publisher and broadcaster are live on
-Teratestnet. Two anchors are confirmed on-chain: anchor #1
+Teratestnet. Three anchors are confirmed on-chain: anchor #1
 (`4111b7cf9d42624be75aa78f5031caaebe4e836665b95fbcdbadbb086b2bf029`,
-block 36722) and anchor #2
+block 36722), anchor #2
 (`d8407bb7a60f23aadcf021e9cb0098c6ae362a519aa04cbd8536265519c09230`,
-block 36723). See `docs/anchoring-protocol.md` for the verifier
+block 36723), and anchor #3
+(`e3a95a6f1f65651949f8fc6ef1ce22292058502cc6a94aef0fb6a5143ffd28cb`,
+block 37163) — anchor #3 was signed by a human through the
+offline-signing ceremony below, not by the publisher. See
+`docs/anchoring-protocol.md` for the verifier
 procedure and what anchoring does and does not prove. Anchor signing
 goes through the offline-signing ceremony — the publisher exports an
 unsigned tx, a human-side signer signs it, and the publisher verifies

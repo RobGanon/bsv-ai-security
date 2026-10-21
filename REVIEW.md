@@ -83,6 +83,10 @@ Live anchors on Teratestnet (public on-chain data, verify against
   (block 36722), journal seq 1–3, genesis `prev_txid`
 - Anchor #2: `d8407bb7a60f23aadcf021e9cb0098c6ae362a519aa04cbd8536265519c09230`
   (block 36723), journal seq 4, `prev_txid` = anchor #1
+- Anchor #3: `e3a95a6f1f65651949f8fc6ef1ce22292058502cc6a94aef0fb6a5143ffd28cb`
+  (block 37163), journal seq 5, `prev_txid` = anchor #2 — signed by a
+  human through the offline-signing ceremony (see
+  `docs/offline-signing-handoff.md`), not by the publisher
 - Checkpoint block 36721:
   `0000000048cb33f8f96e4927e4e8066742076b180d7091c013e7e36d4b246eae`
 - Anchor pubkey:

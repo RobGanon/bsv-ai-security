@@ -111,10 +111,19 @@ class _Reader:
         if first < 0xFD:
             return first
         if first == 0xFD:
-            return struct.unpack("<H", self.read(2))[0]
+            val = struct.unpack("<H", self.read(2))[0]
+            if val < 0xFD:
+                raise BeefError("non-canonical CompactSize encoding")
+            return val
         if first == 0xFE:
-            return struct.unpack("<I", self.read(4))[0]
-        return struct.unpack("<Q", self.read(8))[0]
+            val = struct.unpack("<I", self.read(4))[0]
+            if val <= 0xFFFF:
+                raise BeefError("non-canonical CompactSize encoding")
+            return val
+        val = struct.unpack("<Q", self.read(8))[0]
+        if val <= 0xFFFFFFFF:
+            raise BeefError("non-canonical CompactSize encoding")
+        return val
 
     def done(self) -> bool:
         return self.pos == len(self.data)
@@ -169,13 +178,18 @@ def parse_beef(data: bytes) -> Beef:
                 f"transaction {len(txs)} has invalid Has-BUMP flag "
                 f"0x{flag:02x}"
             )
-        txid = tx.txid()
+        # Compute txid from raw bytes to bind txid to raw bytes (A10)
+        from .bsv import sha256d
+        raw_tx = data[tx_start : tx_start + consumed]
+        txid = sha256d(raw_tx)[::-1].hex()
+        if txid != tx.txid():
+            raise BeefError(f"transaction {len(txs)} txid does not match its raw bytes")
         if txid in seen:
             raise BeefError(f"duplicate txid {txid} in BEEF")
         seen.add(txid)
         txs.append(
             BeefTx(
-                raw=data[tx_start : tx_start + consumed],
+                raw=raw_tx,
                 txid=txid,
                 bump_index=bump_index,
             )
@@ -226,7 +240,9 @@ def beef_to_bytes(beef: Beef) -> bytes:
             raise BeefError(f"transaction {i}: {exc}") from exc
         if consumed != len(entry.raw):
             raise BeefError(f"transaction {i} raw has trailing bytes")
-        if tx.txid() != entry.txid.lower():
+        from .bsv import sha256d
+        raw_txid = sha256d(entry.raw)[::-1].hex().lower()
+        if raw_txid != entry.txid.lower() or tx.txid() != entry.txid.lower():
             raise BeefError(
                 f"transaction {i} txid does not match its raw bytes"
             )
@@ -286,7 +302,9 @@ class BeefVerifier:
             if consumed != len(tx.raw):
                 structural[key] = "raw tx has trailing bytes"
                 continue
-            if parsed_tx.txid() != key:
+            from .bsv import sha256d
+            raw_txid = sha256d(tx.raw)[::-1].hex().lower()
+            if parsed_tx.txid() != key or raw_txid != key:
                 structural[key] = "txid does not match raw bytes"
                 continue
             parsed[key] = parsed_tx

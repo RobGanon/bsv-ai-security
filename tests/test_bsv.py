@@ -275,10 +275,27 @@ def _broadcaster(transport: FakeTransport) -> WoCBroadcaster:
 
 
 def test_broadcaster_success_returns_txid_and_posts_op_return_tx():
-    transport = FakeTransport(broadcast_body='"' + "11" * 32 + '"')
+    from sealrun.bsv import Tx
+    from sealrun.broadcast import WoCBroadcaster as _WoCB
+    # compute local txid
+    from sealrun.broadcast import FundingUTXO, WIFSigner
+    signer = WIFSigner.from_wif(VECTOR_WIF)
+    tx = Tx.build_anchor(
+        funding=FundingUTXO(
+            txid=FAUCET_PREV_TXID, vout=FAUCET_PREV_VOUT,
+            value=FAUCET_PREV_VALUE, script_hex=FAUCET_PREV_SCRIPT,
+        ),
+        payload=PAYLOAD,
+        change_address=signer.address(network="testnet"),
+        fee_sats=500,
+        signer=signer,
+        network="testnet",
+    )
+    local = tx.txid()
+    transport = FakeTransport(broadcast_body='"' + local + '"')
     bc = _broadcaster(transport)
     txid = bc.broadcast(PAYLOAD.hex())
-    assert txid == "11" * 32
+    assert txid == local
     assert any(url.endswith("/tx/raw") for _, url in transport.calls)
 
 
@@ -290,13 +307,28 @@ def test_broadcaster_rejection_maps_to_rejected():
 
 
 def test_broadcaster_already_known_returns_local_txid():
+    from sealrun.bsv import Tx
+    from sealrun.broadcast import FundingUTXO, WIFSigner
+    signer = WIFSigner.from_wif(VECTOR_WIF)
+    tx = Tx.build_anchor(
+        funding=FundingUTXO(
+            txid=FAUCET_PREV_TXID, vout=FAUCET_PREV_VOUT,
+            value=FAUCET_PREV_VALUE, script_hex=FAUCET_PREV_SCRIPT,
+        ),
+        payload=PAYLOAD,
+        change_address=signer.address(network="testnet"),
+        fee_sats=500,
+        signer=signer,
+        network="testnet",
+    )
+    local = tx.txid()
     transport = FakeTransport(
-        broadcast_body='"258: txn-already-known"', broadcast_status=500
+        broadcast_body='"258: txn-already-known"', broadcast_status=200
     )
     bc = _broadcaster(transport)
     txid = bc.broadcast(PAYLOAD.hex())
     # Already-known is success: the returned txid is the locally computed one.
-    assert len(txid) == 64 and txid != "11" * 32
+    assert txid == local
 
 
 def test_broadcaster_unreachable_maps_to_unavailable():
@@ -381,13 +413,29 @@ def test_cli_publish_broadcast_refuses_without_wif(tmp_path, monkeypatch):
 
 def test_publisher_broadcasts_through_real_broadcaster(tmp_path):
     from sealrun.core import append_audit_event
+    from sealrun.bsv import Tx
+    from sealrun.broadcast import FundingUTXO, WIFSigner
 
     journal = tmp_path / "journal.jsonl"
     journal.touch()
     append_audit_event(journal, "verify", "test event one")
     append_audit_event(journal, "verify", "test event two")
     record_path = tmp_path / "anchors.json"
-    transport = FakeTransport(broadcast_body='"' + "22" * 32 + '"')
+    # compute local txid
+    from sealrun import anchor
+    fields = anchor.create_anchor_payload(journal, start_seq=1, prev_txid="0"*64)
+    payload = bytes.fromhex(fields["payload_hex"])
+    signer = WIFSigner.from_wif(VECTOR_WIF)
+    tx = Tx.build_anchor(
+        funding=FundingUTXO(txid=FAUCET_PREV_TXID, vout=FAUCET_PREV_VOUT,
+                            value=FAUCET_PREV_VALUE, script_hex=FAUCET_PREV_SCRIPT),
+        payload=payload,
+        change_address=signer.address(network="testnet"),
+        fee_sats=500,
+        signer=signer,
+        network="testnet",
+    )
+    transport = FakeTransport(broadcast_body='"' + tx.txid() + '"')
     publisher = Publisher(
         PublisherConfig(
             journal=journal,
@@ -398,10 +446,10 @@ def test_publisher_broadcasts_through_real_broadcaster(tmp_path):
     )
     record = publisher.build_checkpoint(reason="scheduled")
     assert record["status"] == "broadcast"
-    assert record["txid"] == "22" * 32
+    assert record["txid"] == tx.txid()
     assert record["start_seq"] == 1
     assert record["end_seq"] == 2
-    assert record["prev_txid"] == "00" * 32  # genesis: no prior anchor
+    assert record["prev_txid"] == "0" * 64  # genesis: no prior anchor
 
 
 def test_broadcaster_rejects_sub_satoshi_funding_value():

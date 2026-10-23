@@ -30,8 +30,9 @@ written summary they can use internally.
 - Test suite passing — see [`REVIEW.md`](../REVIEW.md) for the current
   count and evidence.
 - Independent security review still open (issue #4).
-- Two live anchors confirmed on Teratestnet (demo chain); mainnet
-  anchoring is a later step, not part of the pilot.
+- Three live anchors confirmed on Teratestnet (demo chain); the
+  third was signed by a human through the offline-signing ceremony.
+  Mainnet anchoring is a later step, not part of the pilot.
 - Proves what ran — does *not* certify compliance, and does not stop
   data scraping.
 - No quantified case study exists until a pilot measures one.

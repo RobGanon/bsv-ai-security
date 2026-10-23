@@ -163,9 +163,16 @@ still in progress.
   is minimal regardless. Validating the bits schedule is required
   before any mainnet reliance. (Surfaced by an outside AI review
   pass, Oct 2026; verified against `sealrun/spv.py`.)
+- The three live anchors were created manually, ad hoc — the demo
+  is not yet anchored on the protocol's §8 cadence
+  (`anchor_every_n_events` / `anchor_every_t_seconds`), so the
+  unanchored-tail window described in §8 is longer than the policy
+  intends. Anchor timing itself is not yet in review scope.
 
 ## How to report
 
 File findings on issue #4, or open a PR. There is no bug bounty.
+A clean pass is worth reporting too — "no findings in this scope"
+is evidence, and we want it distinguished from "never reviewed".
 Time estimate (rough): a few hours for the core verifier,
 about a day for the full scope above.

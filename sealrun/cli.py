@@ -165,11 +165,13 @@ def main(argv=None):
                    help="path to the signed manifest envelope JSON being adopted; "
                    "the acceptance is bound to this manifest's hash")
     p.add_argument("--manifest-hash", default=None,
-                   help="manifest hash (64 hex) to bind the acceptance to; "
-                   "alternative to --manifest when only the hash is at hand")
+                   help="manifest hash (64 hex) to cross-check --manifest against; "
+                   "it cannot be used on its own, because an unverifiable binding "
+                   "would poison the journal permanently")
     p.add_argument("--public-key", type=Path, default=None,
                    help="trusted manifest-signing public key (compressed hex); "
-                   "when provided with --manifest, verify the manifest signature before recording")
+                   "required with --manifest, so the manifest signature is verified "
+                   "before the acceptance is recorded")
 
     p = sub.add_parser("anchor-payload", help="prepare unsigned BSV anchor payload bytes (no broadcast)")
     p.add_argument("--journal", required=True, type=Path)
@@ -368,50 +370,45 @@ def main(argv=None):
             count = verify_audit_journal(args.journal)
             print(f"AUDIT OK: {count} event(s)")
         elif args.command == "audit-manifest-accepted":
-            manifest_obj = None
-            if args.manifest is not None:
-                manifest_obj = _read_json(args.manifest)
-            if args.manifest is not None and args.manifest_hash is not None:
-                from_hash = manifest_hash(manifest_obj)
-                if from_hash != args.manifest_hash.lower():
+            # An acceptance is bound to exactly one signed manifest, and
+            # that binding is checked HERE, at record time. An acceptance
+            # that cannot be checked against a trusted key is refused:
+            # the journal is append-only and hash-chained, so an
+            # acceptance bound to a manifest that can never verify
+            # (a wrong hash, or a manifest with a bad signature) would
+            # poison the journal permanently, while `audit-verify` kept
+            # reporting it as healthy.
+            if args.manifest is None:
+                raise VerificationError(
+                    "audit-manifest-accepted requires --manifest (the signed "
+                    "manifest envelope) and --public-key (the trusted "
+                    "manifest-signing key) so the acceptance can be verified "
+                    "before it is recorded; --manifest-hash alone cannot be "
+                    "verified and is refused"
+                )
+            if args.public_key is None:
+                raise VerificationError(
+                    "audit-manifest-accepted requires --public-key to verify "
+                    "the manifest signature before recording"
+                )
+            manifest_obj = _read_json(args.manifest)
+            bound_hash = manifest_hash(manifest_obj)
+            if args.manifest_hash is not None:
+                if bound_hash != args.manifest_hash.lower():
                     raise VerificationError(
                         "--manifest and --manifest-hash disagree on the manifest hash"
                     )
-            if args.manifest is not None and args.public_key is not None:
-                from .core import _load_verified_payload
-                pubkey = load_public_key(args.public_key)
-                payload = _load_verified_payload(manifest_obj, pubkey)
-                # Enforce release identity consistency at record time too
-                if payload.get("release_id") != args.release_id:
-                    raise VerificationError(
-                        "release_id does not match the manifest"
-                    )
-                if payload.get("release_seq") != args.release_seq:
-                    raise VerificationError(
-                        "release_seq does not match the manifest"
-                    )
-            elif args.manifest is not None and args.public_key is None:
-                # If a manifest is provided but no public key to verify it,
-                # still require explicit trust? The core issue is recording
-                # against invalid signatures. We enforce verification when
-                # public key is supplied; otherwise we preserve behavior but
-                # must note - but better to be strict. However to minimize
-                # breakage while fixing the critical issue, require pubkey
-                # when manifest is given? Or just allow but it's still risky.
-                # Looking at review: "require signature verification in 
-                # audit-manifest-accepted (add --public-key) and fail at record time"
+            from .core import _load_verified_payload
+            pubkey = load_public_key(args.public_key)
+            payload = _load_verified_payload(manifest_obj, pubkey)
+            # Enforce release identity consistency at record time too
+            if payload.get("release_id") != args.release_id:
                 raise VerificationError(
-                    "audit-manifest-accepted with --manifest requires "
-                    "--public-key to verify the manifest signature before recording"
+                    "release_id does not match the manifest"
                 )
-            if args.manifest is not None:
-                bound_hash = manifest_hash(manifest_obj)
-            elif args.manifest_hash is not None:
-                bound_hash = args.manifest_hash
-            else:
+            if payload.get("release_seq") != args.release_seq:
                 raise VerificationError(
-                    "audit-manifest-accepted requires --manifest or --manifest-hash "
-                    "to bind the acceptance to a manifest (issue #11)"
+                    "release_seq does not match the manifest"
                 )
             event = record_manifest_acceptance(
                 args.journal, args.release_seq, args.release_id, bound_hash

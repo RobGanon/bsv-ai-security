@@ -21,7 +21,8 @@ sealrun audit-manifest-accepted \
   --journal demo/audit.jsonl \
   --release-seq 3 \
   --release-id demo-release-003 \
-  --manifest demo/manifest-signed.json
+  --manifest demo/manifest-signed.json \
+  --public-key demo/public.pub
 sealrun anchor-payload \
   --journal demo/audit.jsonl \
   --start-seq 1 \
@@ -30,12 +31,17 @@ sealrun anchor-payload \
   --output demo/anchor-payload.json
 ```
 
-`--manifest` may be repeated to supply several envelopes; `--manifest-hash`
-is an alternative to `--manifest` on `audit-manifest-accepted` when only
-the hash is at hand. If the journal contains any acceptance,
-`anchor-payload` requires the manifests plus the trusted manifest-signing
-public key; a journal with no acceptance needs neither and anchors
-`release_seq = 0`.
+`--manifest` may be repeated to supply several envelopes.
+`audit-manifest-accepted` requires `--manifest` **and** `--public-key`:
+the manifest's signature is verified against the trusted key *before* the
+acceptance is recorded, because an acceptance that cannot be verified
+would bind the journal to a manifest that can never satisfy it — and the
+journal is append-only, so that binding could not be undone.
+`--manifest-hash` may be supplied alongside `--manifest` as a
+cross-check of the hash, but never on its own. If the journal contains
+any acceptance, `anchor-payload` requires the manifests plus the trusted
+manifest-signing public key; a journal with no acceptance needs neither
+and anchors `release_seq = 0`.
 
 `start-seq` is the first event covered by this interval. The anchored
 `release_seq` is **derived from the journal**, not supplied by the caller:

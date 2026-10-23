@@ -11,6 +11,7 @@ block 36722 BUMP + the real anchor #1 tx + a child spending anchor
 
 import copy
 import json
+import struct
 
 import pytest
 
@@ -158,6 +159,130 @@ def test_parse_beef_rejects_duplicate_txid():
     )
     with pytest.raises(ValueError):
         parse_beef(raw)
+
+
+def _noncanonical_tx_fixture(*, field: str) -> tuple[bytes, bytes]:
+    """Return ``(raw, canonical)`` for a tx with a non-canonical varint.
+
+    A trivially-valid tx (version 1, one null-prevout input, one
+    empty-script output) is built twice: once with the CompactSize
+    varint for the chosen ``field`` non-canonically encoded (a
+    ``0xfd``-prefixed encoding of a value below ``0xFD``), and once
+    with the canonical single-byte encoding. The two byte strings
+    describe the *same logical transaction*, so a parser that ignores
+    canonicality re-serializes ``raw`` to ``canonical`` and reports a
+    txid that ``raw`` does not hash to.
+    """
+    from sealrun.bsv import _varint
+
+    def build(noncanonical: bool) -> bytes:
+        out = bytearray()
+        out += struct.pack("<i", 1)  # version
+        # input count
+        if field == "input_count" and noncanonical:
+            out += b"\xfd" + struct.pack("<H", 1)
+        else:
+            out += _varint(1)
+        # single input: null prevout, index 0, empty scriptSig, sequence
+        out += b"\x00" * 32
+        out += struct.pack("<I", 0)
+        out += b"\x00"  # empty scriptSig
+        out += struct.pack("<I", 0xFFFFFFFF)
+        # output count
+        out += _varint(1)
+        out += struct.pack("<q", 0)  # value 0
+        # output script length
+        if field == "output_script_len" and noncanonical:
+            out += b"\xfd" + struct.pack("<H", 0)
+        else:
+            out += b"\x00"
+        out += struct.pack("<I", 0)  # locktime
+        return bytes(out)
+
+    raw = build(True)
+    canonical = build(False)
+    assert raw != canonical
+    return raw, canonical
+
+
+def test_parse_beef_rejects_noncanonical_varint():
+    """A10 regression: a BEEF carrying a non-canonical CompactSize
+    varint must be rejected outright, not quietly re-serialized.
+
+    On the unfixed code this envelope parses "successfully" and the
+    reported txid is the hash of the *canonical* re-serialization,
+    not of the bytes in the envelope.
+    """
+    from sealrun.bsv import sha256d
+
+    for field in ("input_count", "output_script_len"):
+        tx_raw, canonical = _noncanonical_tx_fixture(field=field)
+        # Sanity: the two encodings really do hash differently, so a
+        # parse that accepts the envelope is reporting a txid the raw
+        # bytes do not commit to.
+        assert sha256d(canonical) != sha256d(tx_raw)
+
+        envelope = BEEF_MAGIC + bytes([0, 1]) + tx_raw + bytes([0])
+        with pytest.raises(ValueError):
+            parse_beef(envelope)
+
+
+def test_parse_beef_rejects_txid_that_does_not_match_raw_bytes():
+    """A10 regression: the txid a BEEF reports must be the hash of the
+    exact raw bytes it carries.
+
+    The envelope below has well-formed structure but its raw tx bytes
+    are non-canonical, so ``sha256d(raw)`` differs from
+    ``sha256d(canonical)``. The unfixed parser reports the latter
+    while keeping the non-canonical bytes as ``raw`` — so the reported
+    txid is *not* the txid of the bytes the consumer re-hashes. The
+    parser, the encoder, and the verifier must all refuse it.
+    """
+    from sealrun.bsv import sha256d
+
+    tx_raw, canonical = _noncanonical_tx_fixture(field="input_count")
+    claimed = sha256d(canonical)[::-1].hex()
+    assert claimed != sha256d(tx_raw)[::-1].hex()
+
+    # parse_beef must reject it (raw-bytes binding).
+    envelope = BEEF_MAGIC + bytes([0, 1]) + tx_raw + bytes([0])
+    with pytest.raises(ValueError):
+        parse_beef(envelope)
+
+    # A hand-built Beef carrying the mismatched pair must also be
+    # refused at encode time (beef_to_bytes) and flagged by the
+    # verifier as "txid does not match raw bytes".
+    bad = Beef(bumps=(), txs=(BeefTx(raw=tx_raw, txid=claimed, bump_index=None),))
+    with pytest.raises(ValueError):
+        beef_to_bytes(bad)
+
+    verdict = BeefVerifier(_RejectingFetcher()).verify_beef(bad)
+    assert verdict.verified is False
+    reason = verdict.per_tx[claimed]["reason"]
+    # The entry must be rejected for a raw-bytes reason: either the
+    # varint canonicality check fires first, or (on a canonical-but-
+    # mismatched pair) the raw-bytes binding check does.
+    assert (
+        "does not match raw bytes" in reason
+        or "non-canonical CompactSize" in reason
+    )
+
+
+class _RejectingFetcher:
+    """A BlockFetcher that fails every fetch: these cases must never
+    reach a network call — the structural rejection happens first."""
+
+    def fetch_tx(self, _txid: str):
+        raise AssertionError("verifier must not fetch for a malformed BEEF")
+
+    def fetch_tx_full(self, _txid: str):
+        raise AssertionError("verifier must not fetch for a malformed BEEF")
+
+    def fetch_block(self, _height: int):
+        raise AssertionError("verifier must not fetch for a malformed BEEF")
+
+    def fetch_header(self, _height: int):
+        raise AssertionError("verifier must not fetch for a malformed BEEF")
 
 
 def test_beef_to_bytes_rejects_bad_bump_index():

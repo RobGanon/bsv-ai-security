@@ -57,10 +57,14 @@ The flow:
    against the last anchor you know of.
 3. **Authenticate + approve.** Username, password (no echo), then the
    current TOTP code from your authenticator app. Authentication
-   unlocks signing for this one transaction only. The approval is
-   bound to the exact hash of the unsigned transaction — any byte
-   change voids it, and the signer re-hashes and re-checks the rules
-   immediately before signing.
+   unlocks signing for this one transaction only. The TOTP code is
+   **single-use**: the time-step it matched is recorded, and the same
+   code is refused from then on — one code signs exactly one
+   transaction, even if it is observed (shoulder-surf, screen
+   recording) or re-presented within the same 30-second step. The
+   approval is bound to the exact hash of the unsigned transaction —
+   any byte change voids it, and the signer re-hashes and re-checks the
+   rules immediately before signing.
 4. **Sign.** The signer prints `SIGNED_TX_HEX=<hex>` and the signed
    txid. Hand the signed hex to the builder for broadcast.
 
@@ -91,6 +95,14 @@ is a normal outcome — there is no emergency override.
 - **Authentication failure** (wrong username, password, or TOTP):
   refused, recorded as `auth_failure`. The message does not say which
   factor failed.
+- **TOTP code already used**: refused, recorded as `auth_failure` with
+  the reason `TOTP code replay refused (code already used)`. The code
+  was valid — it is refused because it has already signed a
+  transaction. Wait for the next code; there is no way to reuse one.
+- **TOTP single-use state unreadable or corrupt**: refused. The signer
+  will not guess, because a lost state file could otherwise let a
+  used code be accepted again. Restore the file (it lives next to the
+  config, `totp-state.json`) or re-initialize the signer.
 - **Key file / config group- or world-readable**: refused. Fix with
   `chmod 0600` (but if the key was ever readable by others, treat it
   as compromised: rotate).
@@ -101,12 +113,46 @@ is a normal outcome — there is no emergency override.
   addressed on its own terms.
 - **Human unavailable**: requests wait. Nothing signs without a human.
 
+## TOTP single-use state
+
+The TOTP secret is static, and a TOTP code is valid for a whole
+30-second step (plus a one-step clock-skew tolerance). Without
+single-use enforcement, one observed code would authorize an unbounded
+number of signatures within that window. The signer therefore records
+the time-step of every accepted code and refuses any code from that
+step or an earlier one.
+
+The state lives in `totp-state.json`, next to the signer config. It
+holds one integer (`last_used_step`) and no secret material. It is
+written atomically (temp file → fsync → rename) with `0600`
+permissions, and the check-and-consume sequence is guarded by an
+exclusive lock on `totp-state.json.lock`, so two concurrent ceremonies
+cannot both consume the same code — exactly one of them signs.
+
+**Limits, stated honestly:**
+
+- Deleting `totp-state.json` resets the protection: the next code
+  works as if none had been used. Keep the signer's directory
+  integrity the same way you keep the key file's — anyone who can
+  delete this file can already read the key.
+- The file is plain state, not a secret. It reveals roughly when the
+  last signing happened; it does not enable a signature.
+- There is **no TOTP rotation command yet**. The secret is printed
+  once by `init` and is never re-keyed. If the config is ever exposed,
+  the second factor is permanently bypassed — treat a config leak as
+  a full compromise and re-initialize the signer. Rotation tooling is
+  tracked as a follow-up.
+
 ## Audit log
 
 Every request, refusal, authentication failure, and signature is
 appended as JSONL to the configured log file (`signer-audit.jsonl`
 next to the config by default): timestamp, txid, decision, rule /
-reason. No passwords, TOTP codes, or key material are ever logged.
+reason. A rejected TOTP replay is recorded with a distinct reason
+(`TOTP code replay refused (code already used)`) — the other factor
+failures stay opaque so the log does not tell an attacker which
+factor to work on. No passwords, TOTP codes, or key material are ever
+logged.
 A failed audit write fails the operation: a signed transaction must
 not go unrecorded.
 

@@ -1,1 +1,1 @@
-Fixed: A1, A2, A3, A5, A10, A6. Tests: 590 passed. Next task: A4, TOTP single-use enforcement in the signer. Status: unverified work in progress.
+Fixed: A1, A2, A3, A5, A10, A6, A4. Tests: 602 passed. Next task: A8/A9 (authenticate `signer expect`; require an explicit override flag for `--expected-payload`). Status: unverified work in progress.

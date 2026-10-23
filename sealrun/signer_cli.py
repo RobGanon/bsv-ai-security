@@ -8,6 +8,12 @@ the decoded transaction for human review, requires username + password
 + TOTP authentication for this one transaction only, binds the
 approval to the exact hash of the unsigned transaction, and signs.
 
+Authentication is single-use: the TOTP time-step of an accepted code
+is persisted (in ``totp-state.json`` next to the config) and the same
+code is refused afterwards, so an observed code authorizes exactly one
+signature. The check-and-consume sequence is guarded by an exclusive
+lock, so concurrent ceremonies cannot both consume the same code.
+
 Stdlib only. No network access anywhere in this module: the signer
 never fetches anything and never broadcasts; the builder broadcasts
 the signed transaction separately.
@@ -44,9 +50,15 @@ import stat
 import struct
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-Unix platforms
+    fcntl = None  # type: ignore[assignment]
 
 from .anchor import decode_anchor_payload
 from .bsv import (
@@ -69,6 +81,11 @@ TOTP_WINDOW_STEPS = 1
 TOTP_DEFAULT_DIGITS = 6
 DEFAULT_FEE_CAP_SATS = 2000
 CONFIG_VERSION = 1
+# Name of the single-use TOTP state file, resolved next to the config.
+TOTP_STATE_FILENAME = "totp-state.json"
+# Sentinel meaning "no code has been consumed yet".
+NO_TOTP_STEP_USED = -1
+
 
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
@@ -118,6 +135,35 @@ def totp_code(secret_b32: str, timestamp: float, *, digits: int = TOTP_DEFAULT_D
     return _hotp(secret, int(timestamp) // step, digits)
 
 
+def totp_matching_step(secret_b32: str, code: str, timestamp: float, *,
+                       digits: int = TOTP_DEFAULT_DIGITS,
+                       window: int = TOTP_WINDOW_STEPS,
+                       step: int = TOTP_STEP_SECONDS) -> int | None:
+    """Return the HOTP time-step a code matches, or None.
+
+    Accepts +-``window`` steps of clock skew (the same tolerance as
+    :func:`totp_verify`) and returns the integer counter
+    ``int(timestamp) // step`` of the matching step — the value a
+    single-use check persists so the same code can never be replayed.
+    Fails closed (None) on malformed input or a bad secret.
+    """
+    code = code.strip()
+    if not code.isdigit() or len(code) != digits:
+        return None
+    now_step = int(timestamp) // step
+    try:
+        for delta in range(-window, window + 1):
+            candidate = now_step + delta
+            expected = totp_code(
+                secret_b32, candidate * step, digits=digits, step=step
+            )
+            if hmac.compare_digest(expected, code):
+                return candidate
+    except SignerError:
+        return None
+    return None
+
+
 def totp_verify(secret_b32: str, code: str, timestamp: float, *,
                 digits: int = TOTP_DEFAULT_DIGITS,
                 window: int = TOTP_WINDOW_STEPS,
@@ -125,18 +171,16 @@ def totp_verify(secret_b32: str, code: str, timestamp: float, *,
     """Verify a TOTP code, accepting +-``window`` steps of clock skew.
 
     Fails closed (False) on malformed input or a bad secret.
+
+    Note: this is a *stateless* check and does NOT enforce single use.
+    Callers that gate a privileged action must use
+    :func:`totp_matching_step` together with the persisted last-used
+    step (see :func:`_authenticate`) so one code authorizes exactly
+    one action.
     """
-    code = code.strip()
-    if not code.isdigit() or len(code) != digits:
-        return False
-    try:
-        for delta in range(-window, window + 1):
-            expected = totp_code(secret_b32, timestamp + delta * step, digits=digits, step=step)
-            if hmac.compare_digest(expected, code):
-                return True
-    except SignerError:
-        return False
-    return False
+    return totp_matching_step(
+        secret_b32, code, timestamp, digits=digits, window=window, step=step
+    ) is not None
 
 
 # --- password hashing (PBKDF2-HMAC-SHA256) ----------------------------------
@@ -341,6 +385,169 @@ def _append_log(config: dict[str, Any], config_dir: Path, entry: dict[str, Any])
             f.write(line)
     except OSError as exc:
         raise SignerError(f"cannot write signer audit log: {log_path}") from exc
+
+
+# --- TOTP single-use state ---------------------------------------------------
+#
+# A TOTP code is valid for a whole 30-second step (and the +-1 step
+# skew window), so a stateless check lets one observed code authorize
+# an unbounded number of signatures. The signer therefore persists the
+# HOTP time-step of the last consumed code and refuses any code whose
+# matched step is not strictly newer. The state lives in a small file
+# next to the config, written atomically and guarded by an exclusive
+# lock so two concurrent ceremonies cannot both consume the same step.
+
+
+def _totp_state_path(config_dir: Path) -> Path:
+    return config_dir / TOTP_STATE_FILENAME
+
+
+@contextmanager
+def _totp_state_lock(config_dir: Path) -> Iterator[None]:
+    """Hold an exclusive lock over the TOTP state file.
+
+    The lock is advisory and process-local, but it is what makes the
+    check-and-consume sequence atomic between two signer invocations
+    sharing one state file: the second one blocks here, then reads
+    the state the first one already advanced.
+    """
+    lock_path = config_dir / (TOTP_STATE_FILENAME + ".lock")
+    if fcntl is None:  # pragma: no cover - non-Unix platforms
+        raise SignerError(
+            "cannot lock the TOTP single-use state: this platform has no "
+            "file locking, so single use cannot be guaranteed; refusing to sign"
+        )
+    flags = os.O_RDWR | os.O_CREAT | _O_NOFOLLOW
+    try:
+        fd = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise SignerError(
+            f"cannot open TOTP state lock: {lock_path}"
+        ) from exc
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError as exc:
+            raise SignerError(
+                f"cannot lock TOTP state: {lock_path}"
+            ) from exc
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+
+
+def _read_last_used_step(config_dir: Path) -> int:
+    """Return the last consumed TOTP time-step, or ``NO_TOTP_STEP_USED``.
+
+    A missing state file means no code has been consumed yet. A
+    malformed or unreadable state file is a fail-closed condition:
+    it could mean a consumed code would be accepted again, so the
+    signer refuses rather than guessing.
+    """
+    state_path = _totp_state_path(config_dir)
+    # lexists, not exists: a *broken symlink* must not read as
+    # "no state yet" (that would silently reset single-use
+    # protection). It is read below, where O_NOFOLLOW refuses it
+    # and the signer fails closed.
+    if not os.path.lexists(state_path):
+        return NO_TOTP_STEP_USED
+    try:
+        text = _read_private_text(state_path, "TOTP state file")
+    except SignerError as exc:
+        raise SignerError(
+            "cannot read the TOTP single-use state; refusing to sign because "
+            "a previously used code might be accepted again "
+            f"({exc})"
+        ) from exc
+    try:
+        state = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise SignerError(
+            "TOTP single-use state is corrupt; refusing to sign because a "
+            "previously used code might be accepted again"
+        ) from exc
+    if not isinstance(state, dict):
+        raise SignerError(
+            "TOTP single-use state is malformed; refusing to sign because a "
+            "previously used code might be accepted again"
+        )
+    last = state.get("last_used_step")
+    if not isinstance(last, int) or isinstance(last, bool) or last < NO_TOTP_STEP_USED:
+        raise SignerError(
+            "TOTP single-use state is malformed; refusing to sign because a "
+            "previously used code might be accepted again"
+        )
+    return last
+
+
+def _write_last_used_step(config_dir: Path, step: int) -> None:
+    """Persist the consumed TOTP time-step atomically.
+
+    Written to a temporary file in the same directory, fsynced, then
+    renamed into place: a crash can leave the old state or the new
+    state, never a half-written one. The rename is atomic, so a
+    reader never sees a truncated file.
+    """
+    state_path = _totp_state_path(config_dir)
+    payload = json.dumps({"last_used_step": step}, indent=2, sort_keys=True) + "\n"
+    tmp_path = state_path.with_name(f".{TOTP_STATE_FILENAME}.tmp")
+    # O_EXCL: never write through a pre-created file (it could be
+    # someone else's inode). A stale temp file left behind by a
+    # crashed run is removed and recreated.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW
+    try:
+        fd = os.open(tmp_path, flags, 0o600)
+    except FileExistsError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        try:
+            fd = os.open(tmp_path, flags, 0o600)
+        except OSError as exc:
+            raise SignerError(
+                f"cannot write TOTP single-use state: {tmp_path}"
+            ) from exc
+    except OSError as exc:
+        raise SignerError(
+            f"cannot write TOTP single-use state: {tmp_path}"
+        ) from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            # fchmod on the descriptor: the mode is set on the inode
+            # being written, so a path swap cannot redirect it.
+            try:
+                os.fchmod(handle.fileno(), 0o600)
+            except OSError:
+                pass
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        raise SignerError(
+            f"cannot write TOTP single-use state: {tmp_path}"
+        ) from exc
+    try:
+        os.replace(tmp_path, state_path)
+    except OSError as exc:
+        raise SignerError(
+            f"cannot install TOTP single-use state: {state_path}"
+        ) from exc
+    # fsync the directory so the rename itself is durable.
+    try:
+        dir_fd = os.open(config_dir, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
 
 
 # --- transaction decoding (uses the existing Tx parser) --------------------
@@ -569,10 +776,21 @@ def sign_approved_tx(tx: Tx, approved_txid: str, config: dict[str, Any],
 
 def _authenticate(config: dict[str, Any], *, input_fn: Callable[[str], str],
                   getpass_fn: Callable[[str], str],
-                  time_fn: Callable[[], float]) -> bool:
+                  time_fn: Callable[[], float],
+                  config_dir: Path | None = None) -> bool:
     """Username + password + TOTP for this one transaction only.
 
     Returns False without saying which factor failed.
+
+    The TOTP factor is **single-use**: the time-step of an accepted
+    code is persisted and any code from that step (or an older one)
+    is refused afterwards, so an observed code authorizes exactly one
+    signature. The step is consumed *before* the key is loaded and
+    the transaction is signed — a code that was accepted is never
+    accepted again, even if the ceremony fails afterwards.
+
+    ``config_dir`` is where the single-use state lives; it defaults
+    to the current directory.
     """
     username = input_fn("Username: ")
     password = getpass_fn("Password: ")
@@ -582,10 +800,34 @@ def _authenticate(config: dict[str, Any], *, input_fn: Callable[[str], str],
     if not verify_password(password, config["password"]):
         return False
     totp = config["totp"]
-    if not totp_verify(
-        totp["secret"], code, time_fn(), digits=totp.get("digits", TOTP_DEFAULT_DIGITS)
-    ):
-        return False
+    if config_dir is None:
+        config_dir = Path.cwd()
+    # Hold the lock across read-check-consume so two concurrent
+    # ceremonies cannot both consume the same time-step.
+    with _totp_state_lock(config_dir):
+        matched_step = totp_matching_step(
+            totp["secret"], code, time_fn(),
+            digits=totp.get("digits", TOTP_DEFAULT_DIGITS),
+        )
+        if matched_step is None:
+            return False
+        last_used = _read_last_used_step(config_dir)
+        if matched_step <= last_used:
+            # A code from this step (or an earlier one) was already
+            # used. Refuse: one code authorizes exactly one signature.
+            # Recorded distinctly: a replay attempt is worth seeing in
+            # the audit log, unlike the other factor failures whose
+            # cause is deliberately not disclosed.
+            try:
+                _append_log(config, config_dir, {
+                    "decision": "auth_failure",
+                    "reason": "TOTP code replay refused (code already used)",
+                })
+            except SignerError:
+                pass  # the refusal stands even if the audit write fails
+            return False
+        # Burn the step before anything is signed.
+        _write_last_used_step(config_dir, matched_step)
     return True
 
 
@@ -638,7 +880,8 @@ def sign_flow(config_path: str | Path, tx_hex: str, *,
         "reason": "signing requested",
     })
     output_fn(format_review(tx, info, config))
-    if not _authenticate(config, input_fn=input_fn, getpass_fn=getpass_fn, time_fn=time_fn):
+    if not _authenticate(config, input_fn=input_fn, getpass_fn=getpass_fn,
+                         time_fn=time_fn, config_dir=config_dir):
         _append_log(config, config_dir, {
             "decision": "auth_failure", "txid": info["unsigned_txid"],
             "reason": "authentication failed",

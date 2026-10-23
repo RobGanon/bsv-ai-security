@@ -342,6 +342,7 @@ def test_cli_audit_manifest_accepted_and_anchor(tmp_path, capsys):
             "--release-seq", "7",
             "--release-id", "release-7",
             "--manifest", str(envelope),
+            "--public-key", str(pub),
         ])
         == 0
     )

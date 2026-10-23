@@ -395,6 +395,256 @@ def test_wrong_totp_rejected(env):
                   output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
 
 
+# --- TOTP single use (A4) ---------------------------------------------------
+#
+# A TOTP code is valid for a whole 30-second step, so a stateless
+# check lets one observed code authorize an unbounded number of
+# signatures. The signer must consume the step: one code, one
+# signature.
+
+
+def test_totp_code_cannot_be_replayed(env):
+    """A4 regression: the same TOTP code must not authorize a second
+    signature.
+
+    On the unfixed code both ceremonies succeed — the code is valid
+    for the whole step, and nothing records that it was already used.
+    """
+    tx = _unsigned_tx(env)
+    input_fn, getpass_fn = _auth_fns(env)
+
+    first = sign_flow(env["config_path"], tx.serialize().hex(),
+                      expected_payload_hex=env["payload"].hex(),
+                      input_fn=input_fn, getpass_fn=getpass_fn,
+                      output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+    assert first
+
+    # The very same code, presented again in the same time step.
+    replay_fn, replay_getpass = _auth_fns(env)
+    with pytest.raises(SignerError, match="authentication failed"):
+        sign_flow(env["config_path"], tx.serialize().hex(),
+                  expected_payload_hex=env["payload"].hex(),
+                  input_fn=replay_fn, getpass_fn=replay_getpass,
+                  output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+
+
+def test_totp_code_cannot_be_replayed_for_a_different_transaction(env):
+    """A4 regression: a replayed code must not sign a *different*
+    transaction either — the code is consumed, not the transaction."""
+    first_tx = _unsigned_tx(env)
+    input_fn, getpass_fn = _auth_fns(env)
+    sign_flow(env["config_path"], first_tx.serialize().hex(),
+              expected_payload_hex=env["payload"].hex(),
+              input_fn=input_fn, getpass_fn=getpass_fn,
+              output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+
+    # A different (but equally valid) transaction, same code.
+    other_tx = _unsigned_tx(env, change_value=UTXO_VALUE - FEE - 1)
+    replay_fn, replay_getpass = _auth_fns(env)
+    with pytest.raises(SignerError, match="authentication failed"):
+        sign_flow(env["config_path"], other_tx.serialize().hex(),
+                  expected_payload_hex=env["payload"].hex(),
+                  input_fn=replay_fn, getpass_fn=replay_getpass,
+                  output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+
+
+def test_totp_step_is_consumed_across_skew_window(env):
+    """A4 regression: the skew window must not reopen a consumed step.
+
+    ``_auth_fns`` builds a code for the current step. A code from the
+    *previous* step is also inside the accepted +-1 step window, so it
+    is a valid code — but it must be refused once the current step has
+    been consumed, because accepting it would let a shoulder-surfed
+    code authorize a second signature.
+    """
+    tx = _unsigned_tx(env)
+    input_fn, getpass_fn = _auth_fns(env)
+    sign_flow(env["config_path"], tx.serialize().hex(),
+              expected_payload_hex=env["payload"].hex(),
+              input_fn=input_fn, getpass_fn=getpass_fn,
+              output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+
+    # The previous step's code, presented at the same timestamp. It is
+    # within the skew window, so a stateless check accepts it.
+    stale = totp_code(env["config"]["totp"]["secret"], FIXED_TIME - 30, digits=6)
+    assert totp_verify(env["config"]["totp"]["secret"], stale, FIXED_TIME, digits=6)
+
+    def stale_input_fn(prompt):
+        if "Username" in prompt:
+            return "operator"
+        return stale
+
+    with pytest.raises(SignerError, match="authentication failed"):
+        sign_flow(env["config_path"], tx.serialize().hex(),
+                  expected_payload_hex=env["payload"].hex(),
+                  input_fn=stale_input_fn, getpass_fn=lambda p: PASSWORD,
+                  output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+
+
+def test_totp_state_file_records_the_consumed_step(env):
+    """The consumed time-step is persisted, so a second signer process
+    (or a later invocation) sees that the code was already used."""
+    tx = _unsigned_tx(env)
+    input_fn, getpass_fn = _auth_fns(env)
+    sign_flow(env["config_path"], tx.serialize().hex(),
+              expected_payload_hex=env["payload"].hex(),
+              input_fn=input_fn, getpass_fn=getpass_fn,
+              output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+
+    state_path = env["dir"] / "totp-state.json"
+    assert state_path.exists()
+    state = json.loads(state_path.read_text())
+    assert state["last_used_step"] == FIXED_TIME // 30
+    # The state file holds no secret material.
+    assert "secret" not in state_path.read_text()
+
+
+def test_totp_state_file_is_private(env):
+    tx = _unsigned_tx(env)
+    input_fn, getpass_fn = _auth_fns(env)
+    sign_flow(env["config_path"], tx.serialize().hex(),
+              expected_payload_hex=env["payload"].hex(),
+              input_fn=input_fn, getpass_fn=getpass_fn,
+              output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+    mode = stat.S_IMODE(os.stat(env["dir"] / "totp-state.json").st_mode)
+    assert mode == 0o600
+
+
+def test_totp_replay_is_recorded_in_the_audit_log(env):
+    """A replay attempt is worth seeing in the audit log, unlike the
+    other factor failures whose cause is deliberately not disclosed."""
+    tx = _unsigned_tx(env)
+    input_fn, getpass_fn = _auth_fns(env)
+    sign_flow(env["config_path"], tx.serialize().hex(),
+              expected_payload_hex=env["payload"].hex(),
+              input_fn=input_fn, getpass_fn=getpass_fn,
+              output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+
+    replay_fn, replay_getpass = _auth_fns(env)
+    with pytest.raises(SignerError, match="authentication failed"):
+        sign_flow(env["config_path"], tx.serialize().hex(),
+                  expected_payload_hex=env["payload"].hex(),
+                  input_fn=replay_fn, getpass_fn=replay_getpass,
+                  output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+
+    reasons = [e.get("reason", "") for e in _log_entries(env)]
+    assert any("replay" in r for r in reasons)
+
+
+def test_broken_symlink_totp_state_fails_closed(env):
+    """A broken symlink at the state path must not read as "no state
+    yet": that would silently reset single-use protection. The signer
+    refuses instead."""
+    tx = _unsigned_tx(env)
+    input_fn, getpass_fn = _auth_fns(env)
+    sign_flow(env["config_path"], tx.serialize().hex(),
+              expected_payload_hex=env["payload"].hex(),
+              input_fn=input_fn, getpass_fn=getpass_fn,
+              output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+
+    state_path = env["dir"] / "totp-state.json"
+    state_path.unlink()
+    state_path.symlink_to(env["dir"] / "does-not-exist")
+
+    replay_fn, replay_getpass = _auth_fns(env)
+    with pytest.raises(SignerError):
+        sign_flow(env["config_path"], tx.serialize().hex(),
+                  expected_payload_hex=env["payload"].hex(),
+                  input_fn=replay_fn, getpass_fn=replay_getpass,
+                  output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+
+
+def test_corrupt_totp_state_fails_closed(env):
+    """A corrupt state file must not silently re-enable a used code:
+    the signer refuses rather than guessing."""
+    tx = _unsigned_tx(env)
+    input_fn, getpass_fn = _auth_fns(env)
+    sign_flow(env["config_path"], tx.serialize().hex(),
+              expected_payload_hex=env["payload"].hex(),
+              input_fn=input_fn, getpass_fn=getpass_fn,
+              output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+
+    (env["dir"] / "totp-state.json").write_text("{not json", encoding="utf-8")
+    os.chmod(env["dir"] / "totp-state.json", 0o600)
+
+    replay_fn, replay_getpass = _auth_fns(env)
+    with pytest.raises(SignerError):
+        sign_flow(env["config_path"], tx.serialize().hex(),
+                  expected_payload_hex=env["payload"].hex(),
+                  input_fn=replay_fn, getpass_fn=replay_getpass,
+                  output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+
+
+def test_fresh_signer_with_no_state_file_can_still_sign(env):
+    """A signer that has never signed has no state file: the first
+    ceremony must work (the state is created, not required)."""
+    tx = _unsigned_tx(env)
+    assert not (env["dir"] / "totp-state.json").exists()
+    input_fn, getpass_fn = _auth_fns(env)
+    signed = sign_flow(env["config_path"], tx.serialize().hex(),
+                       expected_payload_hex=env["payload"].hex(),
+                       input_fn=input_fn, getpass_fn=getpass_fn,
+                       output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+    assert signed
+    assert (env["dir"] / "totp-state.json").exists()
+
+
+def test_new_code_in_a_later_step_is_accepted(env):
+    """Single use must not break the normal flow: the next step's
+    code authorizes the next signature."""
+    tx = _unsigned_tx(env)
+    input_fn, getpass_fn = _auth_fns(env)
+    sign_flow(env["config_path"], tx.serialize().hex(),
+              expected_payload_hex=env["payload"].hex(),
+              input_fn=input_fn, getpass_fn=getpass_fn,
+              output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+
+    next_input, next_getpass = _auth_fns(env, totp_time=FIXED_TIME + 30)
+    signed = sign_flow(env["config_path"], tx.serialize().hex(),
+                       expected_payload_hex=env["payload"].hex(),
+                       input_fn=next_input, getpass_fn=next_getpass,
+                       output_fn=lambda s: None, time_fn=lambda: FIXED_TIME + 30)
+    assert signed
+
+
+def test_concurrent_ceremonies_consume_a_code_only_once(env):
+    """A4 regression: the check-and-consume sequence is atomic, so two
+    ceremonies racing on the same code produce exactly one signature.
+
+    Without the lock, both would read the same (unused) state and both
+    would sign.
+    """
+    import threading
+
+    tx = _unsigned_tx(env)
+    code = totp_code(env["config"]["totp"]["secret"], FIXED_TIME, digits=6)
+    results = []
+    barrier = threading.Barrier(8)
+
+    def input_fn(prompt):
+        if "Username" in prompt:
+            return "operator"
+        return code
+
+    def worker():
+        barrier.wait()
+        try:
+            sign_flow(env["config_path"], tx.serialize().hex(),
+                      expected_payload_hex=env["payload"].hex(),
+                      input_fn=input_fn, getpass_fn=lambda p: PASSWORD,
+                      output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+            results.append("signed")
+        except SignerError:
+            results.append("refused")
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results.count("signed") == 1
+
+
 # --- approval binding ------------------------------------------------------
 
 

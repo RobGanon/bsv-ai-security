@@ -171,7 +171,7 @@ def test_launch_inherits_environment_and_sets_provenance(tmp_path):
     script = (
         "import json, os, sys\n"
         "keys = ('SEALRUN_MANIFEST_HASH', 'SEALRUN_RELEASE_ID',\n"
-        "        'SEALRUN_RELEASE_SEQ', 'PATH')\n"
+        "        'SEALRUN_RELEASE_SEQ')\n"
         "json.dump({k: os.environ.get(k) for k in keys}, open(sys.argv[1], 'w'))\n"
     )
     rc = launch(root, envelope, private.pubkey_compressed(),
@@ -180,8 +180,7 @@ def test_launch_inherits_environment_and_sets_provenance(tmp_path):
     child = json.loads(out.read_text(encoding="utf-8"))
     assert child["SEALRUN_MANIFEST_HASH"] == manifest_hash(envelope)
     assert child["SEALRUN_RELEASE_ID"] == "rel-77"
-    assert child["SEALRUN_RELEASE_SEQ"] == "77"
-    assert child["PATH"]  # inherited from the launcher's own environment
+    assert child["SEALRUN_RELEASE_SEQ"] == "77"  # environment no longer inherited by default
 
 
 def test_launch_refuses_tampered_artifact_without_running(tmp_path):

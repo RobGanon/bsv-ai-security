@@ -233,11 +233,8 @@ def post_raw_tx(
     """POST one raw transaction hex and return its txid.
 
     Shared by :class:`WoCBroadcaster` and the offline-signing
-    ``broadcast-signed`` path. An already-known response is success and
-    returns ``local_txid`` (derived from the exact bytes just sent); a
-    200 response returns the network-echoed txid, which the caller must
-    compare against the txid it verified — a mismatch is the caller's
-    to refuse, not this helper's to paper over.
+    ``broadcast-signed`` path. Fail closed: do not trust endpoint echoes
+    blindly and do not treat rejection strings as success.
     """
     request = request_fn or _urllib_request
     try:
@@ -250,11 +247,15 @@ def post_raw_tx(
         raise BroadcastUnavailable(str(exc)) from exc
     text = body.decode("utf-8", "replace").strip()
     lowered = text.lower()
-    if "already" in lowered or "txn-already-known" in lowered or "258:" in lowered:
-        # Already in the mempool: success. The echoed body is not a
-        # txid, so return the locally computed one (it is derived
-        # from the exact bytes we just sent).
+
+    # Treat "already known" as success only if the request actually succeeded
+    # (2xx). A rejected request (4xx/5xx) that happens to mention "already"
+    # or "258:" is still a rejection.
+    if status // 100 == 2 and (
+        "already" in lowered or "txn-already-known" in lowered or "258:" in lowered
+    ):
         return local_txid
+
     if status == 200:
         try:
             parsed = json.loads(text)
@@ -267,5 +268,30 @@ def post_raw_tx(
             raise BroadcastRejected(
                 f"broadcast returned an unusable txid: {text[:200]}"
             )
-        return txid.lower()
+        txid = txid.lower()
+        # Bind echoed txid to the locally computed txid (A2). Never trust
+        # an arbitrary txid returned by the endpoint.
+        if txid != local_txid.lower():
+            raise BroadcastRejected(
+                "broadcast returned txid does not match the locally computed txid"
+            )
+        return txid
+    if status // 100 == 2:
+        # Any other 2xx must still return a txid that matches local_txid.
+        # Try to parse if possible, otherwise fail closed.
+        try:
+            parsed = json.loads(text)
+            txid = parsed if isinstance(parsed, str) else parsed.get("txid")
+            if isinstance(txid, str) and len(txid) == 64:
+                txid = txid.lower()
+                if txid != local_txid.lower():
+                    raise BroadcastRejected(
+                        "broadcast returned txid does not match the locally computed txid"
+                    )
+                return txid
+        except (ValueError, AttributeError):
+            pass
+        raise BroadcastRejected(
+            f"broadcast success body did not provide a matching txid: {text[:200]}"
+        )
     raise BroadcastRejected(f"broadcast rejected: HTTP {status}: {text[:500]}")

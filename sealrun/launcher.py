@@ -180,10 +180,13 @@ def build_child_environment(
 ) -> dict[str, str]:
     """Return the environment for the launched child.
 
-    Starts from ``base`` (default: the launcher's own environment) and
-    overlays the verified-manifest provenance and artifact descriptors.
+    Starts from a clean environment (or ``base`` if explicitly provided)
+    and overlays only the verified-manifest provenance and artifact descriptors.
     """
-    env = dict(os.environ if base is None else base)
+    if base is None:
+        env = {}
+    else:
+        env = dict(base)
     payload = envelope.get("payload") if isinstance(envelope, dict) else None
     env["SEALRUN_MANIFEST_HASH"] = manifest_hash(envelope)
     if isinstance(payload, dict):

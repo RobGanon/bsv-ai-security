@@ -167,6 +167,9 @@ def main(argv=None):
     p.add_argument("--manifest-hash", default=None,
                    help="manifest hash (64 hex) to bind the acceptance to; "
                    "alternative to --manifest when only the hash is at hand")
+    p.add_argument("--public-key", type=Path, default=None,
+                   help="trusted manifest-signing public key (compressed hex); "
+                   "when provided with --manifest, verify the manifest signature before recording")
 
     p = sub.add_parser("anchor-payload", help="prepare unsigned BSV anchor payload bytes (no broadcast)")
     p.add_argument("--journal", required=True, type=Path)
@@ -365,14 +368,44 @@ def main(argv=None):
             count = verify_audit_journal(args.journal)
             print(f"AUDIT OK: {count} event(s)")
         elif args.command == "audit-manifest-accepted":
+            manifest_obj = None
+            if args.manifest is not None:
+                manifest_obj = _read_json(args.manifest)
             if args.manifest is not None and args.manifest_hash is not None:
-                from_hash = manifest_hash(_read_json(args.manifest))
+                from_hash = manifest_hash(manifest_obj)
                 if from_hash != args.manifest_hash.lower():
                     raise VerificationError(
                         "--manifest and --manifest-hash disagree on the manifest hash"
                     )
+            if args.manifest is not None and args.public_key is not None:
+                from .core import _load_verified_payload
+                pubkey = load_public_key(args.public_key)
+                payload = _load_verified_payload(manifest_obj, pubkey)
+                # Enforce release identity consistency at record time too
+                if payload.get("release_id") != args.release_id:
+                    raise VerificationError(
+                        "release_id does not match the manifest"
+                    )
+                if payload.get("release_seq") != args.release_seq:
+                    raise VerificationError(
+                        "release_seq does not match the manifest"
+                    )
+            elif args.manifest is not None and args.public_key is None:
+                # If a manifest is provided but no public key to verify it,
+                # still require explicit trust? The core issue is recording
+                # against invalid signatures. We enforce verification when
+                # public key is supplied; otherwise we preserve behavior but
+                # must note - but better to be strict. However to minimize
+                # breakage while fixing the critical issue, require pubkey
+                # when manifest is given? Or just allow but it's still risky.
+                # Looking at review: "require signature verification in 
+                # audit-manifest-accepted (add --public-key) and fail at record time"
+                raise VerificationError(
+                    "audit-manifest-accepted with --manifest requires "
+                    "--public-key to verify the manifest signature before recording"
+                )
             if args.manifest is not None:
-                bound_hash = manifest_hash(_read_json(args.manifest))
+                bound_hash = manifest_hash(manifest_obj)
             elif args.manifest_hash is not None:
                 bound_hash = args.manifest_hash
             else:
@@ -842,6 +875,12 @@ def main(argv=None):
                 record = publisher.on_release_accepted()
                 print(json.dumps({"action": "anchored", "reason": "release",
                                   "record": record}, indent=2, sort_keys=True))
+                if args.broadcast and record.get("broadcast_error"):
+                    print(f"ERROR: broadcast failed: {record.get('broadcast_error')}", file=sys.stderr)
+                    return 1
+                if args.broadcast and record.get("status") != "broadcast":
+                    print("ERROR: broadcast did not complete", file=sys.stderr)
+                    return 1
             elif args.mode == "loop":
                 try:
                     decisions = publisher.run_loop(max_iterations=args.max_iterations)
@@ -849,9 +888,24 @@ def main(argv=None):
                     print("Publisher loop interrupted by operator.")
                     return 0
                 print(json.dumps(decisions, indent=2, sort_keys=True))
+                if args.broadcast:
+                    for d in decisions:
+                        rec = d.get("record") if isinstance(d, dict) else None
+                        if isinstance(rec, dict) and (rec.get("broadcast_error") or (rec.get("status") not in ("broadcast",) and d.get("action") == "anchored" and rec.get("status") == "pending")):
+                            print("ERROR: broadcast failed or pending after broadcast attempt", file=sys.stderr)
+                            return 1
             else:
                 decision = publisher.run_once()
                 print(json.dumps(decision, indent=2, sort_keys=True))
+                if args.broadcast:
+                    rec = decision.get("record") if isinstance(decision, dict) else None
+                    if isinstance(rec, dict):
+                        if rec.get("broadcast_error"):
+                            print(f"ERROR: broadcast failed: {rec.get('broadcast_error')}", file=sys.stderr)
+                            return 1
+                        if rec.get("status") == "pending" and decision.get("action") == "anchored":
+                            print("ERROR: broadcast did not complete", file=sys.stderr)
+                            return 1
             if not args.broadcast:
                 print("DRY RUN: broadcast disabled — payloads prepared, nothing broadcast.")
     except (OSError, ValueError, KeyError, TypeError, struct.error,

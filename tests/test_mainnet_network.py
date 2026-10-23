@@ -213,7 +213,11 @@ def test_broadcaster_mainnet_builds_mainnet_change():
             ).encode()
         if method == "POST" and url.endswith("/tx/raw"):
             posted["hex"] = json.loads(body)["txhex"]
-            return 200, json.dumps("ff" * 32).encode()
+            from sealrun.bsv import parse_tx
+            try:
+                return 200, json.dumps(parse_tx(bytes.fromhex(posted["hex"])).txid()).encode()
+            except Exception:
+                return 200, json.dumps('ff'*32).encode()
         raise AssertionError(f"unexpected request {method} {url}")
 
     broadcaster = WoCBroadcaster(
@@ -228,7 +232,9 @@ def test_broadcaster_mainnet_builds_mainnet_change():
     payload = encode_anchor_payload(
         head_hash="ab" * 32, start_seq=1, end_seq=1, release_seq=0
     )
-    assert broadcaster.broadcast(payload.hex()) == "ff" * 32
+    from sealrun.bsv import parse_tx
+    txid = broadcaster.broadcast(payload.hex())
+    assert txid == parse_tx(bytes.fromhex(posted["hex"])).txid()
     tx = parse_tx(bytes.fromhex(posted["hex"]))
     assert len(tx.outputs) == 2
     assert tx.outputs[1].value == 100000 - 500

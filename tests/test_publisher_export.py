@@ -438,7 +438,7 @@ def test_broadcast_signed_refuses_echoed_txid_mismatch(tmp_path):
     publisher = _publisher(tmp_path)
     exported = _export(publisher, woc)
     signed_hex = _sign(exported["unsigned_hex"])
-    with pytest.raises(PublisherError, match="expected"):
+    with pytest.raises(PublisherError, match="match"):
         _broadcast(publisher, woc, signed_hex)
     store = json.loads((tmp_path / "anchors.json").read_text())
     assert store["anchors"][-1]["status"] == "pending"

@@ -619,11 +619,31 @@ class Publisher:
 
         # Dedupe: same head already anchored -> return it, never duplicate.
         for record in reversed(anchors):
-            if record["head_hash"] == head_hash and record["status"] in (
-                "pending",
-                "broadcast",
-            ):
-                if self.config.broadcast_enabled and record["status"] == "pending":
+            if record["head_hash"] == head_hash and record["status"] == "broadcast":
+                return dict(record)
+            if record["head_hash"] == head_hash and record["status"] == "pending":
+                # For pending records, re-derive to prevent tampering
+                last_broadcast = self._last_broadcast(anchors)
+                if last_broadcast is not None:
+                    start_seq = last_broadcast["end_seq"] + 1
+                    prev_txid = last_broadcast["txid"]
+                    assert prev_txid is not None
+                else:
+                    start_seq = 1
+                    prev_txid = self.config.genesis_txid.lower()
+                try:
+                    fields = create_anchor_payload(
+                        self.config.journal,
+                        start_seq=start_seq,
+                        prev_txid=prev_txid,
+                        manifests=self._load_manifests(),
+                        public_key=self.config.public_key,
+                    )
+                except VerificationError as exc:
+                    raise PublisherError(f"anchor creation refused: {exc}") from exc
+                if record.get("payload_hex") != fields["payload_hex"]:
+                    break  # tampered, fall through
+                if self.config.broadcast_enabled:
                     return self._broadcast_or_report(
                         store, record, raise_on_broadcast_failure
                     )

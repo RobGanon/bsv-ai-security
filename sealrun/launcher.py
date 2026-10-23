@@ -181,10 +181,22 @@ def build_child_environment(
     """Return the environment for the launched child.
 
     Starts from a clean environment (or ``base`` if explicitly provided)
-    and overlays only the verified-manifest provenance and artifact descriptors.
+    and overlays only the verified-manifest provenance and artifact
+    descriptors.
+
+    ``PATH`` is carried over from the caller when ``base`` is not
+    supplied: the launcher resolves the command to run through
+    ``subprocess``, which looks a relative ``argv[0]`` up in the
+    *child's* ``PATH``. Without it, a command named rather than given
+    by absolute path would only be found in ``os.defpath``
+    (``/bin:/usr/bin``). ``PATH`` is the one variable carried over:
+    it names executables, not the operator's secrets.
     """
     if base is None:
         env = {}
+        caller_path = os.environ.get("PATH")
+        if caller_path:
+            env["PATH"] = caller_path
     else:
         env = dict(base)
     payload = envelope.get("payload") if isinstance(envelope, dict) else None
@@ -273,8 +285,13 @@ def launch(
 
     Returns the child's exit status. Raises :class:`VerificationError` if
     the manifest, its signature, an artifact, or the launch itself fails
-    — in every failure case the command is *not* run. The caller's
-    environment is inherited unless ``env`` supplies a replacement base.
+    — in every failure case the command is *not* run.
+
+    The child does **not** inherit the caller's environment: it gets
+    only the ``SEALRUN_*`` provenance and artifact-descriptor variables,
+    plus ``PATH`` (so a command named rather than given by absolute
+    path can be found). Pass ``env`` to supply a different base
+    environment instead; it replaces that default entirely.
     """
     argv = [arg for arg in command]
     while argv and argv[0] == "--":

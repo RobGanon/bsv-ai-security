@@ -131,10 +131,29 @@ cannot both consume the same code — exactly one of them signs.
 
 **Limits, stated honestly:**
 
-- Deleting `totp-state.json` resets the protection: the next code
-  works as if none had been used. Keep the signer's directory
-  integrity the same way you keep the key file's — anyone who can
-  delete this file can already read the key.
+- **The state file is not authenticated.** It carries no MAC, no
+  signature, and nothing that ties it to this signer. The signer trusts
+  the `last_used_step` it reads. So the protection can be reset in two
+  ways, not one:
+  - **Deleting** `totp-state.json` makes the signer treat it as "no
+    code has been used yet" — the next code works as if none had been.
+  - **Rewriting** it does the same: writing `{"last_used_step": -1}`
+    (or any value below the step you are about to use) makes the
+    signer accept a code that was already consumed.
+- **The threat-model bound.** Both attacks need *write* access to the
+  signer's directory — not read access, and not the key. That is a
+  weaker privilege than reading the key, so treat the signer directory
+  as part of the trust boundary: anyone who can write there can reset
+  the replay counter, even though they cannot sign without the human's
+  password and TOTP. (Reading the key is still strictly worse: it
+  bypasses the ceremony entirely.) Keep the signer's directory
+  integrity the same way you keep the key file's, and prefer a
+  directory that is not writable by anything but you.
+- The state is keyed to the **config's directory**, not to the signer
+  itself. A copy of `signer.json` (and the key file) in a different
+  directory has no state file, so the same code would be accepted
+  there. Copying the config means copying the TOTP secret too, so this
+  is inside the "the secret is already exposed" boundary.
 - The file is plain state, not a secret. It reveals roughly when the
   last signing happened; it does not enable a signature.
 - There is **no TOTP rotation command yet**. The secret is printed
@@ -142,6 +161,10 @@ cannot both consume the same code — exactly one of them signs.
   the second factor is permanently bypassed — treat a config leak as
   a full compromise and re-initialize the signer. Rotation tooling is
   tracked as a follow-up.
+
+Authenticating the state file (a MAC over `last_used_step` keyed by the
+TOTP secret, so a forged file is detected rather than trusted) is the
+planned remedy for the forgery case. It is not implemented yet.
 
 ## Audit log
 

@@ -345,13 +345,20 @@ def test_cli_audit_accepted_hash_flag_and_anchor_verify_with_binding(tmp_path):
     # Export this test key's public key directly (keygen path is covered
     # by the issue #9 CLI test).
     pub.write_text(key.pubkey_compressed().hex(), encoding="ascii")
+    # The acceptance is bound by hash, but the binding is only recorded
+    # once the manifest's signature has been verified against a trusted
+    # key: --manifest-hash is a cross-check on --manifest, not a
+    # substitute for it (an unverifiable binding poisons the journal
+    # permanently, see test_audit_manifest_accepted_hash_only_is_refused).
     assert (
         main([
             "audit-manifest-accepted",
             "--journal", str(journal),
             "--release-seq", "6",
             "--release-id", "r-6",
+            "--manifest", str(envelope_file),
             "--manifest-hash", manifest_hash(envelope),
+            "--public-key", str(pub),
         ])
         == 0
     )

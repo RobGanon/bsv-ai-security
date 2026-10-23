@@ -578,6 +578,49 @@ class Publisher:
                 return record
         return None
 
+    def _rederive_payload(self, anchors: list[dict], index: int) -> str | None:
+        """Re-derive the anchor payload the record at ``index`` claims.
+
+        Returns the journal-derived payload hex, or None when it cannot
+        be derived. A None result means "not confirmable", not "error":
+        the caller treats an unconfirmable record as tampered.
+
+        The chain position comes from the broadcast record that precedes
+        ``anchors[index]``: an anchor for a head was built with
+        ``start_seq = previous_broadcast.end_seq + 1`` and
+        ``prev_txid = previous_broadcast.txid`` (or the genesis txid for
+        the first anchor). Re-deriving from the journal and the manifest
+        set is what makes a stored record verifiable — a record that was
+        edited or injected into the store cannot reproduce the
+        journal-derived payload, because the derived ``release_seq`` and
+        head hash come from the journal and the verified manifests, not
+        from the record.
+        """
+        previous: dict | None = None
+        for earlier in reversed(anchors[:index]):
+            if earlier["status"] == "broadcast":
+                previous = earlier
+                break
+        if previous is not None:
+            start_seq = previous["end_seq"] + 1
+            prev_txid = previous["txid"]
+            if prev_txid is None:
+                return None
+        else:
+            start_seq = 1
+            prev_txid = self.config.genesis_txid.lower()
+        try:
+            fields = create_anchor_payload(
+                self.config.journal,
+                start_seq=start_seq,
+                prev_txid=prev_txid,
+                manifests=self._load_manifests(),
+                public_key=self.config.public_key,
+            )
+        except VerificationError:
+            return None
+        return fields["payload_hex"]
+
     # -- checkpoint construction ---------------------------------------
 
     def _broadcast_record(self, store: dict, record: dict) -> dict:
@@ -618,36 +661,37 @@ class Publisher:
         head_hash = events[-1]["event_hash"].lower()
 
         # Dedupe: same head already anchored -> return it, never duplicate.
-        for record in reversed(anchors):
-            if record["head_hash"] == head_hash and record["status"] == "broadcast":
-                return dict(record)
-            if record["head_hash"] == head_hash and record["status"] == "pending":
-                # For pending records, re-derive to prevent tampering
-                last_broadcast = self._last_broadcast(anchors)
-                if last_broadcast is not None:
-                    start_seq = last_broadcast["end_seq"] + 1
-                    prev_txid = last_broadcast["txid"]
-                    assert prev_txid is not None
-                else:
-                    start_seq = 1
-                    prev_txid = self.config.genesis_txid.lower()
-                try:
-                    fields = create_anchor_payload(
-                        self.config.journal,
-                        start_seq=start_seq,
-                        prev_txid=prev_txid,
-                        manifests=self._load_manifests(),
-                        public_key=self.config.public_key,
-                    )
-                except VerificationError as exc:
-                    raise PublisherError(f"anchor creation refused: {exc}") from exc
-                if record.get("payload_hex") != fields["payload_hex"]:
-                    break  # tampered, fall through
-                if self.config.broadcast_enabled:
-                    return self._broadcast_or_report(
-                        store, record, raise_on_broadcast_failure
-                    )
-                return dict(record)
+        #
+        # A stored record is only believed after it has been re-derived
+        # from the journal. The store is a local file that the threat
+        # model treats as attacker-writable (a local administrator can
+        # rewrite it), so a record that claims "this head is already
+        # broadcast as txid X" must reproduce the journal-derived
+        # payload before the publisher acts on it. A record that does
+        # not is refused outright. It is not merely skipped: the stored
+        # record would still be the chain predecessor of every anchor
+        # built after it, so quietly building on top of a record the
+        # journal contradicts is how a forged release_seq becomes a
+        # durable rollback claim.
+        for index in range(len(anchors) - 1, -1, -1):
+            record = anchors[index]
+            if record["head_hash"] != head_hash:
+                continue
+            if record["status"] not in ("pending", "broadcast"):
+                continue
+            rederived = self._rederive_payload(anchors, index)
+            if rederived != record.get("payload_hex"):
+                raise PublisherError(
+                    "anchor record store is inconsistent with the journal: the "
+                    f"stored {record['status']} record for head "
+                    f"{head_hash[:16]} does not match the payload derived "
+                    "from the journal; refusing to anchor on top of it"
+                )
+            if record["status"] == "pending" and self.config.broadcast_enabled:
+                return self._broadcast_or_report(
+                    store, record, raise_on_broadcast_failure
+                )
+            return dict(record)
 
         last_broadcast = self._last_broadcast(anchors)
         if last_broadcast is not None:

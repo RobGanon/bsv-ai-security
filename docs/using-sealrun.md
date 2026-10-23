@@ -151,13 +151,16 @@ The journal is a hash-chained log: every entry contains the hash of
 the one before it, so editing any earlier entry breaks the chain.
 
 Record that you adopted this release. The acceptance is bound to the
-signed manifest's hash, so it names exactly which bytes were adopted:
+signed manifest's hash, so it names exactly which bytes were adopted.
+The manifest's signature is checked against your public key *before*
+the acceptance is recorded, so both are required:
 
 ```bash
 sealrun audit-manifest-accepted \
   --journal state/audit.jsonl \
   --release-seq 1 --release-id support-agent-v3 \
-  --manifest state/manifest.signed.json
+  --manifest state/manifest.signed.json \
+  --public-key keys/public.pub
 ```
 
 ```

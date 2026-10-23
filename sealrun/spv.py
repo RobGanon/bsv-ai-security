@@ -205,10 +205,19 @@ class _BumpReader:
         if first < 0xFD:
             return first
         if first == 0xFD:
-            return struct.unpack("<H", self.read(2))[0]
+            val = struct.unpack("<H", self.read(2))[0]
+            if val < 0xFD:
+                raise ValueError("non-canonical CompactSize encoding")
+            return val
         if first == 0xFE:
-            return struct.unpack("<I", self.read(4))[0]
-        return struct.unpack("<Q", self.read(8))[0]
+            val = struct.unpack("<I", self.read(4))[0]
+            if val <= 0xFFFF:
+                raise ValueError("non-canonical CompactSize encoding")
+            return val
+        val = struct.unpack("<Q", self.read(8))[0]
+        if val <= 0xFFFFFFFF:
+            raise ValueError("non-canonical CompactSize encoding")
+        return val
 
     def done(self) -> bool:
         return self.pos == len(self.data)

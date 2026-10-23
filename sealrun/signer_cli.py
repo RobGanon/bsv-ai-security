@@ -148,7 +148,11 @@ def totp_matching_step(secret_b32: str, code: str, timestamp: float, *,
     Fails closed (None) on malformed input or a bad secret.
     """
     code = code.strip()
-    if not code.isdigit() or len(code) != digits:
+    # isascii() first: str.isdigit() accepts Unicode digits (e.g. the
+    # Arabic-Indic '١٢٣٤٥٦'), and hmac.compare_digest cannot compare
+    # non-ASCII str -- it raises TypeError. A TOTP code is ASCII
+    # digits; anything else is malformed input and must fail closed.
+    if not code.isascii() or not code.isdigit() or len(code) != digits:
         return None
     now_step = int(timestamp) // step
     try:
@@ -159,7 +163,11 @@ def totp_matching_step(secret_b32: str, code: str, timestamp: float, *,
             )
             if hmac.compare_digest(expected, code):
                 return candidate
-    except SignerError:
+    except (SignerError, TypeError, ValueError):
+        # A malformed code, a bad secret, or a comparison the platform
+        # refuses (compare_digest raises TypeError on non-ASCII str) is
+        # a failed authentication, never an exception: the caller's
+        # "fail closed" contract is that this function returns None.
         return None
     return None
 

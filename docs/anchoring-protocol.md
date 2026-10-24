@@ -116,7 +116,7 @@ visible fork, and the fork point identifies exactly where history diverged.
 
 ## 5. Trust anchors (distributed out-of-band, once)
 
-A verifier needs exactly three things that cannot be derived from the chain
+A verifier needs exactly four things that cannot be derived from the chain
 itself:
 
 1. **Manifest signing public key** (already required in Phase 1).

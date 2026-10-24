@@ -33,6 +33,7 @@ from .beef import (
 )
 from .spv import (
     BUMPVerifier,
+    DAAParams,
     HeaderChainVerifier,
     SPVVerifier,
     WoCBlockFetcher,
@@ -253,6 +254,13 @@ def main(argv=None):
     p.add_argument("--checkpoint-height", type=int, default=None,
                    help="height of the trusted checkpoint header; "
                    "required with --header-chain")
+    p.add_argument("--daa", choices=["mainnet"], default=None,
+                   help="with --header-chain: also validate the "
+                   "difficulty schedule of every block above the "
+                   "checkpoint against the named network's cash-DAA "
+                   "parameters (Finding B). Only 'mainnet' has a "
+                   "confirmed parameter set; other chains keep "
+                   "linkage + proof-of-work only.")
     p.add_argument("--woc-base", default=WOC_TTN_BASE,
                    help="WhatsOnChain base URL for --spv / --anchor-sig "
                    "chain data (default: Teratestnet)")
@@ -577,6 +585,8 @@ def main(argv=None):
                         WoCBlockFetcher(base_url=args.woc_base), pubkey
                     ),
                 )
+            if args.daa and not args.header_chain:
+                raise VerificationError("--daa requires --header-chain")
             if args.header_chain:
                 checkpoint_hash = args.checkpoint_hash or ""
                 if (
@@ -596,6 +606,7 @@ def main(argv=None):
                         WoCBlockFetcher(base_url=args.woc_base),
                         checkpoint_hash=checkpoint_hash,
                         checkpoint_height=args.checkpoint_height,
+                        daa=DAAParams.mainnet() if args.daa else None,
                     ),
                 )
             print(json.dumps(result, indent=2, sort_keys=True))

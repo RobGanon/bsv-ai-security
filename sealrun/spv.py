@@ -26,7 +26,7 @@ import json
 import struct
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Protocol
 
 from .bsv import sha256d
@@ -554,14 +554,31 @@ def verify_header(header: bytes, expected_hash: str, bits: int) -> bool:
     return verify_pow(header, bits)
 
 
-def verify_header_chain(headers: list[BlockHeader]) -> bool:
+def verify_header_chain(
+    headers: list[BlockHeader],
+    *,
+    daa: "DAAParams | None" = None,
+    window_inputs: "list[BlockHeader] | None" = None,
+) -> bool:
     """True iff consecutive headers link (child.prev == parent.hash),
     every header hashes to its declared hash, and every header passes
-    its own proof-of-work. Fail-closed on any malformed header."""
+    its own proof-of-work. Fail-closed on any malformed header.
+
+    With ``daa`` given, additionally require every header's ``bits``
+    to match the difficulty schedule recomputed from its preceding
+    window (see :func:`validate_daa_schedule`); ``window_inputs``
+    supplies the authenticated headers preceding ``headers`` that
+    the earliest windows reach back into. Heights are then required
+    and must be consecutive across inputs and headers. Without
+    ``daa`` the schedule is not checked (the pre-Finding-B
+    behavior, kept for chains without a confirmed parameter set).
+    """
     try:
         if not headers:
             return False
-        for header in headers:
+        segment = list(headers)
+        combined = list(window_inputs or []) + segment
+        for header in combined:
             declared = header.hash
             if not isinstance(declared, str) or len(declared) != 64:
                 return False
@@ -569,12 +586,247 @@ def verify_header_chain(headers: list[BlockHeader]) -> bool:
                 return False
             if not verify_pow(header.to_bytes(), header.bits):
                 return False
-        for parent, child in zip(headers, headers[1:]):
+        for parent, child in zip(combined, combined[1:]):
             if child.prev_hash.lower() != (parent.hash or "").lower():
+                return False
+        if daa is not None:
+            ok, _reason = validate_daa_schedule(
+                combined, daa, first_vouched_height=segment[0].height or 0
+            )
+            if not ok:
                 return False
         return True
     except (ValueError, TypeError, AttributeError, struct.error):
         return False
+
+
+# ---------------------------------------------------------------------------
+# Difficulty-schedule validation (Finding B): the BSV "cash" DAA.
+#
+# Ported from the BSV node source (bitcoin-sv/bitcoin-sv, read
+# 2026-10-23):
+#   src/pow.cpp           GetNextWorkRequired (dispatches on the
+#                         PREVIOUS block's height >= consensus
+#                         daaHeight), GetNextCashWorkRequired,
+#                         ComputeTarget, GetSuitableBlock
+#   src/arith_uint256.cpp arith_uint256::SetCompact / GetCompact
+#   src/chainparams.cpp   consensus.daaHeight = 504031 (mainnet)
+# Per-block work is the node's GetBlockProof:
+#   (~target / (target + 1)) + 1, and 0 for negative, overflow, or
+#   zero targets. Chainwork is only ever accumulated here from the
+#   decoded targets of headers inside the authenticated walk —
+#   never accepted as a supplied value.
+# ---------------------------------------------------------------------------
+
+_DAA_WINDOW = 144
+
+# Ancestor reach below the lowest vouched block. Validating block
+# h runs the DAA over the window ending at h-1: the first anchor
+# sits at (h-1) - 144 and GetSuitableBlock can select a block 2
+# further down at that end, i.e. down to h-147. For the lowest
+# vouched block (checkpoint + 1) the walk must therefore extend
+# _DAA_INPUT_DEPTH headers below the checkpoint.
+_DAA_INPUT_DEPTH = _DAA_WINDOW + 2
+
+
+def _set_compact(bits: int) -> tuple[int, bool, bool]:
+    """``arith_uint256::SetCompact``: decode compact ``bits`` into
+    (target, negative, overflow), exactly as the node does."""
+    if not isinstance(bits, int) or isinstance(bits, bool):
+        raise ValueError("bits must be an integer")
+    if bits < 0 or bits > 0xFFFFFFFF:
+        raise ValueError("bits must be a 32-bit unsigned integer")
+    size = bits >> 24
+    word = bits & 0x007FFFFF
+    if size <= 3:
+        target = word >> (8 * (3 - size))
+    else:
+        target = word << (8 * (size - 3))
+    negative = word != 0 and (bits & 0x00800000) != 0
+    overflow = word != 0 and (
+        size > 34
+        or (word > 0xFF and size > 33)
+        or (word > 0xFFFF and size > 32)
+    )
+    return target, negative, overflow
+
+
+def _get_compact(target: int) -> int:
+    """``arith_uint256::GetCompact`` for a non-negative target."""
+    if target < 0:
+        raise ValueError("target must be non-negative")
+    n_size = (target.bit_length() + 7) // 8
+    if n_size <= 3:
+        compact = target << (8 * (3 - n_size))
+    else:
+        compact = target >> (8 * (n_size - 3))
+    # The 0x00800000 bit denotes the sign; if set, shift the
+    # mantissa down a byte and grow the exponent.
+    if compact & 0x00800000:
+        compact >>= 8
+        n_size += 1
+    return (n_size << 24) | compact
+
+
+def _block_work(bits: int) -> int:
+    """Per-block work (the node's GetBlockProof): expected number
+    of hashes to mine at this target; 0 for invalid targets."""
+    try:
+        target, negative, overflow = _set_compact(bits)
+    except ValueError:
+        return 0
+    if negative or overflow or target == 0:
+        return 0
+    return ((1 << 256) - 1 - target) // (target + 1) + 1
+
+
+@dataclass(frozen=True)
+class DAAParams:
+    """Consensus parameters for difficulty-schedule validation.
+
+    Only parameter sets verified against a network's own published
+    consensus source may exist here. Teratestnet deliberately has
+    none yet: its parameters are unconfirmed, so schedule
+    validation stays off for TTN chains (Finding B design note,
+    decision 4) rather than borrowing mainnet's.
+    """
+
+    pow_limit_bits: int
+    target_spacing: int = 600
+    daa_height: int = 504031
+
+    @property
+    def pow_limit_target(self) -> int:
+        target, negative, overflow = _set_compact(self.pow_limit_bits)
+        if negative or overflow or target == 0:
+            raise ValueError("invalid pow-limit bits")
+        return target
+
+    @classmethod
+    def mainnet(cls) -> "DAAParams":
+        """BSV mainnet: pow limit 0x1d00ffff, 600s spacing, cash
+        DAA from daaHeight 504031 (first DAA-computed block
+        504032, because the node dispatches on the previous
+        block's height)."""
+        return cls(pow_limit_bits=0x1D00FFFF)
+
+
+def _suitable_position(headers: list[BlockHeader], pos: int) -> int:
+    """Position of the median-of-3 suitable block for the block at
+    ``pos`` (the node's GetSuitableBlock over pos, pos-1, pos-2).
+
+    The node's exact swap sequence (strict ``>`` comparisons) is
+    reproduced so equal timestamps resolve to the same block the
+    node would pick."""
+    order = [pos - 2, pos - 1, pos]
+
+    def _time(i: int) -> int:
+        return headers[i].time
+
+    if _time(order[0]) > _time(order[2]):
+        order[0], order[2] = order[2], order[0]
+    if _time(order[0]) > _time(order[1]):
+        order[0], order[1] = order[1], order[0]
+    if _time(order[1]) > _time(order[2]):
+        order[1], order[2] = order[2], order[1]
+    return order[1]
+
+
+def _expected_bits(
+    headers: list[BlockHeader],
+    chainwork: list[int],
+    idx: int,
+    params: DAAParams,
+) -> int:
+    """Bits the cash DAA requires for ``headers[idx]``, computed
+    from the preceding headers in the list
+    (GetNextCashWorkRequired + ComputeTarget). ``chainwork`` is
+    the cumulative work up to and including each position."""
+    prev_pos = idx - 1
+    last_pos = _suitable_position(headers, prev_pos)
+    first_pos = _suitable_position(headers, prev_pos - _DAA_WINDOW)
+    work = chainwork[last_pos] - chainwork[first_pos]
+    work *= params.target_spacing
+    timespan = headers[last_pos].time - headers[first_pos].time
+    hi = 288 * params.target_spacing
+    lo = 72 * params.target_spacing
+    if timespan > hi:
+        timespan = hi
+    elif timespan < lo:
+        timespan = lo
+    work //= timespan
+    if work <= 0:
+        # A window with no measurable work rate targets the pow
+        # limit (the node's arithmetic would divide by zero; a
+        # real chain window cannot reach this).
+        return params.pow_limit_bits
+    # (-work) / work in uint256 arithmetic.
+    target = ((1 << 256) - work) // work
+    if target > params.pow_limit_target:
+        target = params.pow_limit_target
+    return _get_compact(target)
+
+
+def validate_daa_schedule(
+    headers: list[BlockHeader],
+    params: DAAParams,
+    *,
+    first_vouched_height: int,
+) -> tuple[bool, str]:
+    """(ok, reason): every header at height >=
+    max(``first_vouched_height``, ``params.daa_height`` + 1) must
+    declare exactly the bits the cash DAA computes from its
+    preceding window inside ``headers``.
+
+    ``headers`` must be ascending with present, consecutive
+    heights, and deep enough that every vouched block's full
+    window is in the list. Headers below the vouching floor are
+    inputs only (their bits feed chainwork; nothing is claimed
+    about their own schedule). Every header, vouched or input,
+    must also decode within the pow limit (the node's
+    CheckProofOfWork range check). Fail-closed."""
+    try:
+        if not headers:
+            return False, "no headers for schedule validation"
+        heights = [h.height for h in headers]
+        if any(
+            not isinstance(x, int) or isinstance(x, bool) for x in heights
+        ):
+            return False, "header heights are required for schedule validation"
+        for a, b in zip(heights, heights[1:]):
+            if b != a + 1:
+                return False, "header heights are not consecutive"
+        for h in headers:
+            target, negative, overflow = _set_compact(h.bits)
+            if (
+                negative
+                or overflow
+                or target == 0
+                or target > params.pow_limit_target
+            ):
+                return False, f"bits out of range at height {h.height}"
+        chainwork: list[int] = []
+        acc = 0
+        for h in headers:
+            acc += _block_work(h.bits)
+            chainwork.append(acc)
+        floor = max(first_vouched_height, params.daa_height + 1)
+        for idx, h in enumerate(headers):
+            if h.height is None or h.height < floor:
+                continue
+            if idx - 1 - _DAA_WINDOW - 2 < 0:
+                return (
+                    False,
+                    f"insufficient window depth at height {h.height}",
+                )
+            if h.bits != _expected_bits(headers, chainwork, idx, params):
+                return (
+                    False,
+                    f"difficulty schedule mismatch at height {h.height}",
+                )
+        return True, "difficulty schedule verified"
+    except (ValueError, TypeError, AttributeError, struct.error):
+        return False, "malformed header data in schedule validation"
 
 
 # ---------------------------------------------------------------------------
@@ -982,10 +1234,13 @@ class HeaderChainResult:
     reason: str = ""
 
 
-# Default walk cap: one difficulty period (2016 blocks). An operator
-# pinning a checkpoint farther back than this fails closed with a
-# clear reason instead of walking the whole chain on every verify.
-DEFAULT_MAX_HEADERS = 2016
+# Default walk cap: 4032 headers. That preserves the historical
+# 2016-header tip-to-checkpoint span and leaves room for the DAA
+# input extension below the checkpoint (Finding B), with headroom.
+# An operator pinning a checkpoint farther back than this fails
+# closed with a clear reason instead of walking the whole chain on
+# every verify.
+DEFAULT_MAX_HEADERS = 4032
 
 
 def verify_chain_to_checkpoint(
@@ -996,6 +1251,7 @@ def verify_chain_to_checkpoint(
     checkpoint_hash: str,
     checkpoint_height: int,
     max_headers: int = DEFAULT_MAX_HEADERS,
+    daa: DAAParams | None = None,
 ) -> tuple[bool, int, str]:
     """Walk headers from ``tip_height`` back to ``checkpoint_height``.
 
@@ -1006,9 +1262,18 @@ def verify_chain_to_checkpoint(
     — the operator-pinned trust anchor, distributed out-of-band like
     the genesis txid.
 
+    With ``daa`` given, the walk additionally extends
+    ``_DAA_INPUT_DEPTH`` headers *below* the checkpoint — each one
+    authenticated the same way, by the hash its already-verified
+    child commits to — and every block above the checkpoint must
+    declare exactly the bits the cash DAA computes from its
+    preceding window inside the walk (Finding B). The extension
+    headers are inputs only; nothing is vouched for at or below
+    the checkpoint.
+
     Returns (verified, headers_checked, reason). Fail-closed: any
-    fetch error, hash mismatch, PoW failure, or walk overrun returns
-    False with a reason, never raises.
+    fetch error, hash mismatch, PoW failure, schedule mismatch, or
+    walk overrun returns False with a reason, never raises.
     """
     if not isinstance(tip_height, int) or not isinstance(checkpoint_height, int):
         return False, 0, "tip/checkpoint heights must be integers"
@@ -1018,16 +1283,26 @@ def verify_chain_to_checkpoint(
         return False, 0, "heights must be non-negative"
     if checkpoint_height > tip_height:
         return False, 0, "checkpoint is above the tip block"
-    walk_len = tip_height - checkpoint_height + 1
-    if walk_len > max_headers:
+    if daa is not None and tip_height < daa.daa_height + 1:
         return (
             False,
             0,
-            f"walk of {walk_len} headers exceeds cap {max_headers}: "
+            f"tip block at height {tip_height} predates the DAA "
+            "activation height; schedule validation unsupported",
+        )
+    walk_len = tip_height - checkpoint_height + 1
+    fetch_len = walk_len + (_DAA_INPUT_DEPTH if daa is not None else 0)
+    if fetch_len > max_headers:
+        return (
+            False,
+            0,
+            f"walk of {fetch_len} headers exceeds cap {max_headers}: "
             "pin a more recent checkpoint",
         )
     expected_hash = tip_hash.lower()
     checked = 0
+    walked: list[tuple[int, BlockHeader]] = []
+    checkpoint_header: BlockHeader | None = None
     try:
         for height in range(tip_height, checkpoint_height - 1, -1):
             header = fetcher.fetch_header(height)
@@ -1053,6 +1328,7 @@ def verify_chain_to_checkpoint(
                     checked,
                     f"proof-of-work failed at height {height}",
                 )
+            walked.append((height, header))
             checked += 1
             if height == checkpoint_height:
                 if (header.hash or "").lower() != checkpoint_hash.lower():
@@ -1062,13 +1338,62 @@ def verify_chain_to_checkpoint(
                         "checkpoint hash mismatch at height "
                         f"{checkpoint_height}",
                     )
-                return (
-                    True,
-                    checked,
-                    f"chain verified: {checked} header(s) back to "
-                    f"checkpoint {checkpoint_height}",
-                )
+                if daa is None:
+                    return (
+                        True,
+                        checked,
+                        f"chain verified: {checked} header(s) back to "
+                        f"checkpoint {checkpoint_height}",
+                    )
+                checkpoint_header = header
+                break
             expected_hash = header.prev_hash.lower()
+        if daa is not None and checkpoint_header is not None:
+            # Authenticated DAA inputs below the checkpoint: each
+            # header must hash to the prev_hash committed by its
+            # already-verified child, exactly as in the main walk.
+            expected_hash = checkpoint_header.prev_hash.lower()
+            extension: list[tuple[int, BlockHeader]] = []
+            for height in range(
+                checkpoint_height - 1,
+                checkpoint_height - 1 - _DAA_INPUT_DEPTH,
+                -1,
+            ):
+                header = fetcher.fetch_header(height)
+                if header_hash(header.to_bytes()) != expected_hash:
+                    return (
+                        False,
+                        checked,
+                        f"header hash mismatch at height {height}",
+                    )
+                if (header.hash or "").lower() != expected_hash:
+                    return (
+                        False,
+                        checked,
+                        f"header hash mismatch at height {height}",
+                    )
+                if not verify_pow(header.to_bytes(), header.bits):
+                    return (
+                        False,
+                        checked,
+                        f"proof-of-work failed at height {height}",
+                    )
+                extension.append((height, header))
+                expected_hash = header.prev_hash.lower()
+            pairs = sorted(walked + extension, key=lambda p: p[0])
+            ascending = [replace(h, height=ht) for ht, h in pairs]
+            ok, reason = validate_daa_schedule(
+                ascending, daa, first_vouched_height=checkpoint_height + 1
+            )
+            if not ok:
+                return False, checked, reason
+            return (
+                True,
+                checked,
+                f"chain verified: {checked} header(s) back to "
+                f"checkpoint {checkpoint_height}; difficulty "
+                "schedule verified",
+            )
     except SPVError as exc:
         return False, checked, f"fetch failed: {exc}"
     except (ValueError, TypeError, AttributeError, struct.error) as exc:
@@ -1091,11 +1416,13 @@ class HeaderChainVerifier:
         checkpoint_hash: str,
         checkpoint_height: int,
         max_headers: int = DEFAULT_MAX_HEADERS,
+        daa: DAAParams | None = None,
     ) -> None:
         self.fetcher = fetcher
         self.checkpoint_hash = checkpoint_hash
         self.checkpoint_height = checkpoint_height
         self.max_headers = max_headers
+        self.daa = daa
 
     def verify_chain_for_tx(self, txid: str) -> HeaderChainResult:
         txid = txid.lower()
@@ -1130,6 +1457,7 @@ class HeaderChainVerifier:
             checkpoint_hash=self.checkpoint_hash,
             checkpoint_height=self.checkpoint_height,
             max_headers=self.max_headers,
+            daa=self.daa,
         )
         return HeaderChainResult(
             verified, txid,

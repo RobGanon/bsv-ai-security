@@ -153,16 +153,27 @@ still in progress.
   in the docs.
 - WoC-TTN's unspent index is broken; funding spends a known outpoint
   explicitly.
-- SPV header-chain verification validates each header's proof of
-  work against that header's own declared `bits`; it does not
-  validate the bits against BSV's difficulty-retarget rules or
-  compare cumulative work across competing chains. A fabricated
-  chain extending the pinned checkpoint could therefore declare
-  easier targets. This bounds the anchoring-evidence tier only —
-  the local verifier is unaffected — and Teratestnet proof of work
-  is minimal regardless. Validating the bits schedule is required
-  before any mainnet reliance. (Surfaced by an outside AI review
-  pass, Oct 2026; verified against `sealrun/spv.py`.)
+- SPV header-chain verification validates each header's proof
+  of work against that header's own declared `bits`. With
+  `--daa mainnet` it additionally validates the difficulty
+  schedule: every block above the pinned checkpoint must declare
+  exactly the bits the BSV cash DAA (per-block, 144-block
+  window, active since height 504032) computes from its
+  preceding window inside the walk, and the walk extends 146
+  headers below the checkpoint as authenticated inputs so the
+  validation is inductive from the pin. Without `--daa`, a
+  fabricated chain extending the checkpoint could still declare
+  easier targets — the schedule check is required before any
+  mainnet reliance, and it is opt-in per network because only
+  mainnet's parameters are confirmed (Teratestnet's are not, so
+  TTN walks remain linkage + proof-of-work). Cumulative work is
+  still not compared across competing chains: a single-source
+  walk has nothing to compare against, and detecting a
+  schedule-valid fork remains the pinned checkpoint's job.
+  (Finding B, surfaced by an outside AI review pass, Oct 2026;
+  the fix is verified against the BSV node source and real
+  mainnet header windows, including the DAA activation
+  boundary.)
 - The three live anchors were created manually, ad hoc — the demo
   is not yet anchored on the protocol's §8 cadence
   (`anchor_every_n_events` / `anchor_every_t_seconds`), so the

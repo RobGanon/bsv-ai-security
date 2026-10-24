@@ -104,6 +104,7 @@ def main(argv=None):
     p = sub.add_parser("keygen", help="generate a development secp256k1 keypair")
     p.add_argument("--private-key", required=True, type=Path)
     p.add_argument("--public-key", required=True, type=Path)
+    p.add_argument("--force", action="store_true", help="overwrite existing key files")
 
     p = sub.add_parser("manifest-create", help="create an unsigned manifest payload")
     p.add_argument("--root", required=True, type=Path)
@@ -342,7 +343,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == "keygen":
-            generate_keypair(args.private_key, args.public_key)
+            generate_keypair(args.private_key, args.public_key, force=args.force)
             print("Development keypair generated. Protect the private key.")
         elif args.command == "manifest-create":
             payload = create_manifest(args.root, args.artifact, args.release_id,

@@ -173,7 +173,10 @@ implemented in `sealrun/spv.py` (`anchor-chain-verify --header-chain
 --checkpoint-hash --checkpoint-height`): the verifier walks headers
 from each anchor's block back to the operator-pinned checkpoint,
 checking every header's hash + proof-of-work; walks are capped at
-2016 headers and fail closed past the cap.
+4032 headers and fail closed past the cap. With `--daa mainnet`
+the walk also fetches the 146 headers below the checkpoint as
+authenticated difficulty-adjustment inputs and validates the
+difficulty schedule of every block above the checkpoint.
 anchor-input-signature check (step 1, second bullet) is implemented in
 `sealrun/anchor.py` (`anchor-chain-verify --anchor-sig --anchor-pubkey`):
 the anchor tx's single input must parse as P2PKH with sighash

@@ -341,7 +341,7 @@ def test_generate_keypair_rejects_same_private_and_public_path(tmp_path):
 
 
 @pytest.mark.parametrize("which_path", ["private", "public"])
-def test_generate_keypair_rejects_symlink_output_without_overwriting_target(
+def test_generate_keypair_force_rejects_symlink_output_without_overwriting_target(
     tmp_path, which_path
 ):
     target = tmp_path / "target.txt"
@@ -354,6 +354,6 @@ def test_generate_keypair_rejects_symlink_output_without_overwriting_target(
     selected.symlink_to(target)
 
     with pytest.raises(OSError):
-        generate_keypair(private_path, public_path)
+        generate_keypair(private_path, public_path, force=True)
 
     assert target.read_bytes() == original

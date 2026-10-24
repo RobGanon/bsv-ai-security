@@ -103,12 +103,19 @@ def _sha256_fd(fd: int) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
-def generate_keypair(private_path: Path, public_path: Path) -> None:
+def generate_keypair(private_path: Path, public_path: Path, force: bool = False) -> None:
     # Refuse aliased output paths before creating or truncating either file.
     # resolve(strict=False) also catches distinct path spellings that point
     # at the same destination.
     if private_path.resolve() == public_path.resolve():
         raise ValueError("private and public key paths must be different")
+
+    # Check both paths before writing either one so refusal cannot leave a
+    # partial keypair behind. lexists also counts dangling symlinks.
+    if not force:
+        for path in (private_path, public_path):
+            if os.path.lexists(path):
+                raise ValueError(f"key file already exists: {path}")
 
     private_path.parent.mkdir(parents=True, exist_ok=True)
     public_path.parent.mkdir(parents=True, exist_ok=True)

@@ -151,6 +151,23 @@ still in progress.
 - The anchor key sits on the same machine as the publisher, which
   weakens protocol §7. Acceptable for a Teratestnet demo, stated
   in the docs.
+- The signer ceremony's recorded expectation (`signer expect`:
+  expected payload, previous txid, funding UTXO) lives in the
+  signer config as a plain local file, so the expectation the
+  human approval is checked against is not itself authenticated
+  (A8, accepted). The config sits in the same trust domain as
+  the signer binary and its key file: an attacker who can write
+  the signer's config is already inside the perimeter the
+  ceremony assumes (a dedicated signer machine and user), and
+  authenticating the expectation would add a second key to the
+  ceremony to defend a surface that perimeter already covers.
+  The ceremony's other hard rules (single input, payload
+  binding to the journal head, change back to the anchor
+  address, one transaction per approval) are enforced from the
+  transaction and the journal, not from the config. A
+  command-line `--expected-payload` at sign time is an override
+  of the recorded expectation and now requires the explicit
+  `--override-expected` acknowledgment flag (A9).
 - WoC-TTN's unspent index is broken; funding spends a known outpoint
   explicitly.
 - SPV header-chain verification validates each header's proof

@@ -247,6 +247,7 @@ def create_anchor_payload(
     prev_txid: str = ZERO_TXID,
     manifests: Any = None,
     public_key: Any = None,
+    end_seq: int | None = None,
 ) -> dict[str, Any]:
     """Create an unsigned anchor payload from a verified local journal.
 
@@ -255,6 +256,11 @@ def create_anchor_payload(
     ``seq <= end_seq`` (``0`` when the journal contains no acceptance,
     meaning "no release adopted"). It is never taken from the caller, so a
     publisher cannot anchor an arbitrary checkpoint value.
+
+    ``end_seq`` defaults to the journal's current end. Pass it
+    explicitly to re-derive the payload of a *historical* anchor —
+    the publisher verifies its stored records this way, so a record
+    is only believed when the journal reproduces its payload.
 
     Binding (issue #11): when the covered range contains any acceptance,
     ``manifests`` (the signed manifest envelopes to check acceptances
@@ -270,10 +276,14 @@ def create_anchor_payload(
         raise VerificationError("journal must exist as a regular non-symlink file")
     events = _read_jsonl(journal)
     _verify_audit_events(events)
-    end_seq = len(events)
+    if end_seq is None:
+        end_seq = len(events)
+    end_seq = _uint32(end_seq, "end_seq")
     start_seq = _uint32(start_seq, "start_seq")
     if end_seq < 1:
         raise VerificationError("cannot anchor an empty journal")
+    if end_seq > len(events):
+        raise VerificationError("end_seq must identify an event in the journal")
     if start_seq < 1 or start_seq > end_seq:
         raise VerificationError("start_seq must identify an event in the journal")
     if end_seq > UINT32_MAX:

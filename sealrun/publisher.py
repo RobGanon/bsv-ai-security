@@ -589,7 +589,9 @@ class Publisher:
         ``anchors[index]``: an anchor for a head was built with
         ``start_seq = previous_broadcast.end_seq + 1`` and
         ``prev_txid = previous_broadcast.txid`` (or the genesis txid for
-        the first anchor). Re-deriving from the journal and the manifest
+        the first anchor). The derivation is historical: it runs to the
+        record's own ``end_seq``, so records for older heads re-derive
+        exactly, not just the current head's record. Re-deriving from the journal and the manifest
         set is what makes a stored record verifiable — a record that was
         edited or injected into the store cannot reproduce the
         journal-derived payload, because the derived ``release_seq`` and
@@ -609,6 +611,9 @@ class Publisher:
         else:
             start_seq = 1
             prev_txid = self.config.genesis_txid.lower()
+        end_seq = anchors[index].get("end_seq")
+        if not isinstance(end_seq, int) or isinstance(end_seq, bool):
+            return None
         try:
             fields = create_anchor_payload(
                 self.config.journal,
@@ -616,10 +621,82 @@ class Publisher:
                 prev_txid=prev_txid,
                 manifests=self._load_manifests(),
                 public_key=self.config.public_key,
+                end_seq=end_seq,
             )
         except VerificationError:
             return None
         return fields["payload_hex"]
+
+    def _verify_broadcast_chain(self, anchors: list[dict]) -> None:
+        """Re-derive every broadcast record from the journal, in order.
+
+        The record store is attacker-writable in the threat model, so
+        no stored record is believed on its own fields — least of all
+        the record the next anchor will chain to. Each broadcast
+        record must (a) continue the chain exactly where the previous
+        verified record ended (its ``start_seq`` / ``prev_txid`` must
+        equal the running base), and (b) reproduce, byte for byte,
+        the payload the journal derives for its claimed range. The
+        first record bases on the configured genesis txid. Any
+        failure raises PublisherError: quietly skipping a bad record
+        would still leave it as the predecessor of every later
+        anchor.
+
+        This closes the A1 residual: the chain predecessor used to
+        be picked from the store unverified, so an injected
+        broadcast record for an older head became the next anchor's
+        ``prev_txid``. Pending and superseded records are not chain
+        links and are skipped here; the dedupe path separately
+        re-derives the current head's record before acting on it.
+        """
+        start_seq = 1
+        prev_txid = self.config.genesis_txid.lower()
+        manifests = self._load_manifests()
+        for record in anchors:
+            if record.get("status") != "broadcast":
+                continue
+            end_seq = record.get("end_seq")
+            txid = record.get("txid")
+            if (
+                record.get("start_seq") != start_seq
+                or (record.get("prev_txid") or "").lower() != prev_txid
+                or not isinstance(end_seq, int)
+                or isinstance(end_seq, bool)
+                or not isinstance(txid, str)
+                or len(txid) != 64
+                or not all(c in "0123456789abcdefABCDEF" for c in txid)
+            ):
+                raise PublisherError(
+                    "anchor record store is inconsistent with the "
+                    "journal: a broadcast record does not continue "
+                    "the verified chain; refusing to anchor on top "
+                    "of it"
+                )
+            try:
+                fields = create_anchor_payload(
+                    self.config.journal,
+                    start_seq=start_seq,
+                    prev_txid=prev_txid,
+                    manifests=manifests,
+                    public_key=self.config.public_key,
+                    end_seq=end_seq,
+                )
+            except VerificationError as exc:
+                raise PublisherError(
+                    "anchor record store is inconsistent with the "
+                    f"journal: cannot re-derive the broadcast record "
+                    f"ending at sequence {end_seq}: {exc}"
+                ) from exc
+            if fields["payload_hex"] != record.get("payload_hex"):
+                raise PublisherError(
+                    "anchor record store is inconsistent with the "
+                    f"journal: the broadcast record ending at "
+                    f"sequence {end_seq} does not match the payload "
+                    "derived from the journal; refusing to anchor "
+                    "on top of it"
+                )
+            start_seq = end_seq + 1
+            prev_txid = txid.lower()
 
     # -- checkpoint construction ---------------------------------------
 
@@ -659,6 +736,11 @@ class Publisher:
         if not events:
             raise PublisherError("cannot anchor an empty journal")
         head_hash = events[-1]["event_hash"].lower()
+
+        # The stored broadcast chain is verified against the journal
+        # before anything in the store is acted on (dedupe or chain
+        # predecessor): see _verify_broadcast_chain.
+        self._verify_broadcast_chain(anchors)
 
         # Dedupe: same head already anchored -> return it, never duplicate.
         #

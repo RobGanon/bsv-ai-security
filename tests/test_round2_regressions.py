@@ -748,3 +748,170 @@ def test_n4_beef_envelope_with_a_noncanonical_bump_is_rejected():
     )
     with pytest.raises(ValueError, match="non-canonical CompactSize"):
         parse_beef(envelope)
+
+
+# ---------------------------------------------------------------------------
+# A1 residual — the store is bound to the journal, not just to itself
+#
+# The store loader already enforces store-internal continuity
+# (verify_anchor_chain: genesis base, seq/prev linkage, no
+# duplicate txids, no forks), and round 2 re-derived the current
+# head's record on the dedupe path. What nothing checked: that a
+# broadcast record's payload actually derives from THIS journal.
+# A store that is internally perfect yet journal-false — payloads
+# encoding another journal's heads, or a release_seq this
+# journal's acceptances never derived — passed the loader and
+# became the next anchor's predecessor base. The publisher now
+# re-derives EVERY broadcast record from the journal, in chain
+# order, before acting on the store.
+#
+# The two journal-binding discriminators (fail on pre-fix code,
+# which builds a forked anchor): the tampered tip payload and the
+# transplanted store. The remaining tampers are defense in depth —
+# the loader's structural checks catch them first, and these tests
+# pin that the refusal happens either way.
+# ---------------------------------------------------------------------------
+
+
+class _StubBroadcaster:
+    """Hands out sequential fake txids; records what it was given."""
+
+    def __init__(self):
+        self.payloads = []
+
+    def broadcast(self, payload_hex):
+        self.payloads.append(payload_hex)
+        return f"{len(self.payloads):064x}"
+
+
+def _honest_chain(tmp_path):
+    """A publisher with three broadcast anchors over a growing journal."""
+    journal, key, envelope = _journal_with_acceptance(tmp_path)
+    publisher = Publisher(
+        PublisherConfig(
+            journal=journal,
+            anchor_record=tmp_path / "anchors.json",
+            genesis_txid="0" * 64,
+            checkpoint_interval_seconds=3600,
+            broadcast_enabled=True,
+            manifests=(envelope,),
+            public_key=key.pubkey_compressed(),
+        ),
+        broadcaster=_StubBroadcaster(),
+    )
+    records = [publisher.build_checkpoint("scheduled")]
+    for i in range(2):
+        append_audit_event(journal, "verify", f"more-{i}")
+        records.append(publisher.build_checkpoint("scheduled"))
+    store_path = tmp_path / "anchors.json"
+    store = json.loads(store_path.read_text())
+    assert [r["status"] for r in store["anchors"]] == ["broadcast"] * 3
+    return journal, publisher, store_path, store, records
+
+
+def _rewrite_store(store_path, store):
+    store_path.write_text(json.dumps(store, indent=2) + "\n")
+
+
+def test_a1r_honest_chain_extends_from_the_verified_tip(tmp_path):
+    journal, publisher, _path, _store, records = _honest_chain(tmp_path)
+    append_audit_event(journal, "verify", "more-2")
+    record = publisher.build_checkpoint("scheduled")
+    assert record["prev_txid"] == records[-1]["txid"]
+    assert record["start_seq"] == records[-1]["end_seq"] + 1
+
+
+def test_a1r_appended_duplicate_of_an_old_anchor_is_refused(tmp_path):
+    journal, publisher, store_path, store, _records = _honest_chain(tmp_path)
+    # A byte-copy of the first anchor, appended last. (The loader's
+    # duplicate-txid check catches this one; chain re-derivation is
+    # the second layer. Kept as layered coverage.)
+    store["anchors"].append(dict(store["anchors"][0]))
+    _rewrite_store(store_path, store)
+    append_audit_event(journal, "verify", "more-2")
+    with pytest.raises(PublisherError):
+        publisher.build_checkpoint("scheduled")
+
+
+def test_a1r_tampered_middle_txid_is_refused(tmp_path):
+    journal, publisher, store_path, store, _records = _honest_chain(tmp_path)
+    # The tip record itself is untouched; its predecessor's txid is
+    # rewritten. (The loader's linkage check catches this one;
+    # re-derivation of the tip against the tampered base would
+    # break too. Layered coverage.)
+    store["anchors"][1]["txid"] = "ff" * 32
+    _rewrite_store(store_path, store)
+    append_audit_event(journal, "verify", "more-2")
+    with pytest.raises(PublisherError):
+        publisher.build_checkpoint("scheduled")
+
+
+def test_a1r_tampered_tip_payload_is_refused(tmp_path):
+    journal, publisher, store_path, store, records = _honest_chain(tmp_path)
+    tip = store["anchors"][2]
+    tip["payload_hex"] = encode_anchor_payload(
+        head_hash=tip["head_hash"],
+        start_seq=tip["start_seq"],
+        end_seq=tip["end_seq"],
+        release_seq=999,
+        prev_txid=records[1]["txid"],
+    ).hex()
+    tip["release_seq"] = 999
+    _rewrite_store(store_path, store)
+    append_audit_event(journal, "verify", "more-2")
+    with pytest.raises(PublisherError):
+        publisher.build_checkpoint("scheduled")
+
+
+def test_a1r_first_record_with_wrong_genesis_base_is_refused(tmp_path):
+    journal, publisher, store_path, store, _records = _honest_chain(tmp_path)
+    store["anchors"][0]["prev_txid"] = "11" * 32
+    _rewrite_store(store_path, store)
+    append_audit_event(journal, "verify", "more-2")
+    with pytest.raises(PublisherError):
+        publisher.build_checkpoint("scheduled")
+
+
+def test_a1r_transplanted_store_from_another_journal_is_refused(tmp_path):
+    """The clean discriminator: a store that is internally perfect
+    (it is a real store — of a DIFFERENT journal) passes the
+    loader's continuity checks untouched, but its payloads encode
+    the other journal's heads. Only re-derivation against THIS
+    journal can refuse it. On pre-fix code the next anchor builds
+    on the transplanted tip."""
+    journal, publisher, store_path, _store, _records = _honest_chain(tmp_path)
+
+    # A second, honest chain over a different journal.
+    b_dir = tmp_path / "b"
+    b_dir.mkdir()
+    journal_b = b_dir / "audit.jsonl"
+    key_b = PrivKey.generate()
+    envelope_b = _envelope(key_b, 7, "rel-7")
+    append_audit_event(journal_b, "verify", "someone else's journal")
+    record_manifest_acceptance(
+        journal_b, 7, "rel-7", manifest_hash(envelope_b)
+    )
+    publisher_b = Publisher(
+        PublisherConfig(
+            journal=journal_b,
+            anchor_record=b_dir / "anchors.json",
+            genesis_txid="0" * 64,
+            checkpoint_interval_seconds=3600,
+            broadcast_enabled=True,
+            manifests=(envelope_b,),
+            public_key=key_b.pubkey_compressed(),
+        ),
+        broadcaster=_StubBroadcaster(),
+    )
+    publisher_b.build_checkpoint("scheduled")
+    for i in range(2):
+        append_audit_event(journal_b, "verify", f"b-{i}")
+        publisher_b.build_checkpoint("scheduled")
+
+    # Transplant B's store over A's: same genesis, internally
+    # consistent, entirely journal-false for A.
+    store_b = json.loads((b_dir / "anchors.json").read_text())
+    _rewrite_store(store_path, store_b)
+    append_audit_event(journal, "verify", "more-2")
+    with pytest.raises(PublisherError):
+        publisher.build_checkpoint("scheduled")

@@ -1050,7 +1050,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--tx-file", default=None, type=Path,
                    help="file holding the unsigned tx hex (alternative to --tx)")
     p.add_argument("--expected-payload", default=None,
-                   help="expected 84-byte anchor payload hex (overrides config)")
+                   help="expected 84-byte anchor payload hex (overrides "
+                   "the recorded expectation; requires --override-expected)")
+    p.add_argument("--override-expected", action="store_true",
+                   help="acknowledge that --expected-payload overrides "
+                   "the expectation recorded with `signer expect` for "
+                   "this one signing")
     p.add_argument("--network", default=None, choices=["testnet", "mainnet"],
                    help="must match the config network; mainnet is refused")
 
@@ -1067,6 +1072,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.command == "sign":
+            if args.expected_payload is not None and not args.override_expected:
+                print("signer: --expected-payload overrides the recorded "
+                      "expectation; pass --override-expected to "
+                      "acknowledge the override", file=sys.stderr)
+                return 1
             if bool(args.tx) == bool(args.tx_file):
                 print("signer: exactly one of --tx or --tx-file is required",
                       file=sys.stderr)

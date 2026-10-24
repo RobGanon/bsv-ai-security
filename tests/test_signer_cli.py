@@ -777,11 +777,13 @@ def test_main_return_codes(env, monkeypatch, capsys):
     monkeypatch.setattr("getpass.getpass", getpass_fn)
     rc = main(["sign", "--config", str(env["config_path"]),
                "--tx", tx.serialize().hex(),
-               "--expected-payload", env["payload"].hex()])
+               "--expected-payload", env["payload"].hex(),
+               "--override-expected"])
     assert rc == 0
     rc = main(["sign", "--config", str(env["config_path"]),
                "--tx", tx.serialize().hex(),
                "--expected-payload", env["payload"].hex(),
+               "--override-expected",
                "--network", "mainnet"])
     assert rc == 1
 
@@ -869,3 +871,16 @@ def test_signer_module_has_no_network_access():
         assert module.split(".")[0] not in (
             "urllib", "socket", "requests", "http", "httpx", "aiohttp",
         ), f"signer_cli must not import {module}"
+
+
+def test_expected_payload_override_requires_the_flag(env, capsys):
+    """A9: --expected-payload silently overrode the recorded
+    expectation. It now requires --override-expected as an explicit
+    acknowledgment; without it the sign command refuses before any
+    prompt or signing attempt."""
+    tx = _unsigned_tx(env)
+    rc = main(["sign", "--config", str(env["config_path"]),
+               "--tx", tx.serialize().hex(),
+               "--expected-payload", env["payload"].hex()])
+    assert rc == 1
+    assert "--override-expected" in capsys.readouterr().err

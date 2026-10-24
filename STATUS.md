@@ -31,19 +31,15 @@ fixed but no test proves it. *open* = not fixed.
 | **N5** | The inline deliberation left in `sealrun/cli.py` (the "should we require the public key?" commentary) is gone; the code states the rule. |
 | **N6** | `docs/using-sealrun.md` and `docs/phase2-implementation.md` now show `audit-manifest-accepted` with `--public-key`, matching the CLI. The end-user guide previously failed at the first anchor. |
 
-## Known residual (identified in round 2, not yet fixed)
+## Round 3 — A1 residual + A9 (branch `a1-predecessor-verification`)
 
-- **A1 residual — an injected `broadcast` record for a head that is no
-  longer the journal head is still used as the chain predecessor.**
-  The dedupe path now refuses a record that disagrees with the journal
-  (both branches), and the publisher stops there rather than acting on
-  it. But `_last_broadcast()` still selects the chain predecessor from
-  the store without verifying it, so a record injected for an *older*
-  head can still become the `prev_txid` of the next anchor. Closing
-  this needs either a way to re-derive an older record's payload
-  (`create_anchor_payload` derives `end_seq` from the current journal
-  length, so it can only re-derive the current head) or a store
-  quarantine/repair path. **Not covered by a test yet.**
+| Item | Fix | Test |
+|---|---|---|
+| **A1 residual** | `create_anchor_payload` takes an explicit `end_seq` (historical re-derivation), and the publisher re-derives **every** broadcast record from the journal, in chain order, before acting on the store (`_verify_broadcast_chain`). The store loader's continuity checks (issue #8) never bound records to the journal; now a store that is internally consistent yet journal-false is refused | `tests/test_round2_regressions.py::test_a1r_*` (6 tests; the tip-payload and transplanted-store cases fail on the pre-fix code, the rest are layered coverage) |
+| **A9** | `signer sign --expected-payload` requires `--override-expected` as an explicit acknowledgment; unacknowledged overrides refuse before any prompt | `tests/test_signer_cli.py::test_expected_payload_override_requires_the_flag`, `::test_main_return_codes` |
+| **A8** | Accepted, no code: the rationale is written into REVIEW.md's known limitations (signer config integrity is part of the signer-host trust domain) | — |
+
+## Known residual (identified in round 2, not yet fixed)
 - **`audit-append --event-type manifest_accepted` still writes an
   acceptance with no verification at all** (issue #11, the operator's
   journal write access is trusted by design). The CLI's
@@ -53,9 +49,8 @@ fixed but no test proves it. *open* = not fixed.
 
 ## Still open (from the 2026-10-21 independent review)
 
-A8, A9, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20, A21, A22,
+A11, A12, A13, A14, A15, A16, A17, A18, A19, A20, A21, A22,
 A23, A24, A25, A26 (see N3 — the TOTP half is fixed; the timing/lockout
 half is not), A27, A28, A29, A30, A31, A32, A33, A34, A35, A36, A37.
-
-Next task: **A8/A9** (authenticate `signer expect`; require an explicit
-override flag for `--expected-payload`).
+(A8 accepted with a written rationale and A9 fixed in round 3 — see
+the round-3 table above.)

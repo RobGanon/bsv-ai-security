@@ -41,7 +41,10 @@ transaction's OP_RETURN bytes to it exactly.
 ```sh
 sealrun signer sign --config ~/signer/signer.json --tx <unsigned tx hex>
 # or: --tx-file <file holding the unsigned tx hex>
-# or: --expected-payload <hex>  (overrides the config value for this signing)
+# or: --expected-payload <hex> --override-expected
+#     (overrides the recorded expectation for this signing; the
+#      override flag is required — an unacknowledged override is
+#      refused before any prompt)
 ```
 
 The flow:

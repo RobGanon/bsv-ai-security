@@ -50,7 +50,7 @@ fixed but no test proves it. *open* = not fixed.
 ## Still open (from the 2026-10-21 independent review)
 
 A11, A12, A13, A14, A15, A16, A17, A18, A19, A20, A21, A22,
-A23, A24, A25, A26 (see N3 — the TOTP half is fixed; the timing/lockout
-half is not), A27, A28, A29, A30, A31, A32, A33, A34, A35, A36, A37.
+A23, A24, A25, A27, A28, A29, A30, A34,
+A35, A36, A37, A38.
 (A8 accepted with a written rationale and A9 fixed in round 3 — see
 the round-3 table above.)

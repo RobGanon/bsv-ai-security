@@ -28,8 +28,12 @@ from sealrun.bsv import (
     verify_sig,
 )
 from sealrun.signer_cli import (
+    AUTH_FAILURES_FILENAME,
     Refusal,
     SignerError,
+    _authenticate,
+    _read_failure_count,
+    backoff_delay_for_failures,
     check_hard_rules,
     format_review,
     hash_password,
@@ -911,3 +915,176 @@ def test_expected_payload_override_requires_the_flag(env, capsys):
                "--expected-payload", env["payload"].hex()])
     assert rc == 1
     assert "--override-expected" in capsys.readouterr().err
+
+
+# --- A26: failed-attempt backoff ----------------------------------------------
+#
+# All backoff tests inject a recording sleep_fn, so no test ever waits
+# a real delay: the delay is asserted, never slept. A fresh env has no
+# counter file (count 0); failures are wrong-password unless stated.
+
+
+def _counter_path(env):
+    return env["dir"] / AUTH_FAILURES_FILENAME
+
+
+def _counter_value(env):
+    return json.loads(_counter_path(env).read_text())["consecutive_failures"]
+
+
+def _try_auth(env, *, password=PASSWORD, username="operator",
+              code=None, sleeps=None):
+    """One _authenticate call; returns (ok, sleeps recorded)."""
+    if sleeps is None:
+        sleeps = []
+    if code is None:
+        input_fn, getpass_fn = _auth_fns(env, password=password, username=username)
+    else:
+        def input_fn(prompt):
+            if "Username" in prompt:
+                return username
+            if "TOTP" in prompt or "code" in prompt:
+                return code
+            raise AssertionError(f"unexpected prompt: {prompt!r}")
+
+        def getpass_fn(prompt):
+            return password
+
+    ok = _authenticate(env["config"], input_fn=input_fn, getpass_fn=getpass_fn,
+                       time_fn=lambda: FIXED_TIME, sleep_fn=sleeps.append,
+                       config_dir=env["dir"])
+    return ok, sleeps
+
+
+def test_a26_backoff_schedule():
+    assert backoff_delay_for_failures(0) == 0
+    assert backoff_delay_for_failures(4) == 0
+    assert backoff_delay_for_failures(5) == 30
+    assert backoff_delay_for_failures(6) == 60
+    assert backoff_delay_for_failures(7) == 120
+    assert backoff_delay_for_failures(8) == 240
+    assert backoff_delay_for_failures(9) == 300
+    assert backoff_delay_for_failures(10) == 300
+    assert backoff_delay_for_failures(100) == 300
+    assert backoff_delay_for_failures(1000) == 300
+
+
+def test_a26_five_failures_then_backoff_enforced(env):
+    sleeps = []
+    for _ in range(4):
+        ok, sleeps = _try_auth(env, password="wrong password", sleeps=sleeps)
+        assert not ok
+    assert sleeps == []  # first four failures are free
+    assert _counter_value(env) == 4
+    ok, sleeps = _try_auth(env, password="wrong password", sleeps=sleeps)
+    assert not ok
+    assert sleeps == [30]  # 5th failure sleeps 30s (mocked, not waited)
+    assert _counter_value(env) == 5
+    ok, sleeps = _try_auth(env, password="wrong password", sleeps=sleeps)
+    assert not ok
+    assert sleeps == [30, 60]  # 6th failure doubles to 60s
+    # Continuing through the real increment path reaches the cap.
+    for _ in range(3):
+        ok, sleeps = _try_auth(env, password="wrong password", sleeps=sleeps)
+        assert not ok
+    assert sleeps == [30, 60, 120, 240, 300]
+    assert _counter_value(env) == 9
+
+
+def test_a26_wrong_totp_failures_also_count(env):
+    # Failure means ANY factor: correct password, wrong TOTP code.
+    # "000000" is not the valid code at FIXED_TIME (valid is 287082).
+    sleeps = []
+    for _ in range(5):
+        ok, sleeps = _try_auth(env, code="000000", sleeps=sleeps)
+        assert not ok
+    assert sleeps == [30]
+    assert _counter_value(env) == 5
+
+
+def test_a26_counter_resets_on_success(env):
+    sleeps = []
+    for _ in range(3):
+        ok, sleeps = _try_auth(env, password="wrong password", sleeps=sleeps)
+        assert not ok
+    assert _counter_value(env) == 3
+    ok, sleeps = _try_auth(env, sleeps=sleeps)  # correct credentials
+    assert ok
+    assert sleeps == []  # success never sleeps
+    assert _counter_value(env) == 0
+    # The next failure restarts from 1, with no backoff.
+    ok, sleeps = _try_auth(env, password="wrong password", sleeps=sleeps)
+    assert not ok
+    assert sleeps == []
+    assert _counter_value(env) == 1
+
+
+def test_a26_never_permanent_after_many_failures(env):
+    # The counter is seeded directly to 100 instead of performing 100
+    # real failed authentications (each would pay a PBKDF2 password
+    # verification; the increment path itself is covered by the tests
+    # above). The seeded state is exactly what 100 failures produce.
+    _counter_path(env).write_text(
+        json.dumps({"consecutive_failures": 100}), encoding="utf-8")
+    os.chmod(_counter_path(env), 0o600)
+    assert _read_failure_count(env["dir"]) == 100
+    assert backoff_delay_for_failures(100) == 300  # capped, never grows
+    # A correct attempt still succeeds immediately (no sleep on success)
+    # and resets the counter — no lockout window exists to expire.
+    sleeps = []
+    ok, sleeps = _try_auth(env, sleeps=sleeps)
+    assert ok
+    assert sleeps == []
+    assert _counter_value(env) == 0
+
+
+def test_a26_counter_file_is_private_and_persists_across_calls(env):
+    sleeps = []
+    ok, sleeps = _try_auth(env, password="wrong password", sleeps=sleeps)
+    assert not ok
+    path = _counter_path(env)
+    assert path.exists()
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    assert _counter_value(env) == 1
+    # A second, separate call reads the persisted count (not memory).
+    ok, sleeps = _try_auth(env, password="wrong password", sleeps=sleeps)
+    assert not ok
+    assert _counter_value(env) == 2
+
+
+def test_a26_success_with_counter_zero_has_no_delay_and_no_file(env):
+    sleeps = []
+    ok, sleeps = _try_auth(env, sleeps=sleeps)
+    assert ok
+    assert sleeps == []
+    assert not _counter_path(env).exists()  # reset is a no-op at 0
+    assert _read_failure_count(env["dir"]) == 0
+
+
+def test_a26_corrupt_counter_file_does_not_brick_ceremony(env):
+    _counter_path(env).write_text("this is not json", encoding="utf-8")
+    os.chmod(_counter_path(env), 0o600)
+    assert _read_failure_count(env["dir"]) == 0  # corrupt reads as 0
+    sleeps = []
+    ok, sleeps = _try_auth(env, password="wrong password", sleeps=sleeps)
+    assert not ok
+    assert sleeps == []
+    assert _counter_value(env) == 1  # self-healed on next failure
+    ok, sleeps = _try_auth(env, sleeps=sleeps)  # correct creds still work
+    assert ok
+    assert _counter_value(env) == 0
+
+
+def test_a26_backoff_engages_through_sign_flow(env):
+    # Threading check: the real ceremony path passes sleep_fn through.
+    tx = _unsigned_tx(env)
+    sleeps = []
+    for _ in range(5):
+        input_fn, getpass_fn = _auth_fns(env, password="wrong password")
+        with pytest.raises(SignerError, match="authentication failed"):
+            sign_flow(env["config_path"], tx.serialize().hex(),
+                      input_fn=input_fn, getpass_fn=getpass_fn,
+                      output_fn=lambda s: None, time_fn=lambda: FIXED_TIME,
+                      sleep_fn=sleeps.append)
+    assert sleeps == [30]
+    assert _counter_value(env) == 5

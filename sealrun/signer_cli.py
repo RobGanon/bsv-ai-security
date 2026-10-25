@@ -14,6 +14,18 @@ code is refused afterwards, so an observed code authorizes exactly one
 signature. The check-and-consume sequence is guarded by an exclusive
 lock, so concurrent ceremonies cannot both consume the same code.
 
+Failed authentication is rate-limited (A26): consecutive failures are
+counted in ``auth-failures.json`` next to the config, and from the
+5th consecutive failure on, each further failure sleeps a progressive
+backoff delay (doubling, capped at 5 minutes) before the CLI returns.
+There is no lockout window, so a correct attempt always succeeds
+immediately no matter how high the counter has grown — the delay is
+paid only after a failure, never before a success. The counter resets
+to 0 on success. The counter is a rate limit, not an authentication
+factor: anyone with write access to the signer directory can reset
+it, which is out of scope (that access already suffices to replace
+the config/key outright); it slows sequential guessing, nothing more.
+
 Stdlib only. No network access anywhere in this module: the signer
 never fetches anything and never broadcasts; the builder broadcasts
 the signed transaction separately.
@@ -85,6 +97,16 @@ CONFIG_VERSION = 1
 TOTP_STATE_FILENAME = "totp-state.json"
 # Sentinel meaning "no code has been consumed yet".
 NO_TOTP_STEP_USED = -1
+# Name of the failed-attempt counter file, resolved next to the config.
+AUTH_FAILURES_FILENAME = "auth-failures.json"
+# Failed-attempt backoff (A26): the first AUTH_BACKOFF_THRESHOLD - 1
+# consecutive failures are free; from the threshold on, each further
+# failure sleeps backoff_delay_for_failures(count) seconds before the
+# CLI returns. The delay doubles per failure and is capped, so a
+# single failed invocation never hangs longer than the cap.
+AUTH_BACKOFF_THRESHOLD = 5
+AUTH_BACKOFF_INITIAL_DELAY_SECONDS = 30
+AUTH_BACKOFF_MAX_DELAY_SECONDS = 300
 
 
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -558,6 +580,186 @@ def _write_last_used_step(config_dir: Path, step: int) -> None:
         os.close(dir_fd)
 
 
+# --- Failed-attempt backoff (A26) -------------------------------------------
+#
+# Password and TOTP comparisons are already constant-time, but nothing
+# limited how fast a local caller could guess: _authenticate could be
+# invoked an unbounded number of times with no cost per guess. The
+# counter below makes each guess after the first few cost a growing
+# sleep. It is deliberately NOT a lockout window: there is no state
+# that refuses a correct authentication, so the backoff can never
+# become permanent and a typo after many attacker failures costs at
+# most the capped delay (paid after that one failure, not before a
+# later success).
+
+
+def backoff_delay_for_failures(consecutive_failures: int) -> int:
+    """Seconds to sleep after a failed authentication (A26).
+
+    Zero below AUTH_BACKOFF_THRESHOLD; from the threshold on, the
+    delay doubles per failure (30, 60, 120, 240, ...) and is capped
+    at AUTH_BACKOFF_MAX_DELAY_SECONDS. The exponent is clamped before
+    the power so a corrupt/huge counter value cannot make the
+    computation itself hang: 30 * 2**4 already exceeds the cap, so
+    any larger exponent caps to the same value.
+    """
+    if consecutive_failures < AUTH_BACKOFF_THRESHOLD:
+        return 0
+    shift = min(consecutive_failures - AUTH_BACKOFF_THRESHOLD, 4)
+    delay = AUTH_BACKOFF_INITIAL_DELAY_SECONDS * (2 ** shift)
+    return min(delay, AUTH_BACKOFF_MAX_DELAY_SECONDS)
+
+
+def _auth_failures_path(config_dir: Path) -> Path:
+    return config_dir / AUTH_FAILURES_FILENAME
+
+
+def _read_failure_count(config_dir: Path) -> int:
+    """Return the consecutive-failure count, or 0.
+
+    Missing, unreadable, or corrupt counter file reads as 0. That is
+    deliberate and safe: the counter is a rate limit, not an
+    authentication factor — resetting it grants nothing (the factors
+    are still checked) and denies nothing (a correct attempt still
+    succeeds). A corrupt counter therefore cannot brick the ceremony;
+    the next failure overwrites it with a valid count (self-healing).
+    Threat-model bound, same as the TOTP state file: anyone with
+    write access to the signer directory can delete or rewrite this
+    file and reset the counter. That attacker is out of scope, since
+    write access to the signer directory already suffices to replace
+    the config/key and bypass the ceremony entirely. The counter
+    slows sequential guessing; it does not stop a local attacker who
+    already owns the signer directory.
+    """
+    path = _auth_failures_path(config_dir)
+    if not os.path.lexists(path):
+        return 0
+    try:
+        text = _read_private_text(path, "auth failure counter")
+    except SignerError:
+        return 0
+    try:
+        state = json.loads(text)
+    except json.JSONDecodeError:
+        return 0
+    if not isinstance(state, dict):
+        return 0
+    count = state.get("consecutive_failures")
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        return 0
+    return count
+
+
+def _write_failure_count(config_dir: Path, count: int) -> None:
+    """Persist the consecutive-failure count atomically, 0600.
+
+    Same pattern as _write_last_used_step (temp file, fsync, rename):
+    a crash leaves the old count or the new count, never a truncated
+    file. A write failure raises SignerError — the signer directory
+    must already be writable for signing (TOTP state + audit log),
+    so a counter write failure does not newly brick a working setup.
+    """
+    state_path = _auth_failures_path(config_dir)
+    payload = json.dumps({"consecutive_failures": count}, indent=2, sort_keys=True) + "\n"
+    tmp_path = state_path.with_name(f".{AUTH_FAILURES_FILENAME}.tmp")
+    # O_EXCL: never write through a pre-created file (it could be
+    # someone else's inode). A stale temp file left behind by a
+    # crashed run is removed and recreated.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW
+    try:
+        fd = os.open(tmp_path, flags, 0o600)
+    except FileExistsError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        try:
+            fd = os.open(tmp_path, flags, 0o600)
+        except OSError as exc:
+            raise SignerError(
+                f"cannot write auth failure counter: {tmp_path}"
+            ) from exc
+    except OSError as exc:
+        raise SignerError(
+            f"cannot write auth failure counter: {tmp_path}"
+        ) from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            # fchmod on the descriptor: the mode is set on the inode
+            # being written, so a path swap cannot redirect it.
+            try:
+                os.fchmod(handle.fileno(), 0o600)
+            except OSError:
+                pass
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        raise SignerError(
+            f"cannot write auth failure counter: {tmp_path}"
+        ) from exc
+    try:
+        os.replace(tmp_path, state_path)
+    except OSError as exc:
+        raise SignerError(
+            f"cannot install auth failure counter: {state_path}"
+        ) from exc
+    # fsync the directory so the rename itself is durable.
+    try:
+        dir_fd = os.open(config_dir, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
+def _record_auth_failure(config_dir: Path) -> int:
+    """Increment the consecutive-failure count and return the new count.
+
+    Serialized by _totp_state_lock — the signer directory's state lock,
+    shared with the TOTP state so concurrent invocations cannot lose
+    increments. Must not be called while that lock is already held
+    (flock on a second descriptor in the same process would deadlock
+    on itself); callers inside the TOTP lock set a flag and call this
+    after the lock releases.
+    """
+    with _totp_state_lock(config_dir):
+        count = _read_failure_count(config_dir) + 1
+        _write_failure_count(config_dir, count)
+    return count
+
+
+def _reset_auth_failures(config_dir: Path) -> None:
+    """Reset the consecutive-failure count to 0 after a success.
+
+    No-op (and no file created) when the count is already 0, so a
+    successful authentication from a clean state touches no state.
+    """
+    with _totp_state_lock(config_dir):
+        if _read_failure_count(config_dir) != 0:
+            _write_failure_count(config_dir, 0)
+
+
+def _fail_auth(config_dir: Path,
+               sleep_fn: Callable[[float], None] | None) -> bool:
+    """Record one failure, sleep the backoff delay if any, return False.
+
+    The sleep happens after the counter is persisted and outside any
+    lock, so a sleeping failure does not block other invocations on
+    the state lock (each guessing invocation pays its own delay).
+    ``sleep_fn`` is a test seam (production passes None, i.e. time.sleep).
+    """
+    count = _record_auth_failure(config_dir)
+    delay = backoff_delay_for_failures(count)
+    if delay > 0:
+        (sleep_fn or time.sleep)(delay)
+    return False
+
+
 # --- transaction decoding (uses the existing Tx parser) --------------------
 
 
@@ -785,6 +987,7 @@ def sign_approved_tx(tx: Tx, approved_txid: str, config: dict[str, Any],
 def _authenticate(config: dict[str, Any], *, input_fn: Callable[[str], str],
                   getpass_fn: Callable[[str], str],
                   time_fn: Callable[[], float],
+                  sleep_fn: Callable[[float], None] | None = None,
                   config_dir: Path | None = None) -> bool:
     """Username + password + TOTP for this one transaction only.
 
@@ -797,45 +1000,64 @@ def _authenticate(config: dict[str, Any], *, input_fn: Callable[[str], str],
     the transaction is signed — a code that was accepted is never
     accepted again, even if the ceremony fails afterwards.
 
+    Failed attempts are **counted** (A26): any return of False — any
+    factor, including a TOTP replay — increments the consecutive-
+    failure counter in ``auth-failures.json`` next to the config,
+    and from the 5th consecutive failure on, the call sleeps the
+    progressive backoff delay (doubling, capped at 5 minutes) before
+    returning. A success resets the counter to 0. There is no lockout
+    window: a correct attempt always succeeds immediately, however
+    high the counter has grown. Errors (corrupt TOTP state, I/O)
+    raise instead of returning False and do not increment the
+    counter. ``sleep_fn`` is a test seam (None means time.sleep);
     ``config_dir`` is where the single-use state lives; it defaults
     to the current directory.
     """
     username = input_fn("Username: ")
     password = getpass_fn("Password: ")
     code = input_fn("TOTP code: ")
-    if username != config["username"]:
-        return False
-    if not verify_password(password, config["password"]):
-        return False
-    totp = config["totp"]
     if config_dir is None:
         config_dir = Path.cwd()
+    if username != config["username"]:
+        return _fail_auth(config_dir, sleep_fn)
+    if not verify_password(password, config["password"]):
+        return _fail_auth(config_dir, sleep_fn)
+    totp = config["totp"]
     # Hold the lock across read-check-consume so two concurrent
-    # ceremonies cannot both consume the same time-step.
+    # ceremonies cannot both consume the same time-step. The failure
+    # counter is updated AFTER the lock releases (via _fail_auth,
+    # which takes the lock itself) — never nested, or flock would
+    # deadlock on itself.
     with _totp_state_lock(config_dir):
         matched_step = totp_matching_step(
             totp["secret"], code, time_fn(),
             digits=totp.get("digits", TOTP_DEFAULT_DIGITS),
         )
         if matched_step is None:
-            return False
-        last_used = _read_last_used_step(config_dir)
-        if matched_step <= last_used:
-            # A code from this step (or an earlier one) was already
-            # used. Refuse: one code authorizes exactly one signature.
-            # Recorded distinctly: a replay attempt is worth seeing in
-            # the audit log, unlike the other factor failures whose
-            # cause is deliberately not disclosed.
-            try:
-                _append_log(config, config_dir, {
-                    "decision": "auth_failure",
-                    "reason": "TOTP code replay refused (code already used)",
-                })
-            except SignerError:
-                pass  # the refusal stands even if the audit write fails
-            return False
-        # Burn the step before anything is signed.
-        _write_last_used_step(config_dir, matched_step)
+            failed = True
+        else:
+            last_used = _read_last_used_step(config_dir)
+            if matched_step <= last_used:
+                # A code from this step (or an earlier one) was already
+                # used. Refuse: one code authorizes exactly one signature.
+                # Recorded distinctly: a replay attempt is worth seeing in
+                # the audit log, unlike the other factor failures whose
+                # cause is deliberately not disclosed.
+                try:
+                    _append_log(config, config_dir, {
+                        "decision": "auth_failure",
+                        "reason": "TOTP code replay refused (code already used)",
+                    })
+                except SignerError:
+                    pass  # the refusal stands even if the audit write fails
+                failed = True
+            else:
+                # Burn the step before anything is signed.
+                _write_last_used_step(config_dir, matched_step)
+                failed = False
+    if failed:
+        return _fail_auth(config_dir, sleep_fn)
+    _reset_auth_failures(config_dir)
     return True
 
 
@@ -845,6 +1067,7 @@ def sign_flow(config_path: str | Path, tx_hex: str, *,
               getpass_fn: Callable[[str], str] | None = None,
               output_fn: Callable[[str], None] | None = None,
               time_fn: Callable[[], float] | None = None,
+              sleep_fn: Callable[[float], None] | None = None,
               network: str | None = None) -> str:
     """Run one signing ceremony. Returns the signed tx hex.
 
@@ -889,7 +1112,8 @@ def sign_flow(config_path: str | Path, tx_hex: str, *,
     })
     output_fn(format_review(tx, info, config))
     if not _authenticate(config, input_fn=input_fn, getpass_fn=getpass_fn,
-                         time_fn=time_fn, config_dir=config_dir):
+                         time_fn=time_fn, config_dir=config_dir,
+                         sleep_fn=sleep_fn):
         _append_log(config, config_dir, {
             "decision": "auth_failure", "txid": info["unsigned_txid"],
             "reason": "authentication failed",
@@ -914,6 +1138,7 @@ def run_sign(config_path: str | Path, tx_hex: str, *,
              getpass_fn: Callable[[str], str] | None = None,
              output_fn: Callable[[str], None] | None = None,
              time_fn: Callable[[], float] | None = None,
+             sleep_fn: Callable[[float], None] | None = None,
              network: str | None = None) -> int:
     """CLI wrapper around :func:`sign_flow`: exit code, never a traceback."""
     output_fn = output_fn or print
@@ -924,7 +1149,7 @@ def run_sign(config_path: str | Path, tx_hex: str, *,
     try:
         sign_flow(config_path, tx_hex, expected_payload_hex=expected_payload_hex,
                   input_fn=input_fn, getpass_fn=getpass_fn, output_fn=output_fn,
-                  time_fn=time_fn, network=network)
+                  time_fn=time_fn, sleep_fn=sleep_fn, network=network)
         return 0
     except (Refusal, SignerError) as exc:
         error_fn(f"signer: refused: {exc}")

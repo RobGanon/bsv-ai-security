@@ -61,8 +61,10 @@ anyway).
    with out-of-band anchors. A root attacker on the verifying host wins by
    definition.
 3. **Network attacker / malicious WoC endpoint.** Broadcast and block
-   fetches go over HTTPS; inclusion is re-verified (SPV / BUMP / BEEF /
-   header chain), so the provider is not trusted for correctness.
+   fetches go over HTTPS, and an explicit non-HTTPS WoC base URL is
+   refused (HTTP only for a loopback host, for tests/dev); inclusion
+   is re-verified (SPV / BUMP / BEEF / header chain), so the provider
+   is not trusted for correctness.
 4. **Holder of a signing key.** Can sign arbitrary manifests; key
    management is out of scope.
 5. **Supply chain** (this repo, CI, dependencies). Dependencies are zero by

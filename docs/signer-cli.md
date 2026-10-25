@@ -97,7 +97,13 @@ is a normal outcome — there is no emergency override.
 
 - **Authentication failure** (wrong username, password, or TOTP):
   refused, recorded as `auth_failure`. The message does not say which
-  factor failed.
+  factor failed. Failures also count toward consecutive-failure
+  backoff: the first 4 consecutive failures are free, and from the
+  5th on each failure sleeps a progressive delay (30s, then doubling
+  to a 300s cap) before the CLI returns. There is no lockout: a
+  correct attempt always succeeds immediately, and a success resets
+  the counter to 0. The counter lives in `auth-failures.json` next
+  to the config, with `0600` permissions.
 - **TOTP code already used**: refused, recorded as `auth_failure` with
   the reason `TOTP code replay refused (code already used)`. The code
   was valid — it is refused because it has already signed a

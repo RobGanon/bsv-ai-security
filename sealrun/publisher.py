@@ -75,6 +75,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import json
+import math
 import os
 import secrets
 import stat
@@ -184,6 +185,7 @@ class PublisherConfig:
         if (
             not isinstance(self.lock_timeout_seconds, (int, float))
             or isinstance(self.lock_timeout_seconds, bool)
+            or not math.isfinite(self.lock_timeout_seconds)
             or self.lock_timeout_seconds <= 0
         ):
             raise PublisherError("lock_timeout_seconds must be a positive number")

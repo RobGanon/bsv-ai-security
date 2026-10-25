@@ -119,6 +119,24 @@ def test_bad_genesis_and_interval_rejected(tmp_path):
         _config(tmp_path, interval=0)
 
 
+def test_non_finite_lock_timeout_rejected(tmp_path):
+    """Regression (A32): NaN/inf passed validation (nan <= 0 is False),
+    so the lock deadline could never fire and the publisher hung under
+    contention instead of failing closed."""
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(PublisherError, match="positive number"):
+            PublisherConfig(
+                journal=tmp_path / "audit.jsonl",
+                anchor_record=tmp_path / "anchors.json",
+                lock_timeout_seconds=bad,
+            )
+    PublisherConfig(
+        journal=tmp_path / "audit.jsonl",
+        anchor_record=tmp_path / "anchors.json",
+        lock_timeout_seconds=30.0,
+    )
+
+
 def test_genesis_mismatch_fails_closed(tmp_path):
     journal = tmp_path / "audit.jsonl"
     append_audit_event(journal, "test", "first")

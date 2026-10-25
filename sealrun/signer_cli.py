@@ -126,7 +126,7 @@ def _hotp(secret: bytes, counter: int, digits: int) -> str:
 def totp_code(secret_b32: str, timestamp: float, *, digits: int = TOTP_DEFAULT_DIGITS,
               step: int = TOTP_STEP_SECONDS) -> str:
     """Compute the TOTP code for ``timestamp`` (seconds since epoch)."""
-    if not 1 <= digits <= 10:
+    if isinstance(digits, bool) or not 1 <= digits <= 10:
         raise SignerError("TOTP digits must be between 1 and 10")
     try:
         secret = base64.b32decode(secret_b32, casefold=True)
@@ -333,7 +333,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
     if not isinstance(totp, dict) or "secret" not in totp:
         raise SignerError("signer config totp must be an object with a secret")
     digits = totp.get("digits", TOTP_DEFAULT_DIGITS)
-    if not isinstance(digits, int) or not 1 <= digits <= 10:
+    if not isinstance(digits, int) or isinstance(digits, bool) or not 1 <= digits <= 10:
         raise SignerError("signer config totp digits must be between 1 and 10")
     if config.get("expected_prev_txid") is not None:
         config["expected_prev_txid"] = _require_hex64(

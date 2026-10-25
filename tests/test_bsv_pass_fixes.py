@@ -329,6 +329,42 @@ def test_f1_broadcaster_rejects_negative_funding_vout():
         broadcaster.broadcast(_payload_hex())
 
 
+def test_f1_broadcaster_enforces_https_base():
+    """Regression (A31): WoCBroadcaster accepted plaintext HTTP, so
+    broadcast prev-tx fetches could travel unencrypted."""
+
+    class StubSigner:
+        def sign(self, digest):
+            return b"\x00" * 71
+
+        def pubkey_compressed(self):
+            return bytes.fromhex(ANCHOR_PUBKEY)
+
+        def address(self, network="testnet"):
+            return "mjkFEqit3Ns7eH29kT2qWNpVwnNqNTJsFV"
+
+    def request_fn(method, url, body):
+        raise AssertionError("unreachable")
+
+    funding = FundingUTXO(txid=FAUCET_TX, vout=0, value=0, script_hex="")
+    with pytest.raises(ValueError, match="https"):
+        WoCBroadcaster(
+            base_url="http://api.example.com/v1",
+            network="testnet",
+            signer=StubSigner(),
+            funding=funding,
+            request_fn=request_fn,
+        )
+    ok = WoCBroadcaster(
+        base_url="https://api.example.com/v1",
+        network="testnet",
+        signer=StubSigner(),
+        funding=funding,
+        request_fn=request_fn,
+    )
+    assert ok.base_url == "https://api.example.com/v1"
+
+
 def test_f1_cli_returns_1_not_traceback_on_struct_error(monkeypatch):
     import sealrun.cli as cli_mod
 

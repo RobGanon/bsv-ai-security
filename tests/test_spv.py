@@ -22,6 +22,7 @@ from sealrun.spv import (
     merkle_path,
     merkle_root,
     target_from_bits,
+    validate_woc_base_url,
     verify_header,
     verify_header_chain,
     verify_merkle_proof,
@@ -382,6 +383,35 @@ def test_woc_fetcher_maps_http_error_to_unavailable():
 
     with pytest.raises(SPVUnavailable):
         WoCBlockFetcher(request_fn=request_fn).fetch_tx(TX1)
+
+
+def test_woc_base_url_scheme_enforced():
+    """Regression (A31): --woc-base accepted plaintext HTTP, so SPV
+    inputs could travel unencrypted. Only https, or http for loopback."""
+    assert validate_woc_base_url("https://api.example.com/v1") == (
+        "https://api.example.com/v1"
+    )
+    assert validate_woc_base_url("http://127.0.0.1:9") == "http://127.0.0.1:9"
+    assert validate_woc_base_url("http://localhost:3000/x") == (
+        "http://localhost:3000/x"
+    )
+    for bad in (
+        "http://api.example.com/v1",
+        "http://example.com",
+        "ftp://example.com",
+        "example.com",
+        "",
+        "https://",
+    ):
+        with pytest.raises(ValueError, match="https"):
+            validate_woc_base_url(bad)
+
+
+def test_woc_fetcher_rejects_plaintext_base():
+    with pytest.raises(ValueError, match="https"):
+        WoCBlockFetcher(base_url="http://api.example.com/v1")
+    fetcher = WoCBlockFetcher(base_url="http://127.0.0.1:9")
+    assert fetcher.base_url == "http://127.0.0.1:9"
 
 
 # --- CLI --spv -------------------------------------------------------------

@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import struct
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, replace
 from typing import Callable, Protocol
@@ -33,6 +34,28 @@ from .bsv import sha256d
 
 # Default Teratestnet WhatsOnChain (WoC v1 compatible).
 WOC_TTN_BASE = "https://api.woc-ttn.bsvblockchain.tech/v1/bsv/test"
+
+
+def validate_woc_base_url(base_url: str) -> str:
+    """Return ``base_url`` if it is safe for chain-data fetches.
+
+    Only https is accepted, plus http for a loopback host (127.0.0.1 /
+    localhost) so local tests and dev servers keep working. Anything
+    else is rejected: SPV inputs and broadcast fetches must not travel
+    over plaintext, where a network attacker could feed fabricated
+    chain data.
+    """
+    if not isinstance(base_url, str) or not base_url:
+        raise ValueError(f"WoC base URL must be an https URL, got {base_url!r}")
+    parsed = urllib.parse.urlparse(base_url)
+    host = parsed.hostname or ""
+    if parsed.scheme == "https" and host:
+        return base_url
+    if parsed.scheme == "http" and host in ("127.0.0.1", "localhost"):
+        return base_url
+    raise ValueError(
+        f"WoC base URL must use https (http only for loopback), got {base_url!r}"
+    )
 
 HEX_64 = set("0123456789abcdefABCDEF")
 
@@ -917,7 +940,7 @@ class WoCBlockFetcher:
         base_url: str = WOC_TTN_BASE,
         request_fn: RequestFn | None = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = validate_woc_base_url(base_url).rstrip("/")
         self._request = request_fn or _urllib_get
 
     def _get_json(self, path: str) -> dict:

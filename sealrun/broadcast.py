@@ -38,6 +38,7 @@ from typing import Callable, Protocol
 
 from .anchor import decode_anchor_payload
 from .bsv import PrivKey, Tx, sats_from_btc_decimal, validate_network
+from .spv import validate_woc_base_url
 
 # Default Teratestnet WhatsOnChain (WoC v1 compatible).
 WOC_TTN_BASE = "https://api.woc-ttn.bsvblockchain.tech/v1/bsv/test"
@@ -146,7 +147,7 @@ class WoCBroadcaster:
         funding: FundingUTXO,
         request_fn: RequestFn | None = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = validate_woc_base_url(base_url).rstrip("/")
         self.network = validate_network(network)
         self.signer = signer
         self.fee_sats = fee_sats

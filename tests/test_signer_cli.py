@@ -215,6 +215,33 @@ def test_load_config_refuses_symlink(env):
         load_config(link)
 
 
+def test_config_totp_digits_bool_refused(env):
+    """Regression (A33): JSON true passed the int check as 1, silently
+    weakening TOTP to 1 digit. Both booleans are refused; 6 is accepted."""
+    for bad in (True, False):
+        config = dict(env["config"])
+        config["totp"] = {"secret": RFC_SECRET_B32, "digits": bad}
+        path = env["dir"] / "signer-bad-digits.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        os.chmod(path, 0o600)
+        with pytest.raises(SignerError, match="digits"):
+            load_config(path)
+    config = dict(env["config"])
+    config["totp"] = {"secret": RFC_SECRET_B32, "digits": 6}
+    path = env["dir"] / "signer-good-digits.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    os.chmod(path, 0o600)
+    assert load_config(path)["totp"]["digits"] == 6
+
+
+def test_totp_code_digits_bool_refused():
+    """Regression (A33, defense in depth): totp_code rejects bool digits."""
+    for bad in (True, False):
+        with pytest.raises(SignerError, match="digits"):
+            totp_code(RFC_SECRET_B32, FIXED_TIME, digits=bad)
+    assert len(totp_code(RFC_SECRET_B32, FIXED_TIME, digits=6)) == 6
+
+
 def test_load_signer_key_refuses_symlink(env):
     from sealrun.signer_cli import load_signer_key
 

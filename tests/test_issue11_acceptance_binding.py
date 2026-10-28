@@ -384,3 +384,63 @@ def test_cli_audit_accepted_hash_flag_and_anchor_verify_with_binding(tmp_path):
         ])
         == 0
     )
+
+
+# --- generic append refusal (Design A: issue #11 fix) ---
+
+
+def test_cli_audit_append_manifest_accepted_is_refused(tmp_path):
+    journal = tmp_path / "audit.jsonl"
+    # A generic event still appends, proving the refusal below is
+    # specific to manifest_accepted, not a broken append path.
+    assert (
+        main([
+            "audit-append",
+            "--journal", str(journal),
+            "--event-type", "note",
+            "--detail", "hello",
+        ])
+        == 0
+    )
+    before = journal.read_text(encoding="utf-8")
+    # The exact #11 repro shape: well-formed fake acceptance.
+    fake_detail = json.dumps(
+        {
+            "release_seq": 999,
+            "release_id": "fake-release",
+            "manifest_hash": "0" * 64,
+        }
+    )
+    assert (
+        main([
+            "audit-append",
+            "--journal", str(journal),
+            "--event-type", "manifest_accepted",
+            "--detail", fake_detail,
+        ])
+        == 1
+    )
+    # Refusal happens before any write: journal unchanged.
+    assert journal.read_text(encoding="utf-8") == before
+    assert (
+        main(["audit-verify", "--journal", str(journal)])
+        == 0
+    )
+
+
+def test_cli_audit_append_other_event_types_still_work(tmp_path):
+    journal = tmp_path / "audit.jsonl"
+    assert (
+        main([
+            "audit-append",
+            "--journal", str(journal),
+            "--event-type", "custom-event",
+            "--detail", "still allowed",
+        ])
+        == 0
+    )
+    assert (
+        main(["audit-verify", "--journal", str(journal)])
+        == 0
+    )
+    assert "custom-event" in journal.read_text(encoding="utf-8")

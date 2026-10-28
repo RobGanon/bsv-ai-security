@@ -658,6 +658,19 @@ def main(argv=None):
                     print(
                         "BEEF INCLUSION CHECK FAILED: see per-anchor reasons."
                     )
+                    # Report ancestry separately, never as inclusion:
+                    # an unmined anchor verified by ancestry only is
+                    # not proven inside a claimed block.
+                    _anchors = result.get("chain", {}).get("anchors", []) or result.get(
+                        "anchors", []
+                    )
+                    for _summary in _anchors:
+                        _inc = _summary.get("beef_inclusion", {})
+                        if _inc.get("status") == "ancestry":
+                            print(
+                                "BEEF ANCESTRY (not block inclusion): "
+                                f"{_summary.get('txid')} verified by ancestry only."
+                            )
             if not (
                 (args.spv and result.get("chain_inclusion_verified"))
                 or result.get("bump_inclusion_verified")

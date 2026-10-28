@@ -365,13 +365,30 @@ def test_apply_bump_inclusion_rejects_non_dict():
 
 
 def test_cli_bump_file_verifies_and_prints_line(tmp_path, capsys, monkeypatch):
+    # NOTE: this test used to use the BRC-74 spec BUMP for a spec txid,
+    # with a vout-only fake provider. Payload binding now recomputes
+    # the fetched tx's txid, so that fixture cannot pass: we have no
+    # full body for the spec tx. The spec BUMP is still covered at
+    # library level above; this CLI test uses the real Teratestnet
+    # block 36722 BUMP for anchor #1, whose full body we do have.
     from sealrun import cli as cli_module
-    from sealrun.bsv import build_op_return_script
+    from sealrun.spv import build_bump
+    from test_anchor_signature import ANCHOR1_TX, TX1
+    from test_spv import BLOCK_36722
 
     genesis = "0" * 64
-    claimed = encode_anchor_payload(
-        head_hash="11" * 32, start_seq=1, end_seq=3,
-        release_seq=0, prev_txid=genesis,
+    _script = bytes.fromhex(ANCHOR1_TX["vout"][0]["scriptPubKey"]["hex"])
+    claimed = _script[3:]
+    bump = build_bump(BLOCK_36722["tx"], [2], block_height=36722)
+    header = BlockHeader(
+        version=BLOCK_36722["version"],
+        prev_hash=BLOCK_36722["prev"],
+        merkle_root=BLOCK_36722["root"],
+        time=BLOCK_36722["time"],
+        bits=BLOCK_36722["bits"],
+        nonce=BLOCK_36722["nonce"],
+        height=36722,
+        hash=BLOCK_36722["hash"],
     )
 
     class FakeWoC:
@@ -379,20 +396,21 @@ def test_cli_bump_file_verifies_and_prints_line(tmp_path, capsys, monkeypatch):
             pass
 
         def fetch_header(self, height):
-            return _spec_header()
+            return header
 
         def fetch_tx_full(self, txid):
-            script = build_op_return_script(claimed)
-            return {"vout": [{"scriptPubKey": {"hex": script.hex()}}]}
+            if txid.lower() == TX1.lower():
+                return copy.deepcopy(ANCHOR1_TX)
+            raise KeyError(txid)
 
     monkeypatch.setattr(cli_module, "WoCBlockFetcher", FakeWoC)
     anchor = tmp_path / "a1.json"
     anchor.write_text(json.dumps({
         "payload_hex": claimed.hex(),
-        "txid": SPEC_TXIDS[0],
+        "txid": TX1,
     }))
     bumps = tmp_path / "bumps.json"
-    bumps.write_text(json.dumps({SPEC_TXIDS[0]: SPEC_JSON}))
+    bumps.write_text(json.dumps({TX1: bump}))
     cli_module.main([
         "anchor-chain-verify", "--genesis-txid", genesis,
         "--anchor", str(anchor),

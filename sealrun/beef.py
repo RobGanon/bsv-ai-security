@@ -481,11 +481,15 @@ def apply_beef_inclusion(result: dict, verifier: BeefVerifier, beef: Beef) -> di
     reported by its own tx's status inside it. Anchors whose txid is
     not in the envelope verify as False. Same two result shapes and
     non-mutating contract as apply_bump_inclusion. Top-level
-    ``beef_inclusion_verified`` is True only when every anchor's tx
-    is in the envelope and verifies. Per-anchor verdicts carry
-    ``verified: True`` with ``status: "ancestry"`` for unmined txs — that
-    means ancestry + amount conservation only, not signature verification;
-    consumers must read ``status``, not the bare ``verified`` flag.
+    ``beef_inclusion_verified`` is True only when the envelope as a
+    whole verifies AND every anchor's tx is in the envelope with
+    status ``"bump"`` (mined, inside a claimed block). An unmined
+    anchor with status ``"ancestry"`` is reported separately, in its
+    per-anchor ``beef_inclusion`` dict (status + blockheight None),
+    but does NOT count as block inclusion — ancestry means ancestry
+    + amount conservation only, not signature verification and not
+    block inclusion. Likewise, a failing unrelated tx in the envelope
+    fails the whole inclusion check, fail-closed.
     """
     if not isinstance(beef, Beef):
         raise ValueError("beef must be a Beef")
@@ -513,12 +517,21 @@ def apply_beef_inclusion(result: dict, verifier: BeefVerifier, beef: Beef) -> di
                 "status": "failed",
                 "reason": "BEEF verification produced no verdict for this tx",
             }
+        reason = entry["reason"]
+        if entry["status"] == "ancestry":
+            reason += " — ancestry only, not block inclusion"
+        if not verification.verified:
+            reason += " — BEEF envelope verification failed"
         return {
-            "verified": entry["verified"],
+            "verified": bool(
+                verification.verified
+                and entry["verified"]
+                and entry["status"] == "bump"
+            ),
             "blockheight": entry["blockheight"],
             "blockhash": entry["blockhash"],
             "status": entry["status"],
-            "reason": entry["reason"],
+            "reason": reason,
         }
 
     if "chain" in result:

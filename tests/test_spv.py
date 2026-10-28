@@ -418,8 +418,17 @@ def test_woc_fetcher_rejects_plaintext_base():
 
 
 def test_cli_spv_verifies_chain_and_prints_inclusion_line(tmp_path, capsys, monkeypatch):
+    # NOTE: this test used to verify two anchors with vout-only fake
+    # providers. Payload binding now recomputes the fetched tx's txid,
+    # so a fake must return a full body that hashes to the claimed
+    # txid. We have that body for anchor #1 only — anchor #2's body
+    # is not in the fixtures — so this CLI test uses anchor #1 only.
+    # Two-anchor SPV inclusion is still covered at library level by
+    # test_apply_chain_inclusion_plain_shape.
+    import copy
+
     from sealrun import cli as cli_module
-    from sealrun.bsv import build_op_return_script
+    from test_anchor_signature import ANCHOR1_TX
 
     class FakeWoC:
         def __init__(self, base_url=None):
@@ -432,32 +441,25 @@ def test_cli_spv_verifies_chain_and_prints_inclusion_line(tmp_path, capsys, monk
             return self.inner.fetch_block(height)
 
         def fetch_tx_full(self, txid):
-            # The claimed payloads are what these txs commit to: the
-            # binding check compares the fetched OP_RETURN to the claim.
-            claimed = {TX1: payload1, TX2: payload2}
-            script = build_op_return_script(claimed[txid])
-            return {"vout": [{"scriptPubKey": {"hex": script.hex()}}]}
+            if txid.lower() == TX1.lower():
+                return copy.deepcopy(ANCHOR1_TX)
+            raise KeyError(txid)
 
     monkeypatch.setattr(cli_module, "WoCBlockFetcher", FakeWoC)
     anchor1 = tmp_path / "a1.json"
-    anchor2 = tmp_path / "a2.json"
     genesis = "0" * 64
-    payload1 = encode_anchor_payload(head_hash="11" * 32, start_seq=1, end_seq=3, release_seq=0, prev_txid=genesis)
-    payload2 = encode_anchor_payload(head_hash="22" * 32, start_seq=4, end_seq=4, release_seq=0, prev_txid=TX1)
+    _script = bytes.fromhex(ANCHOR1_TX["vout"][0]["scriptPubKey"]["hex"])
+    payload1 = _script[3:]
     anchor1.write_text(json.dumps({
         "payload_hex": payload1.hex(),
         "txid": TX1,
     }))
-    anchor2.write_text(json.dumps({
-        "payload_hex": payload2.hex(),
-        "txid": TX2,
-    }))
     assert cli_module.main([
         "anchor-chain-verify", "--genesis-txid", genesis,
-        "--anchor", str(anchor1), "--anchor", str(anchor2), "--spv",
+        "--anchor", str(anchor1), "--spv",
     ]) in (None, 0)
     out = capsys.readouterr().out
-    assert "CHAIN INCLUSION VERIFIED: 2 anchor(s)" in out
+    assert "CHAIN INCLUSION VERIFIED: 1 anchor(s)" in out
     assert "LOCAL CHECK ONLY" not in out
     assert '"chain_inclusion_verified": true' in out
 

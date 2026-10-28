@@ -620,15 +620,23 @@ def test_apply_beef_inclusion_rejects_non_beef():
 # --- CLI ---------------------------------------------------------------------
 
 
+def _real_anchor1_payload():
+    # The real anchor #1 OP_RETURN payload. Payload binding now
+    # recomputes the fetched tx's txid, so the fake provider must
+    # return a full tx body that hashes to the claimed txid and
+    # carries the claimed payload — a vout-only stub cannot pass.
+    from test_anchor_signature import ANCHOR1_TX
+
+    script = bytes.fromhex(ANCHOR1_TX["vout"][0]["scriptPubKey"]["hex"])
+    assert script[:3] == bytes.fromhex("6a4c54")
+    return script[3:]
+
+
 def _run_cli_beef(tmp_path, capsys, monkeypatch, beef, anchor_txid):
     from sealrun import cli as cli_module
-    from sealrun.anchor import encode_anchor_payload
-    from sealrun.bsv import build_op_return_script
+    from test_anchor_signature import ANCHOR1_TX
 
-    claimed = encode_anchor_payload(
-        head_hash="11" * 32, start_seq=1, end_seq=3,
-        release_seq=0, prev_txid="0" * 64,
-    )
+    claimed = _real_anchor1_payload()
 
     class FakeWoC:
         def __init__(self, base_url=None):
@@ -638,9 +646,9 @@ def _run_cli_beef(tmp_path, capsys, monkeypatch, beef, anchor_txid):
             return _header_36722()
 
         def fetch_tx_full(self, txid):
-            # The claimed payload is what the fetched tx commits to.
-            script = build_op_return_script(claimed)
-            return {"vout": [{"scriptPubKey": {"hex": script.hex()}}]}
+            if txid.lower() == anchor_txid.lower():
+                return copy.deepcopy(ANCHOR1_TX)
+            raise KeyError(txid)
 
     monkeypatch.setattr(cli_module, "WoCBlockFetcher", FakeWoC)
     genesis = "0" * 64
@@ -669,16 +677,12 @@ def test_cli_beef_file_verifies_and_prints_line(tmp_path, capsys, monkeypatch):
 
 def test_cli_beef_file_accepts_hex(tmp_path, capsys, monkeypatch):
     from sealrun import cli as cli_module
-    from sealrun.anchor import encode_anchor_payload
+    from test_anchor_signature import ANCHOR1_TX
 
     beef, anchor_txid, _child = _ttn_beef()
-    from sealrun.bsv import build_op_return_script
 
     genesis = "0" * 64
-    claimed = encode_anchor_payload(
-        head_hash="11" * 32, start_seq=1, end_seq=3,
-        release_seq=0, prev_txid=genesis,
-    )
+    claimed = _real_anchor1_payload()
 
     class FakeWoC:
         def __init__(self, base_url=None):
@@ -688,8 +692,9 @@ def test_cli_beef_file_accepts_hex(tmp_path, capsys, monkeypatch):
             return _header_36722()
 
         def fetch_tx_full(self, txid):
-            script = build_op_return_script(claimed)
-            return {"vout": [{"scriptPubKey": {"hex": script.hex()}}]}
+            if txid.lower() == anchor_txid.lower():
+                return copy.deepcopy(ANCHOR1_TX)
+            raise KeyError(txid)
 
     monkeypatch.setattr(cli_module, "WoCBlockFetcher", FakeWoC)
     anchor = tmp_path / "a1.json"

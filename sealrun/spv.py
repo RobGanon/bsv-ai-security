@@ -917,7 +917,7 @@ def _header_from_block_json(data: dict, height: int) -> BlockHeader:
             height=int(data["height"]),
             hash=str(data["hash"]),
         )
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise SPVUnavailable(
             f"WoC block {height} body is missing required fields"
         ) from exc
@@ -1009,14 +1009,14 @@ class SPVVerifier:
             )
         try:
             header, txids = self.fetcher.fetch_block(int(height))
-        except (SPVError, ValueError, TypeError, AttributeError, struct.error) as exc:
+        except (SPVError, ValueError, TypeError, AttributeError, struct.error, OverflowError) as exc:
             return InclusionResult(
                 False, txid, blockheight=height, blockhash=blockhash,
                 reason=f"fetch failed: {exc}",
             )
         try:
             return self._verify_against_block(txid, height, blockhash, header, txids)
-        except (ValueError, TypeError, AttributeError, struct.error) as exc:
+        except (ValueError, TypeError, AttributeError, struct.error, OverflowError) as exc:
             return InclusionResult(
                 False, txid, blockheight=height, blockhash=blockhash,
                 reason=f"malformed block data: {exc}",
@@ -1046,6 +1046,26 @@ class SPVVerifier:
             return InclusionResult(
                 False, txid, blockheight=height, blockhash=blockhash,
                 reason="proof-of-work failed: header hash exceeds target",
+            )
+        # Checked last, so existing fail-closed reasons (blockhash
+        # mismatch, Merkle, PoW) are preserved: the header bytes must
+        # hash to the claimed blockhash. A hostile provider serving a
+        # hash string that matches its own blockhash string, with a
+        # Merkle root and trivial bits, fails here. Residual: a fully
+        # self-consistent fabricated block with trivial difficulty
+        # still passes --spv alone; hostile-provider proof requires
+        # the header-chain walk to a pinned checkpoint.
+        try:
+            recomputed = header_hash(header.to_bytes())
+        except (ValueError, TypeError, AttributeError, struct.error, OverflowError):
+            return InclusionResult(
+                False, txid, blockheight=height, blockhash=blockhash,
+                reason="malformed header data: cannot recompute header hash",
+            )
+        if recomputed != str(blockhash).lower():
+            return InclusionResult(
+                False, txid, blockheight=height, blockhash=blockhash,
+                reason="header hash mismatch: recomputed header hash differs from claimed blockhash",
             )
         return InclusionResult(
             True, txid, blockheight=height, blockhash=blockhash,
@@ -1130,7 +1150,7 @@ class BUMPVerifier:
         height = bump["blockHeight"]
         try:
             header = self.fetcher.fetch_header(height)
-        except SPVError as exc:
+        except (SPVError, OverflowError) as exc:
             return InclusionResult(
                 False, txid, blockheight=height,
                 reason=f"header fetch failed: {exc}",
@@ -1148,7 +1168,7 @@ class BUMPVerifier:
             )
         try:
             pow_ok = verify_pow(header.to_bytes(), header.bits)
-        except (ValueError, TypeError, AttributeError, struct.error) as exc:
+        except (ValueError, TypeError, AttributeError, struct.error, OverflowError) as exc:
             return InclusionResult(
                 False, txid, blockheight=height, blockhash=header.hash,
                 reason=f"malformed header data: {exc}",
@@ -1419,7 +1439,7 @@ def verify_chain_to_checkpoint(
             )
     except SPVError as exc:
         return False, checked, f"fetch failed: {exc}"
-    except (ValueError, TypeError, AttributeError, struct.error) as exc:
+    except (ValueError, TypeError, AttributeError, struct.error, OverflowError) as exc:
         return False, checked, f"malformed header data: {exc}"
     return False, checked, "walk ended without reaching the checkpoint"
 

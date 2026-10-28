@@ -1106,6 +1106,29 @@ class Publisher:
 
         head_hash = events[-1]["event_hash"].lower()
         last = anchors[-1] if anchors else None
+        # Scheduler state comes from an attacker-writable store: never
+        # trust the last record's coverage or timing without
+        # re-derivation. Broadcast records are re-derived against the
+        # journal here (as in build_checkpoint); a record whose
+        # created_at lies in the future cannot be trusted to suppress
+        # a scheduled anchor, so it fails closed instead of silently
+        # returning "interval-not-elapsed".
+        self._verify_broadcast_chain(anchors)
+        if last is not None and last["created_at"] > at:
+            raise PublisherError(
+                "anchor record store is inconsistent: last anchor "
+                "created_at is in the future; refusing to trust "
+                "scheduler state"
+            )
+        if last is not None and last["status"] in ("pending", "broadcast"):
+            rederived = self._rederive_payload(anchors, len(anchors) - 1)
+            if rederived != last.get("payload_hex"):
+                raise PublisherError(
+                    "anchor record store is inconsistent with the "
+                    "journal: the last stored record does not match "
+                    "the payload derived from the journal; refusing "
+                    "to trust scheduler state"
+                )
         if last is not None and last["head_hash"] == head_hash:
             # A pending record whose broadcast failed is retried here:
             # without this, the scheduler would report "already-anchored"

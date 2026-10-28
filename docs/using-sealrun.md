@@ -1,8 +1,8 @@
-# User guide — using sealrun with your AI
+# User guide — using SealRun with your AI
 
 This guide walks the full flow end to end with a small worked example:
-point sealrun at the files that define one AI run, sign them, launch
-your AI through sealrun so only the approved bytes can run, record the
+point SealRun at the files that define one AI run, sign them, launch
+your AI through SealRun so only the approved bytes can run, record the
 run in the audit journal, and hand someone else the proof later.
 
 Everything below was run against the current code. You can follow
@@ -33,7 +33,7 @@ A toy support agent in a folder called `my-ai/`:
 - `system-prompt.txt` — the system prompt
 - `infer.py` — the program that runs it. It reads the model, config,
   and prompt through the `SEALRUN_ARTIFACT_*` environment variables
-  sealrun sets (explained in step 3) instead of opening file paths.
+  SealRun sets (explained in step 3) instead of opening file paths.
 
 Keys and state live outside the artifact folder, in `keys/` and
 `state/`.
@@ -55,7 +55,7 @@ generate the key offline and keep it off the machine that runs the AI.
 
 ## Step 2 — Fingerprint the run and sign it
 
-Create a manifest listing the artifacts. sealrun hashes each file's
+Create a manifest listing the artifacts. SealRun hashes each file's
 exact bytes with SHA-256.
 
 ```bash
@@ -87,7 +87,7 @@ sealrun manifest-sign \
 Signed manifest written: state/manifest.signed.json
 ```
 
-## Step 3 — Launch your AI through sealrun
+## Step 3 — Launch your AI through SealRun
 
 You can check a manifest without running anything:
 
@@ -121,7 +121,7 @@ system prompt: You are a support agent. Be concise. Never invent prices.
 answer: (toy model output)
 ```
 
-How your program receives the artifacts: sealrun sets one environment
+How your program receives the artifacts: SealRun sets one environment
 variable per artifact, named `SEALRUN_ARTIFACT_` + the file name in
 upper case with dots and dashes as underscores (`model.bin` →
 `SEALRUN_ARTIFACT_MODEL_BIN`). Each variable holds a path to the
@@ -129,7 +129,7 @@ already-open, already-verified file, so your program reads the exact
 bytes that were checked — never a path that could have been swapped
 after the check.
 
-Add `--seal` and sealrun first copies each artifact into a sealed,
+Add `--seal` and SealRun first copies each artifact into a sealed,
 frozen snapshot in memory, so the running program is insulated even
 if a writer keeps changing the original files during the run:
 
@@ -141,7 +141,7 @@ sealrun launch --seal \
   -- python3 my-ai/infer.py
 ```
 
-From here on, your AI runs exactly as before. sealrun does not wrap,
+From here on, your AI runs exactly as before. SealRun does not wrap,
 sandbox, or slow down the model itself — it guards the door, not the
 room.
 
@@ -250,7 +250,7 @@ for the flow, and
 [`docs/ceremony-tester-walkthrough.md`](ceremony-tester-walkthrough.md)
 to run the whole ceremony yourself on testnet play money.
 
-## What sealrun does not do
+## What SealRun does not do
 
 - It does not prove the recorded events are *true* or *complete* —
   only that they were not altered after being recorded.

@@ -323,6 +323,36 @@ def test_a3_already_known_on_success_is_still_a_success():
         srv.shutdown()
 
 
+@pytest.mark.parametrize("body", [
+    '"funding output already spent"',
+    '"not already known"',
+    '"258: txn-mempool-conflict"',
+])
+def test_a3_rejection_text_is_not_an_already_known_success(body):
+    from sealrun.broadcast import BroadcastRejected, post_raw_tx
+
+    def request(method, url, request_body):
+        return 200, body.encode()
+
+    with pytest.raises(BroadcastRejected):
+        post_raw_tx(
+            "https://example.invalid", "00", request, local_txid="ab" * 32
+        )
+
+
+@pytest.mark.parametrize("body", ["null", "[]"])
+def test_a3_non_object_success_body_fails_closed(body):
+    from sealrun.broadcast import BroadcastRejected, post_raw_tx
+
+    def request(method, url, request_body):
+        return 200, body.encode()
+
+    with pytest.raises(BroadcastRejected):
+        post_raw_tx(
+            "https://example.invalid", "00", request, local_txid="ab" * 32
+        )
+
+
 # ---------------------------------------------------------------------------
 # A5 — an acceptance must be verifiable
 # ---------------------------------------------------------------------------

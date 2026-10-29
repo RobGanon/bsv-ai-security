@@ -23,7 +23,7 @@ import hmac
 import secrets
 import struct
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException
 
 # secp256k1 domain parameters.
 _P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
@@ -50,20 +50,35 @@ def sats_from_btc_decimal(value: object) -> int:
     to their own fail-closed error.
     """
     try:
-        sats = Decimal(str(value)) * 10**8
-    except (InvalidOperation, ValueError, TypeError, AttributeError) as exc:
+        amount = Decimal(str(value))
+    except (DecimalException, ValueError, TypeError, AttributeError) as exc:
         raise ValueError(f"invalid BTC decimal value {value!r}") from exc
     if (
-        not sats.is_finite()
-        or sats < 0
-        or sats > MAX_SATS
-        or sats != sats.to_integral_value()
+        not amount.is_finite()
+        or amount < 0
+        or amount > 21_000_000
+        # Reject a positive sub-satoshi before as_integer_ratio() can
+        # construct an enormous denominator for an extreme exponent.
+        or (amount and amount < Decimal("0.00000001"))
     ):
         raise ValueError(
             f"BTC decimal value {value!r} is not a whole non-negative "
             "satoshi amount within the consensus maximum"
         )
-    return int(sats)
+    # Decimal multiplication uses the active precision context and can
+    # round before validation. Convert the exact rational instead, so no
+    # negative, fractional, or above-maximum input can round into range.
+    numerator, denominator = amount.as_integer_ratio()
+    scaled = numerator * 100_000_000
+    if scaled % denominator:
+        raise ValueError(
+            f"BTC decimal value {value!r} is not a whole non-negative "
+            "satoshi amount within the consensus maximum"
+        )
+    sats = scaled // denominator
+    if sats > MAX_SATS:  # defensive; the BTC-range check above is exact
+        raise ValueError(f"BTC decimal value {value!r} exceeds consensus maximum")
+    return sats
 
 
 def hash160(data: bytes) -> bytes:

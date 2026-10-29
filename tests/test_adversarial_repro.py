@@ -37,7 +37,7 @@ def test_f3_hostile_spv_fabricated_block():
     # Fabricated block: tx list contains txid, merkle root from that list, trivial bits
     root = merkle_root([txid])
     header = BlockHeader(version=1, prev_hash="00"*32, merkle_root=root, time=1700000000,
-                         bits=0x20ffffff, nonce=0, height=999999, hash="de"*32)
+                         bits=0x207fffff, nonce=0, height=999999, hash="de"*32)
     class Fake:
         def fetch_tx(self, t): return {"blockheight": 999999, "blockhash": "de"*32}
         def fetch_block(self, h): return header, [txid]
@@ -60,3 +60,72 @@ def test_f5_infinity_overflow_escapes():
         raised = type(exc).__name__
     print("F5 fetch_block raised:", raised)
     assert raised == "SPVUnavailable", f"expected SPVUnavailable post-fix, got {raised}"
+
+
+def test_f6_nan_store_timestamp_suppresses_scheduler(tmp_path):
+    import pytest
+    from sealrun.core import append_audit_event
+    from sealrun.publisher import PublisherError
+
+    journal = tmp_path / "audit.jsonl"
+    store_path = tmp_path / "anchors.json"
+    append_audit_event(journal, "test", "first")
+    cfg = PublisherConfig(
+        journal=journal, anchor_record=store_path,
+        genesis_txid="0" * 64, checkpoint_interval_seconds=3600,
+        broadcast_enabled=False, manifests=(), public_key=None,
+    )
+    Publisher(cfg, clock=lambda: 1_000_000.0).run_once(now=1_000_000.0)
+    store = json.loads(store_path.read_text())
+    store["anchors"][-1]["created_at"] = float("nan")
+    store_path.write_text(json.dumps(store))
+    append_audit_event(journal, "test", "second")
+
+    with pytest.raises(PublisherError, match="created_at"):
+        Publisher(cfg).run_once(now=1_000_000.0 + 7200)
+
+
+def test_f7_superseded_tip_is_not_already_anchored(tmp_path):
+    import pytest
+    from sealrun.core import append_audit_event
+    from sealrun.publisher import PublisherError
+
+    journal = tmp_path / "audit.jsonl"
+    store_path = tmp_path / "anchors.json"
+    append_audit_event(journal, "test", "first")
+    cfg = PublisherConfig(
+        journal=journal, anchor_record=store_path,
+        genesis_txid="0" * 64, checkpoint_interval_seconds=3600,
+        broadcast_enabled=False, manifests=(), public_key=None,
+    )
+    Publisher(cfg, clock=lambda: 1_000_000.0).run_once(now=1_000_000.0)
+    store = json.loads(store_path.read_text())
+    store["anchors"][-1]["status"] = "superseded"
+    store_path.write_text(json.dumps(store))
+
+    with pytest.raises(PublisherError, match="superseded"):
+        Publisher(cfg).run_once(now=1_000_000.0 + 7200)
+
+
+def test_f8_negative_compact_target_is_not_valid_pow():
+    from sealrun.spv import _set_compact, header_hash, verify_header_chain, verify_pow
+
+    bits = 0x20800001
+    assert _set_compact(bits)[1] is True  # consensus-negative target
+    header = BlockHeader(
+        version=1, prev_hash="00" * 32, merkle_root="11" * 32,
+        time=1700000000, bits=bits, nonce=3, height=1,
+    )
+    digest = header_hash(header.to_bytes())
+    header = BlockHeader(**{**header.__dict__, "hash": digest})
+
+    assert not verify_pow(header.to_bytes(), bits)
+    assert not verify_header_chain([header])
+
+
+def test_f9_empty_bump_rejects_non_hex_txid_and_root():
+    from sealrun.spv import verify_bump_proof
+
+    invalid = "z" * 64
+    bump = {"blockHeight": 1, "path": []}
+    assert not verify_bump_proof(invalid, bump, invalid)

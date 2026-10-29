@@ -418,6 +418,10 @@ def verify_bump_proof(txid: str, bump: dict, root: str) -> bool:
         path = bump["path"]
         if not path:
             # Single-transaction block: the root is the txid itself.
+            # Validate both hashes even though no folding occurs; equal
+            # non-hex strings are not a valid inclusion proof.
+            _internal(txid)
+            _internal(root)
             return txid.lower() == root.lower()
         index = None
         for leaf in path[0]:
@@ -547,14 +551,16 @@ def header_hash(header: bytes) -> str:
 
 
 def target_from_bits(bits: int) -> int:
-    """Decode compact ``bits`` into the proof-of-work target integer."""
-    if not isinstance(bits, int) or bits < 0 or bits > 0xFFFFFFFF:
-        raise ValueError("bits must be a 32-bit unsigned integer")
-    exponent = bits >> 24
-    mantissa = bits & 0xFFFFFF
-    if mantissa == 0 or exponent < 3 or exponent > 32:
+    """Decode compact ``bits`` into a valid proof-of-work target integer.
+
+    The sign and overflow rules matter for verification: treating a
+    consensus-negative compact target as a large positive integer would
+    accept headers whose declared target is invalid, not merely easy.
+    """
+    target, negative, overflow = _set_compact(bits)
+    if negative or overflow or target == 0:
         raise ValueError(f"invalid compact target bits: {bits:#x}")
-    return mantissa * (1 << (8 * (exponent - 3)))
+    return target
 
 
 def verify_pow(header: bytes, bits: int) -> bool:

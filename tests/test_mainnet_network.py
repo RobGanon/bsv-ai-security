@@ -251,6 +251,22 @@ def test_broadcaster_default_is_testnet():
     assert broadcaster.network == "testnet"
 
 
+@pytest.mark.parametrize("network,base_url", [
+    ("testnet", WOC_MAINNET_BASE),
+    ("mainnet", WOC_TTN_BASE),
+])
+def test_broadcaster_rejects_opposite_network_base(network, base_url):
+    signer = WIFSigner(PrivKey(1))
+    with pytest.raises(ValueError, match="does not match selected network"):
+        WoCBroadcaster(
+            base_url=base_url,
+            network=network,
+            signer=signer,
+            funding=FundingUTXO(txid="cc" * 32, vout=0, value=0, script_hex=""),
+            request_fn=lambda *args: pytest.fail("unexpected network request"),
+        )
+
+
 # --- CLI -------------------------------------------------------------------
 
 

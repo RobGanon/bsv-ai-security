@@ -699,7 +699,7 @@ def _tx_from_woc_json(tx_json: Any) -> Tx:
                     sequence,
                 )
             )
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
             if isinstance(exc, VerificationError):
                 raise
             raise VerificationError("tx JSON has a malformed input") from exc
@@ -713,7 +713,7 @@ def _tx_from_woc_json(tx_json: Any) -> Tx:
     try:
         version = int(tx_json.get("version", 1))
         locktime = int(tx_json.get("locktime", 0))
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise VerificationError("tx JSON has a malformed version/locktime") from exc
     if not -(2**31) <= version <= 2**31 - 1:
         raise VerificationError("tx JSON has an out-of-range version")

@@ -20,7 +20,7 @@ from sealrun.bsv import (
     sighash_forkid,
     sign_digest,
 )
-from sealrun.broadcast import FundingUTXO, WIFSigner
+from sealrun.broadcast import FundingUTXO, WIFSigner, WOC_MAINNET_BASE
 from sealrun.core import append_audit_event
 from sealrun.publisher import Publisher, PublisherConfig, PublisherError
 
@@ -261,6 +261,33 @@ def test_export_refuses_mainnet(tmp_path):
             woc_base="https://woc.example", network="mainnet",
             request_fn=woc.request,
         )
+
+
+@pytest.mark.parametrize("base_url,reason", [
+    (WOC_MAINNET_BASE, "does not match selected network"),
+    ("http://attacker.invalid", "https"),
+])
+def test_offline_paths_validate_endpoint_before_mutation_or_io(
+    tmp_path, base_url, reason
+):
+    woc = _FakeWoC()
+    publisher = _publisher(tmp_path)
+    with pytest.raises(PublisherError, match=reason):
+        publisher.export_unsigned(
+            funding_txid=FUNDING_TXID, funding_vout=FUNDING_VOUT,
+            change_address=TEST_ADDRESS, fee_sats=FEE_SATS,
+            woc_base=base_url, network="testnet", request_fn=woc.request,
+        )
+    with pytest.raises(PublisherError, match=reason):
+        publisher.broadcast_signed(
+            signed_hex="00", funding_txid=FUNDING_TXID,
+            funding_vout=FUNDING_VOUT, change_address=TEST_ADDRESS,
+            fee_sats=FEE_SATS, woc_base=base_url, network="testnet",
+            request_fn=woc.request,
+        )
+    assert woc.gets == []
+    assert woc.posts == []
+    assert not (tmp_path / "anchors.json").exists()
 
 
 def test_export_refuses_funding_not_paying_to_change_address(tmp_path):

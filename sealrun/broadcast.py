@@ -46,6 +46,22 @@ WOC_TTN_BASE = "https://api.woc-ttn.bsvblockchain.tech/v1/bsv/test"
 WOC_MAINNET_BASE = "https://api.whatsonchain.com/v1/bsv/main"
 
 
+def validate_woc_network_base(base_url: str, network: str) -> str:
+    """Validate transport and reject the known opposite-network WoC base.
+
+    Custom endpoints remain supported, but the built-in mainnet and
+    Teratestnet URLs must not be crossed with the selected network.
+    """
+    selected = validate_network(network)
+    normalized = validate_woc_base_url(base_url).rstrip("/")
+    opposite = WOC_MAINNET_BASE if selected == "testnet" else WOC_TTN_BASE
+    if normalized == opposite:
+        raise ValueError(
+            f"WoC base URL does not match selected network {selected!r}"
+        )
+    return normalized
+
+
 class BroadcastError(Exception):
     """Base class for broadcast failures."""
 
@@ -147,8 +163,8 @@ class WoCBroadcaster:
         funding: FundingUTXO,
         request_fn: RequestFn | None = None,
     ) -> None:
-        self.base_url = validate_woc_base_url(base_url).rstrip("/")
         self.network = validate_network(network)
+        self.base_url = validate_woc_network_base(base_url, self.network)
         self.signer = signer
         self.fee_sats = fee_sats
         self.funding = funding
@@ -197,6 +213,7 @@ def fetch_prev_output(
     the offline-signing publisher paths, which need the funding output
     without a signer.
     """
+    base_url = validate_woc_base_url(base_url).rstrip("/")
     request = request_fn or _urllib_request
     if (
         not isinstance(vout, int)
@@ -237,6 +254,7 @@ def post_raw_tx(
     ``broadcast-signed`` path. Fail closed: do not trust endpoint echoes
     blindly and do not treat rejection strings as success.
     """
+    base_url = validate_woc_base_url(base_url).rstrip("/")
     request = request_fn or _urllib_request
     try:
         status, body = request(
@@ -247,15 +265,22 @@ def post_raw_tx(
     except ConnectionError as exc:
         raise BroadcastUnavailable(str(exc)) from exc
     text = body.decode("utf-8", "replace").strip()
-    lowered = text.lower()
 
-    # Treat "already known" as success only if the request actually succeeded
-    # (2xx). A rejected request (4xx/5xx) that happens to mention "already"
-    # or "258:" is still a rejection.
-    if status // 100 == 2 and (
-        "already" in lowered or "txn-already-known" in lowered or "258:" in lowered
-    ):
-        return local_txid
+    # Only explicit idempotent-success messages are accepted. Incidental
+    # substrings such as "output already spent" or "not already known"
+    # are rejections, even when an endpoint incorrectly uses a 2xx status.
+    if status // 100 == 2:
+        try:
+            already_message = json.loads(text)
+        except ValueError:
+            already_message = text
+        if isinstance(already_message, str) and already_message.strip().lower() in {
+            "258: txn-already-known",
+            "txn-already-known",
+            "transaction already known",
+            "already in mempool",
+        }:
+            return local_txid
 
     if status == 200:
         try:
@@ -264,7 +289,13 @@ def post_raw_tx(
             raise BroadcastRejected(
                 f"broadcast success body is not JSON: {text[:200]}"
             ) from exc
-        txid = parsed if isinstance(parsed, str) else parsed.get("txid")
+        txid = (
+            parsed
+            if isinstance(parsed, str)
+            else parsed.get("txid")
+            if isinstance(parsed, dict)
+            else None
+        )
         if not isinstance(txid, str) or len(txid) != 64:
             raise BroadcastRejected(
                 f"broadcast returned an unusable txid: {text[:200]}"
@@ -282,7 +313,13 @@ def post_raw_tx(
         # Try to parse if possible, otherwise fail closed.
         try:
             parsed = json.loads(text)
-            txid = parsed if isinstance(parsed, str) else parsed.get("txid")
+            txid = (
+                parsed
+                if isinstance(parsed, str)
+                else parsed.get("txid")
+                if isinstance(parsed, dict)
+                else None
+            )
             if isinstance(txid, str) and len(txid) == 64:
                 txid = txid.lower()
                 if txid != local_txid.lower():

@@ -130,6 +130,17 @@ def test_f1_sats_rejects_above_consensus_max():
     assert sats_from_btc_decimal("21000000") == MAX_SATS
 
 
+@pytest.mark.parametrize("value", [
+    "-1e-999999999",
+    "0.000000009999999999999999999999999999999999",
+    "21000000.000000000000000000000000000000000001",
+    "1e999999999",
+])
+def test_f1_sats_never_rounds_invalid_values_into_range(value):
+    with pytest.raises(ValueError):
+        sats_from_btc_decimal(value)
+
+
 def test_f1_tx_from_woc_json_rejects_out_of_range_ints():
     base = copy.deepcopy(ANCHOR1_TX)
     bad = copy.deepcopy(base)
@@ -152,6 +163,22 @@ def test_f1_tx_from_woc_json_rejects_out_of_range_ints():
     bad["vin"][0]["vout"] = 2**32
     with pytest.raises(VerificationError):
         _tx_from_woc_json(bad)
+
+
+@pytest.mark.parametrize("field", ["version", "locktime", "vout", "sequence"])
+def test_f1_signature_apis_fail_closed_on_infinite_integer_fields(field):
+    anchor = copy.deepcopy(ANCHOR1_TX)
+    if field in ("version", "locktime"):
+        anchor[field] = float("inf")
+    else:
+        anchor["vin"][0][field] = float("inf")
+
+    direct = verify_anchor_tx_signature(anchor, FAUCET_TX_JSON, ANCHOR_PUBKEY)
+    assert direct["verified"] is False
+    wrapped = AnchorSignatureVerifier(
+        _FakeFetcher(anchor, FAUCET_TX_JSON), ANCHOR_PUBKEY
+    ).verify_signature(TXID_A)
+    assert wrapped.verified is False
 
 
 def test_f1_verifier_signature_returns_false_on_huge_version():

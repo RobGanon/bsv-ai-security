@@ -83,7 +83,14 @@ class _FakeClock:
 
 
 class _StubBroadcaster:
-    """Recording fake broadcaster: returns deterministic fake txids."""
+    """Recording fake broadcaster: returns a real anchor-shaped tx.
+
+    ``broadcast`` keeps the old txid-only shape, but
+    ``broadcast_with_tx`` is the path the publisher prefers: it builds
+    a deterministic 1-input transaction whose first output is the
+    OP_RETURN anchor payload, so the stored ``tx_hex`` actually binds
+    to the returned txid and the chain can be extended.
+    """
 
     def __init__(self, fail=False):
         self.calls = []
@@ -97,6 +104,28 @@ class _StubBroadcaster:
         import hashlib
 
         return hashlib.sha256(("fake-broadcast:" + payload_hex).encode()).hexdigest()
+
+    def broadcast_with_tx(self, payload_hex):
+        from sealrun.bsv import (
+            Tx,
+            TxIn,
+            TxOut,
+            build_op_return_script,
+            build_p2pkh_script,
+        )
+
+        self.calls.append(payload_hex)
+        if self.fail:
+            raise PublisherError("simulated broadcast failure")
+        key = PrivKey(12345)
+        tx = Tx(
+            inputs=[TxIn("0" * 64, 0)],
+            outputs=[
+                TxOut(0, build_op_return_script(bytes.fromhex(payload_hex))),
+                TxOut(1000, build_p2pkh_script(key.pubkey_compressed())),
+            ],
+        )
+        return tx.txid(), tx.serialize().hex()
 
 
 def _read_store(tmp_path):
@@ -350,9 +379,14 @@ def test_prev_txid_chains_to_previous_broadcast(tmp_path):
     )
     first = publisher.build_checkpoint("scheduled")
     assert first["status"] == "broadcast"
-    assert first["txid"] == hashlib.sha256(
-        ("fake-broadcast:" + first["payload_hex"]).encode()
-    ).hexdigest()
+    # The stub now returns a real anchor-shaped tx: its txid must be
+    # the txid of the stored bytes, and those bytes must carry the
+    # record's payload — that binding is what makes the chain
+    # extendable at all.
+    from sealrun.bsv import parse_tx
+
+    assert first["tx_hex"] is not None
+    assert parse_tx(bytes.fromhex(first["tx_hex"])).txid() == first["txid"]
     assert stub.calls == [first["payload_hex"]]
     append_audit_event(journal, "test", "second")
     second = publisher.build_checkpoint("scheduled")

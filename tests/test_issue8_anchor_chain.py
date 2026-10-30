@@ -239,6 +239,28 @@ class _StubBroadcaster:
 
         return hashlib.sha256(("stub:" + payload_hex).encode()).hexdigest()
 
+    def broadcast_with_tx(self, payload_hex):
+        """Tx-bytes path: a real anchor-shaped tx, so the chain it
+        builds can actually be extended (a txid-only record cannot)."""
+        from sealrun.bsv import (
+            PrivKey,
+            Tx,
+            TxIn,
+            TxOut,
+            build_op_return_script,
+            build_p2pkh_script,
+        )
+
+        key = PrivKey(12345)
+        tx = Tx(
+            inputs=[TxIn("0" * 64, 0)],
+            outputs=[
+                TxOut(0, build_op_return_script(bytes.fromhex(payload_hex))),
+                TxOut(1000, build_p2pkh_script(key.pubkey_compressed())),
+            ],
+        )
+        return tx.txid(), tx.serialize().hex()
+
 
 def _publisher(tmp_path, *, genesis=GENESIS):
     config = PublisherConfig(

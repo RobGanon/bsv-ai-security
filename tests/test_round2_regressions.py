@@ -804,7 +804,13 @@ def test_n4_beef_envelope_with_a_noncanonical_bump_is_rejected():
 
 
 class _StubBroadcaster:
-    """Hands out sequential fake txids; records what it was given."""
+    """Hands out real anchor-shaped txs; records what it was given.
+
+    The old sequential fake txids could never bind to a transaction,
+    so a chain built on them could never be extended under the
+    tip-txid rule. ``broadcast_with_tx`` builds a deterministic tx
+    whose first output is the OP_RETURN anchor payload.
+    """
 
     def __init__(self):
         self.payloads = []
@@ -812,6 +818,26 @@ class _StubBroadcaster:
     def broadcast(self, payload_hex):
         self.payloads.append(payload_hex)
         return f"{len(self.payloads):064x}"
+
+    def broadcast_with_tx(self, payload_hex):
+        from sealrun.bsv import (
+            Tx,
+            TxIn,
+            TxOut,
+            build_op_return_script,
+            build_p2pkh_script,
+        )
+
+        self.payloads.append(payload_hex)
+        key = PrivKey(12345)
+        tx = Tx(
+            inputs=[TxIn("0" * 64, 0)],
+            outputs=[
+                TxOut(0, build_op_return_script(bytes.fromhex(payload_hex))),
+                TxOut(1000, build_p2pkh_script(key.pubkey_compressed())),
+            ],
+        )
+        return tx.txid(), tx.serialize().hex()
 
 
 def _honest_chain(tmp_path):

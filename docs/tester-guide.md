@@ -15,22 +15,20 @@ optional testnet anchor ceremony at the end).
 
 ## Before you start: what you are — and are not — testing
 
-**This guide describes `main` behaviour only.** At the time of
-writing, `main` is held at `a3fd789b` and several fix drafts are
-open but **not merged**. If you test `main`, you will *not* see
-these protections, and that is expected — please do not report
-their absence as a finding on `main`:
+**This guide describes `main` behaviour.** The protections below
+are in `main` now, so test `main` as-is and report what you find
+there:
 
-| Draft | What it fixes | On `main`? |
-| --- | --- | --- |
-| PR #67 | Fetch-side payload binding: a fetched transaction is checked against the requested txid | No |
-| PR #68 | Generic `audit-append --event-type manifest_accepted` is refused; use `audit-manifest-accepted` instead | No |
-| PR #70 | Adversarial-review fixes: scheduler trust, hostile SPV blocks, infinite-value handling, plus WoC network checks, HTTPS enforcement, strict broadcast replies, exact satoshi conversion, and signer bounds | No |
-| PR #71 | Publisher tip-txid binding: a stored broadcast record is checked against its stored transaction bytes before chaining | No |
-
-If you want to test a draft, check out that draft's branch
-explicitly and say so in your report. Do not mix draft results
-with `main` results.
+- Fetch-side payload binding: a fetched transaction is checked
+  against the requested txid.
+- Generic `audit-append --event-type manifest_accepted` is refused;
+  use `audit-manifest-accepted` instead.
+- Adversarial-review fixes: scheduler trust, hostile SPV blocks,
+  infinite-value handling, plus WoC network checks, HTTPS
+  enforcement, strict broadcast replies, exact satoshi conversion,
+  and signer bounds.
+- Publisher tip-txid binding: a stored broadcast record is checked
+  against its stored transaction bytes before chaining.
 
 **What SealRun does not do** (also true on `main`): it does not
 prove recorded events are true or complete — only that they were

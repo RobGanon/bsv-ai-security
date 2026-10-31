@@ -1,7 +1,10 @@
-# STATUS — sealrun security fixes
+# STATUS — SealRun security fixes
 
-Branch: `security-fixes-round2` (from `main` @ `61fb063`).
-Base for "pre-fix" comparisons: `d78eda0` (the parent of PR #56).
+Branch: docs batch (from `main` @ `a3fd789b`).
+Counts and fixed-list entries for PR #67 / PR #68 are marked as
+not yet merged in this draft; they become merged entries only
+after those PRs merge and a full suite on merged bytes confirms
+the counts.
 
 **Legend.** *proven* = a regression test exists that **fails on the
 pre-fix code** and passes here. *fixed, unproven* = the behaviour is
@@ -44,8 +47,10 @@ fixed but no test proves it. *open* = not fixed.
   acceptance with no verification at all** (issue #11, the operator's
   journal write access is trusted by design). The CLI's
   `audit-manifest-accepted` now verifies, but the generic append path
-  does not. A chain-preserving repair path for already-poisoned
-  journals is still not implemented.
+  does not. Fix in PR #68 (not yet merged): refuse generic
+  `manifest_accepted` in `audit-append`, directing users to
+  `audit-manifest-accepted`. A chain-preserving repair path for
+  already-poisoned journals is still not implemented.
 
 ## Still open (from the 2026-10-21 independent review)
 

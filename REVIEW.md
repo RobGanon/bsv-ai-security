@@ -121,6 +121,13 @@ What was actually executed, by the author (with AI assistance):
 - Full suite runs on exact merged bytes: 369 tests passing on
   `main` @ `137de50`.
 
+- MiniMax AI findings (Oct 2026, outside-AI corroboration, NOT human
+  review, NOT Root): payload-binding never bound the fetched tx to
+  the requested txid, BEEF inclusion reported for an unmined
+  ancestry-only anchor, and the BEEF envelope overall verdict was
+  ignored. Verified by BB with own repros (3 tests, failed pre-fix,
+  passed post-fix) and fixed in PR #67 (not yet merged).
+
 What was **not** counted as executed testing:
 
 - Another AI proposed additional adversarial scenarios but did not
@@ -196,6 +203,18 @@ still in progress.
   (`anchor_every_n_events` / `anchor_every_t_seconds`), so the
   unanchored-tail window described in §8 is longer than the policy
   intends. Anchor timing itself is not yet in review scope.
+
+- Generic `audit-append` acceptance (issue #11 residual): generic
+  `audit-append --event-type manifest_accepted` previously recorded an
+  acceptance with no verification. Fixed in PR #68 (not yet merged)
+  by refusing generic `manifest_accepted` in `audit-append` and
+  directing users to the hardened `audit-manifest-accepted` command,
+  which verifies before recording. Prevention only: a fake or
+  mismatched acceptance fails closed at anchor derivation (journal
+  poisoning / denial-of-anchoring, remediation is a fresh journal);
+  a real-manifest acceptance recorded by the wrong operator is not
+  caught by this binding — consumers enforce `--min-release-seq`
+  for that case. Poisoned-journal repair is future work.
 
 ## How to report
 

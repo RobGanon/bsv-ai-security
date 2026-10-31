@@ -95,15 +95,33 @@ so anyone holding the journal, the anchor transactions, and block
 headers can verify history was never rewritten, even against the
 local administrator.
 
-The current anchor backend is Bitcoin SV, chosen for cost and
-cadence: anchors are small and frequent (on release acceptance
-plus scheduled checkpoints), and BSV's low fees and native
-on-chain data make that practical. Verification is SPV-style —
-verifiers check headers, not a full node.
+The current anchor backend is BSV, chosen for cost and cadence:
+anchors are small and frequent (on release acceptance plus
+scheduled checkpoints), and BSV's low fees and native on-chain
+data make that practical. Verification is SPV-style — verifiers
+check headers, not a full node.
 
-Honest tradeoff: Bitcoin has substantially deeper proof-of-work
-security. BSV's case is cost, frequency, and data fit, not
-maximum settlement depth.
+The anchor chain runs on Teratestnet, BSV's test network, using
+SPV plus the WhatsOnChain testnet API. SealRun does not run a node
+and does not run Teranode; BSV scaling is powered by Teranode.
+
+Honest tradeoff, both ways: BTC has substantially deeper
+proof-of-work security today. BSV's case is cost, frequency, and
+data fit, not maximum settlement depth. That tradeoff could change
+over time: BSV's mechanism is utility driving demand, demand
+driving miner revenue, and miner revenue driving hashpower — a
+mechanism, not a prediction that BSV overtakes BTC.
+
+Why BSV fits this project, in engineering terms: the original
+Bitcoin design was a peer-to-peer electronic cash system, with
+payments made directly between parties without a financial
+institution. BSV's goal aligns with that payment-system goal. The
+project uses BSV for that reason — frequent, cheap,
+data-carrying anchors — not as a claim about which chain "is"
+Bitcoin.
+
+Anchoring proves history integrity and existence, not
+truthfulness or completeness of the journal.
 
 **Current status:** the publisher and broadcaster are live on
 Teratestnet. Three anchors are confirmed on-chain: anchor #1

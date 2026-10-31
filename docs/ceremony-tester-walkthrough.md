@@ -40,7 +40,7 @@ It asks for a `Username:`, then a `Password:` (twice, hidden). Then it prints:
 - `Anchor address (testnet): m...` — **save this.** It's your fresh testnet
   address. The key was generated on your machine and never leaves it.
 - `TOTP secret (shown once): ...` — open your authenticator app, add a manual
-  entry with this secret, name it "sealrun signer". It now shows 6-digit codes
+  entry with this secret, name it "SealRun signer". It now shows 6-digit codes
   rotating every 30 seconds. You'll use one per signing.
 
 Check the key file's permissions: `ls -l signer-key.txt` should show

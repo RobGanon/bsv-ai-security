@@ -54,6 +54,7 @@ from .core import (
     load_private_key,
     load_public_key,
     manifest_hash,
+    MANIFEST_ACCEPTED_EVENT_TYPE,
     record_manifest_acceptance,
     sign_manifest,
     verify_audit_journal,
@@ -373,6 +374,13 @@ def main(argv=None):
                 gid=resolve_gid(args.gid),
             )
         elif args.command == "audit-append":
+            if args.event_type == MANIFEST_ACCEPTED_EVENT_TYPE:
+                raise VerificationError(
+                    "audit-append cannot record manifest_accepted events; "
+                    "use audit-manifest-accepted with --manifest and "
+                    "--public-key so the acceptance is verified before "
+                    "it is recorded"
+                )
             event = append_audit_event(args.journal, args.event_type, args.detail)
             print(f"Audit event appended: seq={event['seq']} hash={event['event_hash']}")
         elif args.command == "audit-verify":

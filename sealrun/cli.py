@@ -65,6 +65,8 @@ from .launcher import (
     resolve_gid,
     resolve_uid,
 )
+from .proof_bundle import create_bundle, verify_bundle
+from . import __version__ as _SEALRUN_VERSION
 
 
 def _read_json(path: Path):
@@ -100,6 +102,7 @@ def _write_json(path: Path, obj):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="sealrun", description="Local AI artifact trust core")
+    parser.add_argument("--version", action="version", version=f"sealrun {_SEALRUN_VERSION}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("keygen", help="generate a development secp256k1 keypair")
@@ -331,6 +334,18 @@ def main(argv=None):
     p.add_argument("--change-address", default=None,
                    help="anchor address receiving change (required with "
                    "--export-unsigned / --broadcast-signed)")
+
+    p = sub.add_parser("proof-bundle-create", help="pack a verified run into a portable proof bundle")
+    p.add_argument("--manifest", required=True, type=Path)
+    p.add_argument("--public-key", required=True, type=Path)
+    p.add_argument("--root", required=True, type=Path)
+    p.add_argument("--journal", type=Path, default=None)
+    p.add_argument("--anchor", type=Path, default=None,
+                   help="JSON file produced by anchor-payload")
+    p.add_argument("--output", required=True, type=Path)
+
+    p = sub.add_parser("proof-bundle-verify", help="re-verify a portable proof bundle offline")
+    p.add_argument("--bundle", required=True, type=Path)
 
     p = sub.add_parser(
         "signer",
@@ -735,6 +750,42 @@ def main(argv=None):
                 failed = failed or not result.get("header_chain_verified")
             if failed:
                 return 1
+        elif args.command == "proof-bundle-create":
+            try:
+                summary = create_bundle(
+                    args.manifest, args.public_key, args.root, args.output,
+                    journal_path=args.journal, anchor_path=args.anchor,
+                )
+            except VerificationError as exc:
+                print(f"ERROR: proof bundle not created: {exc}", file=sys.stderr)
+                return 1
+            print(f"Proof bundle written: {args.output}")
+            print(f"  artifacts: {len(summary['artifacts'])}")
+            if summary["journal_events"] is not None:
+                print(f"  journal events: {summary['journal_events']}")
+            print(f"  anchor verified: {summary['anchor_verified']}")
+        elif args.command == "proof-bundle-verify":
+            try:
+                summary = verify_bundle(args.bundle)
+            except VerificationError as exc:
+                print(f"BUNDLE VERIFICATION FAILED: {exc}", file=sys.stderr)
+                return 1
+            print(f"BUNDLE VERIFIED: {len(summary['artifacts'])} artifact(s): "
+                  + ", ".join(summary["artifacts"]))
+            if summary["journal_events"] is not None:
+                print(f"  journal events: {summary['journal_events']} (hash chain intact)")
+            else:
+                print("  journal: absent")
+            if summary["anchor_verified"]:
+                print("  anchor: journal head matches anchor payload")
+            else:
+                print("  anchor: absent")
+            print("  This proves: these artifact bytes match this signed manifest; "
+                  "the journal, if present, is an intact hash chain; the journal "
+                  "head, if an anchor is present, matches the anchor payload.")
+            print("  This does NOT prove: the artifacts are safe, correct, or true; "
+                  "the signer is trustworthy; the run did anything beyond producing "
+                  "these files; or that any anchor transaction is included on-chain.")
         elif args.command == "signer":
             from .signer_cli import main as signer_main
 

@@ -1,6 +1,9 @@
 """Real broadcast for the Phase 2 publisher: build + sign + send anchor txs.
 
-The publisher's broadcaster interface is ``broadcast(payload_hex) -> txid``.
+The publisher's broadcaster interface is ``broadcast(payload_hex) -> txid``,
+with an optional ``broadcast_with_tx(payload_hex) -> (txid, tx_hex)``
+shape: when a broadcaster provides it, the publisher stores the tx bytes
+so later runs can bind the recorded txid to the transaction itself.
 This module provides the first real implementation: :class:`WoCBroadcaster`,
 which builds the 1-input anchor transaction (OP_RETURN payload + change),
 signs it through a :class:`Signer`, and posts it to a WhatsOnChain
@@ -178,6 +181,19 @@ class WoCBroadcaster:
 
     def broadcast(self, payload_hex: str) -> str:
         """Build, sign, and broadcast the anchor tx for ``payload_hex``."""
+        txid, _tx_hex = self.broadcast_with_tx(payload_hex)
+        return txid
+
+    def broadcast_with_tx(self, payload_hex: str) -> tuple[str, str]:
+        """Build, sign, and broadcast the anchor tx, returning its bytes.
+
+        Returns ``(txid, tx_hex)``: the publisher stores ``tx_hex`` with
+        the broadcast record so a later run can bind the recorded txid
+        to the actual transaction (recomputed txid + OP_RETURN payload)
+        instead of trusting a txid string from an attacker-writable
+        store. ``broadcast`` above keeps the txid-only shape for
+        callers that do not need the bytes.
+        """
         try:
             payload = bytes.fromhex(payload_hex)
             decode_anchor_payload(payload)  # validates magic + 84-byte layout
@@ -198,8 +214,10 @@ class WoCBroadcaster:
             signer=self.signer,
             network=self.network,
         )
-        return post_raw_tx(self.base_url, tx.serialize().hex(), self._request,
+        tx_hex = tx.serialize().hex()
+        txid = post_raw_tx(self.base_url, tx_hex, self._request,
                            local_txid=tx.txid())
+        return txid, tx_hex
 
 
 def fetch_prev_output(

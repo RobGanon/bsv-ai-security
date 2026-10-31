@@ -20,8 +20,13 @@ What the publisher does
   since the last anchor, even when no release landed — closing the
   unanchored-tail window between releases.
 - **Anchor record**: emitted anchors are persisted (payload + txid slot +
-  status) in a JSON record store, so a later run resumes from the last
-  anchor instead of re-anchoring the same range. Two anchors never
+  status, plus the broadcast transaction bytes ``tx_hex`` when the
+  broadcaster provides them) in a JSON record store, so a later run
+  resumes from the last anchor instead of re-anchoring the same range.
+  A broadcast record without ``tx_hex`` can never be extended: its
+  txid cannot be proved from the store, so a new anchor chaining to
+  it is refused (the already-anchored record itself is still
+  returned for its own head). Two anchors never
   silently cover the same range: a checkpoint for a head that is already
   anchored returns the existing record. All store mutations run under
   an inter-process lock (``<store>.lock``, flock, reentrant) across the
@@ -102,6 +107,7 @@ from .bsv import (
     SIGHASH_ALL_FORKID,
     Tx,
     TxIn,
+    build_op_return_script,
     build_p2pkh_script,
     build_p2pkh_script_for_address,
     parse_tx,
@@ -248,6 +254,67 @@ def _check_txid(value: Any, field: str) -> str:
     return value.lower()
 
 
+def _verify_tx_binding(record: dict) -> None:
+    """Bind a broadcast record's txid to its stored transaction bytes.
+
+    Called only when the record carries ``tx_hex``. The stored bytes
+    must parse as a transaction, their recomputed txid must equal the
+    record's txid, and their first output must be the OP_RETURN script
+    carrying exactly the record's anchor payload. Txid recomputation
+    alone would still accept a real but unrelated transaction stored
+    with its own correct txid, so the payload check is not optional.
+    Any failure raises PublisherError: a record whose bytes do not
+    prove its own txid is never trusted as a chain predecessor.
+    """
+    tx_hex = record.get("tx_hex")
+    if not isinstance(tx_hex, str) or not tx_hex:
+        raise PublisherError(
+            "anchor record store is inconsistent: broadcast record "
+            "carries a malformed tx_hex"
+        )
+    try:
+        raw = bytes.fromhex(tx_hex)
+    except ValueError as exc:
+        raise PublisherError(
+            "anchor record store is inconsistent: broadcast record "
+            "tx_hex is not valid hex"
+        ) from exc
+    try:
+        tx = parse_tx(raw)
+    except Exception as exc:  # noqa: BLE001 - any parse failure is a binding failure
+        raise PublisherError(
+            "anchor record store is inconsistent: broadcast record "
+            "tx_hex does not parse as a transaction"
+        ) from exc
+    if tx.txid() != (record.get("txid") or "").lower():
+        raise PublisherError(
+            "anchor record store is inconsistent: broadcast record "
+            "txid does not match its stored transaction"
+        )
+    if tx.serialize().hex() != tx_hex.lower():
+        raise PublisherError(
+            "anchor record store is inconsistent: stored transaction "
+            "is not canonically serialized"
+        )
+    try:
+        payload = bytes.fromhex(record["payload_hex"])
+    except ValueError as exc:
+        raise PublisherError(
+            "anchor record store is inconsistent: broadcast record "
+            "payload_hex is not valid hex"
+        ) from exc
+    if (
+        len(tx.inputs) != 1
+        or not 1 <= len(tx.outputs) <= 2
+        or not tx.outputs
+        or tx.outputs[0].script != build_op_return_script(payload)
+    ):
+        raise PublisherError(
+            "anchor record store is inconsistent: stored transaction "
+            "does not carry the record's anchor payload"
+        )
+
+
 def _validate_record(record: Any) -> dict:
     """Validate one anchor record from the store; fail closed on corruption."""
     if not isinstance(record, dict):
@@ -272,6 +339,15 @@ def _validate_record(record: Any) -> dict:
     if record["status"] not in RECORD_STATUSES:
         raise PublisherError(
             f"anchor record store is corrupt: unknown status {record['status']!r}"
+        )
+    # tx_hex is optional: records written before it existed (legacy
+    # broadcast records) have no such key and remain readable. When
+    # present it must be a hex string or None; binding is checked in
+    # _verify_broadcast_chain, and a tx_hex-less broadcast record can
+    # never be used as a chain predecessor (see build_checkpoint).
+    if "tx_hex" in record and not isinstance(record["tx_hex"], (str, type(None))):
+        raise PublisherError(
+            "anchor record store is corrupt: tx_hex must be a string or null"
         )
     created_at = record["created_at"]
     if isinstance(created_at, bool) or (
@@ -705,16 +781,61 @@ class Publisher:
                     "derived from the journal; refusing to anchor "
                     "on top of it"
                 )
+            # Tip-txid binding (Option A): when the record carries its
+            # transaction bytes, the txid must be proved by those bytes
+            # (recomputed txid + OP_RETURN payload), not merely trusted
+            # as a 64-hex string. A record without tx_hex is a legacy
+            # record: it stays readable here, but build_checkpoint
+            # refuses to use it as a chain predecessor.
+            if record.get("tx_hex") is not None:
+                try:
+                    _verify_tx_binding(record)
+                except PublisherError as exc:
+                    raise PublisherError(
+                        "anchor record store is inconsistent with the "
+                        f"journal: the broadcast record ending at "
+                        f"sequence {end_seq} does not match its stored "
+                        f"transaction: {exc}"
+                    ) from exc
             start_seq = end_seq + 1
             prev_txid = txid.lower()
 
     # -- checkpoint construction ---------------------------------------
 
     def _broadcast_record(self, store: dict, record: dict) -> dict:
-        """Attempt broadcast for a pending record; on failure it stays pending."""
+        """Attempt broadcast for a pending record; on failure it stays pending.
+
+        When the broadcaster provides ``broadcast_with_tx``, the
+        returned transaction bytes are stored with the record
+        (``tx_hex``) so later runs can bind the txid to the transaction.
+        A broadcaster with only the txid-only ``broadcast`` shape
+        produces a record with ``tx_hex`` None: that record remains
+        readable, but it can never be used as a chain predecessor
+        (see build_checkpoint) — a txid string alone proves nothing
+        about the transaction behind it.
+        """
         assert self.broadcaster is not None
-        txid = self.broadcaster.broadcast(record["payload_hex"])
-        txid = _check_txid(txid, "broadcast txid")
+        broadcast_with_tx = getattr(self.broadcaster, "broadcast_with_tx", None)
+        if callable(broadcast_with_tx):
+            result = broadcast_with_tx(record["payload_hex"])
+            if (
+                not isinstance(result, tuple)
+                or len(result) != 2
+                or not isinstance(result[0], str)
+                or not isinstance(result[1], str)
+                or not result[1]
+            ):
+                raise PublisherError(
+                    "broadcaster returned a malformed tx result: "
+                    "expected (txid, tx_hex)"
+                )
+            txid = _check_txid(result[0], "broadcast txid")
+            record["tx_hex"] = result[1]
+        else:
+            txid = _check_txid(
+                self.broadcaster.broadcast(record["payload_hex"]), "broadcast txid"
+            )
+            record["tx_hex"] = None
         record["txid"] = txid
         record["status"] = "broadcast"
         self._save_store(store)
@@ -786,6 +907,20 @@ class Publisher:
             return dict(record)
 
         last_broadcast = self._last_broadcast(anchors)
+        if last_broadcast is not None and not last_broadcast.get("tx_hex"):
+            # Tip-txid rule (Option A): a broadcast record without its
+            # transaction bytes cannot prove its txid, so it may never
+            # be extended — not even a legacy record. This refusal sits
+            # AFTER the dedupe loop above on purpose: returning the
+            # already-anchored record for the current head does not
+            # extend the tip, so it stays intact. A new anchor, which
+            # would chain to this tip, is refused outright instead of
+            # starting a silently unverifiable chain segment.
+            raise PublisherError(
+                "anchor record store is inconsistent: last broadcast "
+                "record has no stored transaction bytes; refusing to "
+                "anchor on top of an unverifiable tip"
+            )
         if last_broadcast is not None:
             start_seq = last_broadcast["end_seq"] + 1
             prev_txid = last_broadcast["txid"]
@@ -826,6 +961,7 @@ class Publisher:
             "prev_txid": fields["prev_txid"],
             "status": "pending",
             "txid": None,
+            "tx_hex": None,
             "reason": reason,
             "created_at": self._clock(),
         }
@@ -1085,6 +1221,12 @@ class Publisher:
                 "status"
             ] in ("pending", "broadcast"):
                 stored["txid"] = txid
+                # The signed tx was fully verified above (rebuilt
+                # unsigned tx, script_sig shape, pubkey, signature),
+                # so its canonical bytes are trustworthy to store:
+                # this is also how a legacy broadcast record for this
+                # head gains tx_hex, via a verified re-broadcast.
+                stored["tx_hex"] = canonical_hex
                 stored["status"] = "broadcast"
                 self._save_store(store)
                 return dict(stored)

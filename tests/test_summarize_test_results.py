@@ -7,6 +7,7 @@ and reporting itself must never fail the build (the pytest step is the
 gate, not this script).
 """
 import importlib.util
+import json
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "summarize_test_results.py"
@@ -33,6 +34,7 @@ def run_report(monkeypatch, tmp_path, junit_text=None, extra_env=None):
         results_path.write_text(junit_text, encoding="utf-8")
     monkeypatch.setenv("TEST_RESULT_FILE", str(results_path))
     monkeypatch.setenv("TEST_REPORT_FILE", str(report_path))
+    monkeypatch.setenv("TEST_JSON_REPORT_FILE", str(tmp_path / "verification-report.json"))
     monkeypatch.setenv("GITHUB_SHA", "abc123")
     monkeypatch.setenv("GITHUB_REPOSITORY", "RobGanon/bsv-ai-security")
     monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
@@ -110,6 +112,57 @@ def test_testsuites_wrapper_sums_across_suites(monkeypatch, tmp_path):
     assert "- **Failed:** 1" in report
     assert "- **Errors:** 1" in report
     assert "- **Skipped:** 2" in report
+
+
+def test_json_report_matches_markdown_counts_and_lists_tests(monkeypatch, tmp_path):
+    junit = """<?xml version="1.0" encoding="utf-8"?>
+<testsuite name="pytest" errors="0" failures="1" skipped="1" tests="3" time="0.5">
+  <testcase classname="tests.test_x" name="test_passes" time="0.1" />
+  <testcase classname="tests.test_x" name="test_fails" time="0.2"><failure message="boom" /></testcase>
+  <testcase classname="tests.test_x" name="test_skips" time="0.0"><skipped message="skip" /></testcase>
+</testsuite>
+"""
+    rc, report_path = run_report(monkeypatch, tmp_path, junit)
+    assert rc == 0
+    doc = json.loads((tmp_path / "verification-report.json").read_text(encoding="utf-8"))
+    assert doc["schema"] == "sealrun-verification-report-v1"
+    assert doc["status"] == "FAIL"
+    assert doc["commit"] == "abc123"
+    assert doc["counts"] == {"total": 3, "passed": 1, "failed": 1, "errors": 0, "skipped": 1}
+    assert doc["workflow_run"]["url"] == "https://github.com/RobGanon/bsv-ai-security/actions/runs/999"
+    outcomes = {t["name"]: t["outcome"] for t in doc["tests"]}
+    assert outcomes == {
+        "tests.test_x::test_passes": "passed",
+        "tests.test_x::test_fails": "failed",
+        "tests.test_x::test_skips": "skipped",
+    }
+    assert any("do not prove the software secure" in line for line in doc["limitations"])
+
+
+def test_json_missing_results_is_incomplete_not_pass(monkeypatch, tmp_path):
+    rc, _ = run_report(monkeypatch, tmp_path, junit_text=None)
+    assert rc == 0
+    doc = json.loads((tmp_path / "verification-report.json").read_text(encoding="utf-8"))
+    assert doc["status"] == "INCOMPLETE"
+    assert doc["counts"] == {"total": 0, "passed": 0, "failed": 0, "errors": 0, "skipped": 0}
+    assert doc["tests"] == []
+
+
+def test_json_corrupt_xml_is_incomplete(monkeypatch, tmp_path):
+    rc, _ = run_report(monkeypatch, tmp_path, junit_text="this is not xml {{{")
+    assert rc == 0
+    doc = json.loads((tmp_path / "verification-report.json").read_text(encoding="utf-8"))
+    assert doc["status"] == "INCOMPLETE"
+    assert doc["counts"]["total"] == 0
+
+
+def test_json_zero_tests_is_incomplete(monkeypatch, tmp_path):
+    junit = SUITE_TEMPLATE.format(tests=0, failures=0, errors=0, skipped=0)
+    rc, _ = run_report(monkeypatch, tmp_path, junit)
+    assert rc == 0
+    doc = json.loads((tmp_path / "verification-report.json").read_text(encoding="utf-8"))
+    assert doc["status"] == "INCOMPLETE"
+    assert doc["detail"] == "zero tests reported"
 
 
 def test_no_github_run_id_reports_not_running_in_actions(monkeypatch, tmp_path):

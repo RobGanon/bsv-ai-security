@@ -326,6 +326,18 @@ def test_negative_fee_refused(env):
     assert exc.value.rule == "fee"
 
 
+def test_negative_output_value_refused_before_approval(env):
+    env["config"]["expected_utxo"]["value"] = 100
+    env["config_path"].write_text(json.dumps(env["config"]), encoding="utf-8")
+    tx = _unsigned_tx(env, change_value=-1)  # fee = 101, within the cap
+    with pytest.raises(Refusal) as exc:
+        sign_flow(env["config_path"], tx.serialize().hex(),
+                  expected_payload_hex=env["payload"].hex(),
+                  input_fn=_exploding, getpass_fn=_exploding,
+                  output_fn=lambda s: None, time_fn=lambda: FIXED_TIME)
+    assert exc.value.rule == "output_value"
+
+
 def test_wrong_utxo_refused(env):
     tx = _unsigned_tx(env, prev_txid="33" * 32)
     with pytest.raises(Refusal) as exc:
@@ -853,6 +865,19 @@ def test_init_refuses_existing_config(env):
         init_signer(env["config_path"], env["key_path"],
                     input_fn=lambda p: "x", getpass_fn=lambda p: "y",
                     output_fn=lambda s: None)
+
+
+@pytest.mark.parametrize("alias", [False, True])
+def test_init_refuses_colliding_config_and_key_paths(tmp_path, alias):
+    config_path = tmp_path / "signer.json"
+    key_path = tmp_path / "nested" / ".." / "signer.json" if alias else config_path
+    with pytest.raises(SignerError, match="must be different"):
+        init_signer(
+            config_path, key_path,
+            input_fn=_exploding, getpass_fn=_exploding,
+            output_fn=lambda s: None,
+        )
+    assert not config_path.exists()
 
 
 def test_init_password_mismatch_refused(tmp_path):

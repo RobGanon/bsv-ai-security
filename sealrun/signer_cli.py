@@ -74,6 +74,7 @@ except ImportError:  # pragma: no cover - non-Unix platforms
 
 from .anchor import decode_anchor_payload
 from .bsv import (
+    MAX_SATS,
     SIGHASH_ALL_FORKID,
     PrivKey,
     Tx,
@@ -282,9 +283,10 @@ def _read_private_text(path: Path, what: str, *, encoding: str = "utf-8") -> str
         raise SignerError(f"cannot read {what}: {path}") from exc
 
 
-def _write_private_text(path: Path, text: str) -> None:
-    """Write a file with 0600 permissions (no group/world access)."""
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW
+def _write_private_text(path: Path, text: str, *, exclusive: bool = False) -> None:
+    """Write a 0600 file, optionally refusing any existing destination."""
+    flags = os.O_WRONLY | os.O_CREAT | _O_NOFOLLOW
+    flags |= os.O_EXCL if exclusive else os.O_TRUNC
     try:
         fd = os.open(path, flags, 0o600)
     except OSError as exc:
@@ -297,8 +299,13 @@ def _write_private_text(path: Path, text: str) -> None:
         pass
 
 
-def _write_private_json(path: Path, obj: dict[str, Any]) -> None:
-    _write_private_text(path, json.dumps(obj, indent=2, sort_keys=True) + "\n")
+def _write_private_json(
+    path: Path, obj: dict[str, Any], *, exclusive: bool = False
+) -> None:
+    _write_private_text(
+        path, json.dumps(obj, indent=2, sort_keys=True) + "\n",
+        exclusive=exclusive,
+    )
 
 
 def _resolve(maybe_relative: str, config_dir: Path) -> Path:
@@ -883,7 +890,17 @@ def check_hard_rules(tx: Tx, config: dict[str, Any],
     )
     total_out = 0
     for out in tx.outputs:
+        if not 0 <= out.value <= MAX_SATS:
+            raise Refusal(
+                "output_value",
+                f"output value {out.value} is outside 0..{MAX_SATS} sats",
+            )
         total_out += out.value
+        if total_out > MAX_SATS:
+            raise Refusal(
+                "output_value",
+                "aggregate output value exceeds the consensus maximum",
+            )
         if out.script and out.script[0] == 0x6A:
             if out.value != 0:
                 raise Refusal(
@@ -1172,6 +1189,8 @@ def init_signer(config_path: str | Path, key_path: str | Path, *,
     output_fn = output_fn or print
     config_path = Path(config_path)
     key_path = Path(key_path)
+    if config_path.resolve() == key_path.resolve():
+        raise SignerError("signer config and key file paths must be different")
     if config_path.exists():
         raise SignerError(f"signer config already exists: {config_path}")
     if key_path.exists():
@@ -1185,7 +1204,7 @@ def init_signer(config_path: str | Path, key_path: str | Path, *,
     if getpass_fn("Confirm password: ") != password:
         raise SignerError("passwords do not match")
     key = PrivKey.generate()
-    _write_private_text(key_path, key.wif("testnet") + "\n")
+    _write_private_text(key_path, key.wif("testnet") + "\n", exclusive=True)
     totp_secret = base64.b32encode(secrets.token_bytes(20)).decode("ascii")
     config = {
         "version": CONFIG_VERSION,
@@ -1201,7 +1220,7 @@ def init_signer(config_path: str | Path, key_path: str | Path, *,
         "password": hash_password(password),
         "totp": {"secret": totp_secret, "digits": TOTP_DEFAULT_DIGITS},
     }
-    _write_private_json(config_path, config)
+    _write_private_json(config_path, config, exclusive=True)
     output_fn(f"Anchor address (testnet): {config['anchor_address']}")
     output_fn(
         "TOTP secret (shown once — add it to your authenticator app now): "

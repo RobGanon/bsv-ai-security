@@ -404,6 +404,21 @@ def test_ttn_beef_round_trips_and_verifies():
     assert verdict.per_tx[child_txid]["verified"] is True
 
 
+def test_bump_never_overrides_structural_txid_mismatch():
+    beef, anchor_txid, _child_txid = _ttn_beef()
+    entry = beef.txs[0]
+    raw = bytearray(entry.raw)
+    raw[-1] ^= 1  # valid serialization whose bytes no longer hash to txid
+    bad = Beef(
+        bumps=beef.bumps,
+        txs=(BeefTx(bytes(raw), entry.txid, entry.bump_index),),
+    )
+    verdict = BeefVerifier(_HeaderFetcher(header=_header_36722())).verify_beef(bad)
+    assert verdict.verified is False
+    assert verdict.per_tx[anchor_txid]["verified"] is False
+    assert "does not match raw bytes" in verdict.per_tx[anchor_txid]["reason"]
+
+
 def test_ttn_beef_child_before_parent_still_verifies():
     beef, anchor_txid, child_txid = _ttn_beef()
     reordered = Beef(bumps=beef.bumps, txs=(beef.txs[1], beef.txs[0]))

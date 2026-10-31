@@ -96,6 +96,7 @@ from .broadcast import (
     FundingUTXO,
     fetch_prev_output,
     post_raw_tx,
+    validate_woc_network_base,
 )
 from .bsv import (
     SIGHASH_ALL_FORKID,
@@ -271,6 +272,13 @@ def _validate_record(record: Any) -> dict:
     if record["status"] not in RECORD_STATUSES:
         raise PublisherError(
             f"anchor record store is corrupt: unknown status {record['status']!r}"
+        )
+    created_at = record["created_at"]
+    if isinstance(created_at, bool) or (
+        isinstance(created_at, float) and not math.isfinite(created_at)
+    ):
+        raise PublisherError(
+            "anchor record store is corrupt: created_at must be a finite number"
         )
     try:
         fields = decode_anchor_payload(bytes.fromhex(record["payload_hex"]))
@@ -878,6 +886,10 @@ class Publisher:
                 "flow is testnet-only until a witnessed mainnet-key "
                 "step exists"
             )
+        try:
+            woc_base = validate_woc_network_base(woc_base, network)
+        except ValueError as exc:
+            raise PublisherError(str(exc)) from exc
         record = self.build_checkpoint("scheduled")
         payload = bytes.fromhex(record["payload_hex"])
         try:
@@ -967,6 +979,10 @@ class Publisher:
                 "flow is testnet-only until a witnessed mainnet-key "
                 "step exists"
             )
+        try:
+            woc_base = validate_woc_network_base(woc_base, network)
+        except ValueError as exc:
+            raise PublisherError(str(exc)) from exc
         try:
             signed = parse_tx(bytes.fromhex(signed_hex))
         except ValueError as exc:
@@ -1106,6 +1122,34 @@ class Publisher:
 
         head_hash = events[-1]["event_hash"].lower()
         last = anchors[-1] if anchors else None
+        # Scheduler state comes from an attacker-writable store: never
+        # trust the last record's coverage or timing without
+        # re-derivation. Broadcast records are re-derived against the
+        # journal here (as in build_checkpoint); a record whose
+        # created_at lies in the future cannot be trusted to suppress
+        # a scheduled anchor, so it fails closed instead of silently
+        # returning "interval-not-elapsed".
+        self._verify_broadcast_chain(anchors)
+        if last is not None and last["status"] == "superseded":
+            raise PublisherError(
+                "anchor record store is inconsistent: last anchor is "
+                "superseded; refusing to trust scheduler state"
+            )
+        if last is not None and last["created_at"] > at:
+            raise PublisherError(
+                "anchor record store is inconsistent: last anchor "
+                "created_at is in the future; refusing to trust "
+                "scheduler state"
+            )
+        if last is not None and last["status"] in ("pending", "broadcast"):
+            rederived = self._rederive_payload(anchors, len(anchors) - 1)
+            if rederived != last.get("payload_hex"):
+                raise PublisherError(
+                    "anchor record store is inconsistent with the "
+                    "journal: the last stored record does not match "
+                    "the payload derived from the journal; refusing "
+                    "to trust scheduler state"
+                )
         if last is not None and last["head_hash"] == head_hash:
             # A pending record whose broadcast failed is retried here:
             # without this, the scheduler would report "already-anchored"

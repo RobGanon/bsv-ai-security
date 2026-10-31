@@ -312,7 +312,7 @@ class BeefVerifier:
         per_tx: dict[str, dict] = {}
         memo: dict[str, bool] = {}
         try:
-            self._verify_bump_txs(beef, by_txid, per_tx, memo)
+            self._verify_bump_txs(beef, by_txid, per_tx, memo, structural)
             for tx in beef.txs:
                 key = tx.txid.lower()
                 if tx.bump_index is None and key not in per_tx:
@@ -344,11 +344,13 @@ class BeefVerifier:
             per_tx,
         )
 
-    def _verify_bump_txs(self, beef, by_txid, per_tx, memo) -> None:
+    def _verify_bump_txs(self, beef, by_txid, per_tx, memo, structural) -> None:
         for tx in beef.txs:
             if tx.bump_index is None:
                 continue
             key = tx.txid.lower()
+            if key in structural:
+                continue
             if not (0 <= tx.bump_index < len(beef.bumps)):
                 per_tx[key] = {
                     "status": "failed",

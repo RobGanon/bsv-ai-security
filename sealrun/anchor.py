@@ -997,7 +997,8 @@ def extract_anchor_op_return(tx_json: Any) -> bytes:
 def apply_payload_binding(result: dict, fetcher: "AnchorTxFetcher") -> dict:
     """Attach per-anchor payload-binding results to a chain-verify result.
 
-    For each anchor, fetch the on-chain tx and require its OP_RETURN
+    For each anchor, fetch the on-chain tx, require the fetched body
+    to hash to the requested txid, and require its OP_RETURN
     output to equal the claimed payload. This closes the hole where a
     forged payload paired with a real txid verified: chain continuity,
     journal head, SPV/BUMP/BEEF inclusion, signature, and header-chain
@@ -1017,6 +1018,24 @@ def apply_payload_binding(result: dict, fetcher: "AnchorTxFetcher") -> dict:
             return {
                 "verified": False,
                 "reason": f"fetch failed: {exc}",
+            }
+        # Bind the fetched body to the requested txid first, mirroring
+        # AnchorSignatureVerifier: a provider serving a different tx
+        # with the same OP_RETURN must not pass, even if the payload
+        # matches. Malformed bodies fail closed here, not at extraction.
+        try:
+            parsed = _tx_from_woc_json(tx_json)
+            computed = parsed.txid()
+        except (VerificationError, struct.error, ValueError, IndexError,
+                AttributeError, KeyError, TypeError, OverflowError) as exc:
+            return {
+                "verified": False,
+                "reason": f"anchor tx malformed: {exc}",
+            }
+        if computed != str(txid).lower():
+            return {
+                "verified": False,
+                "reason": "fetched anchor transaction ID does not match requested txid",
             }
         try:
             actual = extract_anchor_op_return(tx_json)

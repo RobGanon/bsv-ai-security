@@ -284,13 +284,14 @@ def test_apply_header_chain_journal_shape():
 
 def test_cli_header_chain_verifies_and_prints_line(tmp_path, capsys, monkeypatch):
     from sealrun import cli as cli_module
-    from sealrun.bsv import build_op_return_script
+    from test_anchor_signature import ANCHOR1_TX
 
     genesis = "0" * 64
-    claimed = encode_anchor_payload(
-        head_hash="11" * 32, start_seq=1, end_seq=3,
-        release_seq=0, prev_txid=genesis,
-    )
+    # Payload binding now recomputes the fetched tx's txid, so the
+    # fake provider must return the full real anchor #1 body, whose
+    # OP_RETURN is the claimed payload — not a vout-only stub.
+    _script = bytes.fromhex(ANCHOR1_TX["vout"][0]["scriptPubKey"]["hex"])
+    claimed = _script[3:]
 
     class FakeWoC:
         def __init__(self, base_url=None):
@@ -303,8 +304,9 @@ def test_cli_header_chain_verifies_and_prints_line(tmp_path, capsys, monkeypatch
             return self.inner.fetch_header(height)
 
         def fetch_tx_full(self, txid):
-            script = build_op_return_script(claimed)
-            return {"vout": [{"scriptPubKey": {"hex": script.hex()}}]}
+            if txid.lower() == TX1.lower():
+                return copy.deepcopy(ANCHOR1_TX)
+            raise KeyError(txid)
 
     monkeypatch.setattr(cli_module, "WoCBlockFetcher", FakeWoC)
     anchor1 = tmp_path / "a1.json"

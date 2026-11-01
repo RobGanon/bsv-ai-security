@@ -33,6 +33,7 @@ jobs:
         env:
           TEST_RESULT_FILE: test-results.xml
           TEST_REPORT_FILE: test-report.md
+          TEST_JSON_REPORT_FILE: verification-report.json
           GITHUB_SHA: ${{ github.sha }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_RUN_ID: ${{ github.run_id }}
@@ -51,5 +52,6 @@ jobs:
           path: |
             test-results.xml
             test-report.md
+            verification-report.json
           if-no-files-found: warn
           retention-days: 90

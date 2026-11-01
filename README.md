@@ -23,6 +23,46 @@ This project gives you the evidence.
 > them the logbook. And if you anchor the fingerprints to a public
 > ledger, even the logbook itself can never be quietly rewritten.
 
+## See it work in 2 minutes
+
+SealRun proves what your AI actually ran — not whether it behaved well,
+and not whether its outputs were true. Try it, then try breaking it:
+
+1. Clone the repo and `pip install -e .` (no PyPI package or one-command
+   install yet — stated, not hidden).
+2. Follow the worked example in
+   [`docs/using-sealrun.md`](docs/using-sealrun.md): `sealrun keygen`,
+   `manifest-create`, `manifest-sign`, `verify`, `launch`.
+3. Break it: change `temperature` 0.2 → 0.9 in config.json and launch
+   again → `ERROR: artifact integrity mismatch: config.json`, exit code
+   1, the AI never starts. Then edit one word in `state/audit.jsonl`
+   and run `sealrun audit-verify` →
+   `ERROR: audit event hash mismatch at sequence 2`.
+
+That is the whole claim, shown rather than asserted: a changed file stops
+the run, and edited history is detectable.
+
+## Who this is for, and who should wait
+
+- For: AI/ML and DevOps teams who get asked "prove what ran," plus
+  auditors, regulators, and customers who need checkable evidence rather
+  than a team's word.
+- Maintained by: Rob Ganon.
+- Wait if: you need an independently reviewed, beta-or-better tool today.
+  This is a research preview, not beta, not 1.0, not independently
+  reviewed, and mainnet anchoring is gated.
+- When: no beta/1.0 date is promised.
+- Where it runs / where evidence lives: Linux, on the machine running
+  the AI, stdlib-only offline core; manifest and journal are files you
+  hold locally; anchors (when used) are public on Teratestnet.
+- Where to get help: public GitHub issues for general feedback; private
+  vulnerability reporting only for security findings, under the standard
+  model adopted Oct 31. There is no community channel or forum — stated,
+  not implied.
+- Where it does not reach: closed cloud agents or vendor infrastructure
+  you do not control; verification on an already-compromised host proves
+  nothing.
+
 ## Why use this
 
 - **Prove what ran, not what was supposed to run.** A signed manifest

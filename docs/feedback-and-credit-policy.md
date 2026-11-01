@@ -4,12 +4,11 @@ This policy covers how testing feedback reaches the project during
 the research preview, and how contributors are credited. It applies
 from the `v0.4.0-preview` tag onward. Nothing here promises payment.
 
-## 1. Private feedback first
+## 1. Feedback channels — open for help, private for security
 
-During the research preview, feedback starts private. A tester
-cannot always tell a security flaw from an ordinary bug before
-reporting it, so a public report could disclose a vulnerability
-before there is a fix.
+Anyone can help — no invite needed. General feedback is public;
+security reports are private, always. The two intake paths below
+must not be merged.
 
 ### Two intake paths (do not merge them)
 
@@ -30,23 +29,20 @@ before there is a fix.
   public discussion, or a social post before a fix exists, and
   never with the reporter's private details attached.
 
-**B. General testing feedback — private tester repository.**
+**B. General testing feedback — public issues.**
 
-- Channel: the private, invite-only repository
-  [bsv-ai-security-testers](https://github.com/RobGanon/bsv-ai-security-testers)
-  (the link works only for invited testers). Testers are invited
-  as they arrive; the repository starts empty.
+- Channel: public issues on the public repo:
+  [Issues](https://github.com/RobGanon/bsv-ai-security/issues).
+  Anyone can file one — no invite needed.
 - What it is for: bugs that are not security issues, install
   problems, unclear docs, UX friction, and feature requests.
 - Notification: the maintainer is notified on arrival via GitHub
   notifications.
-- Triage: the maintainer moves an item to the public repo only when
-  it is ready to be public (reproduced, not a security issue,
-  reporter consent where credit is involved). Until then it stays
-  private.
-- What testers are told up front: "Report here first. Do not post
-  security findings publicly. You will hear back after triage;
-  response time is best-effort."
+- Triage: the maintainer triages in the open, asks clarifying
+  questions, and closes or merges as appropriate.
+- If you are unsure whether something is security-sensitive,
+  report it privately via path A first. Better a private report
+  than a public disclosure of a vulnerability.
 
 ### Response time
 
@@ -58,14 +54,15 @@ acknowledgement promise for security reports.
 
 - Not a support desk with a promised response time.
 - Not a bounty program. There is no payment for reports.
-- Not a public issue tracker with a private front door. Public
-  issues remain for public, triaged work only.
+- Not a private front door. Public issues are the tracker for
+  general feedback.
 
-### Preview-phase note
+### Note on the earlier private-first arrangement
 
-Private-first applies during the research preview. A switch to
-standard public issues for general feedback is to be revisited at
-beta, once independent review exists.
+This standard model replaces the earlier private-first preview
+arrangement, under which general feedback went to a private,
+invite-only tester repository. That repository is no longer the
+feedback channel.
 
 ## 2. Credit — who gets it, and what it means
 

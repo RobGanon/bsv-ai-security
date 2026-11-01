@@ -11,7 +11,7 @@ please test against the latest `main`.
 
 **Please do not open a public issue for a security vulnerability.**
 Public issues are for bugs and review discussion that are not
-security-sensitive — and only after triage (see below).
+security-sensitive.
 
 Use GitHub's private vulnerability reporting instead:
 [Report a vulnerability](https://github.com/RobGanon/bsv-ai-security/security/advisories/new).
@@ -29,19 +29,14 @@ A useful report includes:
 
 ## Reporting other testing feedback
 
-During the research preview, general testing feedback also starts
-private, because a tester cannot always tell a security flaw from
-an ordinary bug before reporting it.
+Anyone can help — no invite needed. Report bugs, install problems,
+unclear docs, UX friction, and feature requests as public issues
+on the repo:
+[Issues](https://github.com/RobGanon/bsv-ai-security/issues).
 
-Invited testers: report bugs, install problems, unclear docs, UX
-friction, and feature requests in the private tester repository,
-[bsv-ai-security-testers](https://github.com/RobGanon/bsv-ai-security-testers)
-(invite-only; the link works only for invited testers). Do not post
-security findings there — use private vulnerability reporting above.
-
-An item moves to the public repo only after the maintainer has
-triaged it (reproduced, confirmed it is not a security issue, and,
-where credit is involved, confirmed the reporter's consent).
+If you are unsure whether something is security-sensitive, report
+it privately via private vulnerability reporting above first, not
+as a public issue.
 
 ## What to expect
 
@@ -55,8 +50,8 @@ where credit is involved, confirmed the reporter's consent).
 
 If your review found nothing, that is still worth hearing about — a
 short note saying what you checked and that it held up helps the
-project almost as much as a finding. During the preview, send that
-note through the private tester repository, not a public issue.
+project almost as much as a finding. Send that note as a public
+issue.
 
 ## Credit
 

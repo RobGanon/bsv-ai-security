@@ -54,7 +54,13 @@ the run, and edited history is detectable.
 - When: no beta/1.0 date is promised.
 - Where it runs / where evidence lives: Linux, on the machine running
   the AI, stdlib-only offline core; manifest and journal are files you
-  hold locally; anchors (when used) are public on Teratestnet.
+  hold locally; anchors (when used) are public on Teratestnet. A public
+  anchor is a checkpoint outside the machine's reach: even if someone
+  with full access rewrites the whole local journal, it will no longer
+  match the anchored fingerprint. Anchoring adds proof that holds up
+  against your own administrators, without publishing your data: only
+  hashes and sequence numbers go on-chain, never event contents, prompts,
+  model data, or keys — though anchor timing does reveal when you anchor.
 - Where to get help: public GitHub issues for general feedback; private
   vulnerability reporting only for security findings, under the standard
   model adopted Oct 31. There is no community channel or forum — stated,

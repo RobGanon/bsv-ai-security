@@ -44,9 +44,11 @@ the run, and edited history is detectable.
 
 ## Who this is for, and who should wait
 
-- For: AI/ML and DevOps teams who get asked "prove what ran," plus
-  auditors, regulators, and customers who need checkable evidence rather
-  than a team's word.
+- For: anyone who runs AI on a machine they control — AI/ML and DevOps
+  teams who get asked "prove what ran," plus solo developers,
+  researchers, and hobbyists running a local model, experiment, or
+  script, and auditors, regulators, and customers who need checkable
+  evidence rather than a team's word.
 - Maintained by: Rob Ganon.
 - Wait if: you need an independently reviewed, beta-or-better tool today.
   This is a research preview, not beta, not 1.0, not independently

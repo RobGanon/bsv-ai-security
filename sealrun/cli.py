@@ -140,6 +140,15 @@ def main(argv=None):
     p.add_argument("--public-key", required=True, type=Path)
     p.add_argument("--min-release-seq", type=int, default=None,
                    help="reject manifests older than this release sequence (rollback protection)")
+    p.add_argument("--mode", choices=("v1", "v2"), default="v1",
+                   help="launch mode (default: v1, unchanged); v2 is the "
+                        "explicit per-launch opt-in that writes strict journal events")
+    p.add_argument("--journal", type=Path, default=None,
+                   help="v2 journal path (required with --mode v2; invalid in v1, "
+                        "which writes no journal record)")
+    p.add_argument("--require-v2", action="store_true",
+                   help="refuse to launch unless --mode v2 is used (a v2-only "
+                        "deployment refuses a v1 invocation at invocation time)")
     p.add_argument("--seal", action="store_true",
                    help="copy each artifact into a sealed memfd before exec, so the "
                         "child reads a frozen snapshot (costs a copy of every artifact in RAM)")
@@ -387,6 +396,9 @@ def main(argv=None):
                 seal=args.seal,
                 uid=resolve_uid(args.uid),
                 gid=resolve_gid(args.gid),
+                mode=args.mode,
+                journal=args.journal,
+                require_v2=args.require_v2,
             )
         elif args.command == "audit-append":
             if args.event_type == MANIFEST_ACCEPTED_EVENT_TYPE:

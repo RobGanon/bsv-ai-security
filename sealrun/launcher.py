@@ -60,11 +60,20 @@ import hashlib
 import os
 import re
 import subprocess
+import time
+import uuid
 from pathlib import Path
 from typing import Mapping, Sequence
 
 from .core import (
+    V2_FINISH_EVENT_TYPE,
+    V2_LAUNCH_EVENT_TYPE,
+    V2_LAUNCH_FAILED_EVENT_TYPE,
     VerificationError,
+    append_v2_event,
+    assert_journal_writer_isolation,
+    fingerprint_argv,
+    fingerprint_environment,
     manifest_hash,
     verified_artifacts,
 )
@@ -269,6 +278,61 @@ def _primary_gid(uid: int) -> int:
         ) from exc
 
 
+def _current_working_directory() -> str:
+    try:
+        return os.getcwd()
+    except OSError as exc:
+        raise VerificationError(
+            f"cannot determine the current working directory for the launch record: {exc}"
+        ) from exc
+
+
+def _v2_launch_detail(
+    envelope: dict,
+    channels: Sequence[tuple[str, int]],
+    argv: Sequence[str],
+    child_env: Mapping[str, str],
+    *,
+    run_id: str,
+    journal_nonce: str,
+    seal: bool,
+    uid: int,
+    gid: int,
+) -> dict:
+    return {
+        "launch_mode": "v2",
+        "run_id": run_id,
+        "journal_nonce": journal_nonce,
+        "manifest_hash": manifest_hash(envelope),
+        "artifact_count": len(channels),
+        "argv_fingerprint": fingerprint_argv(argv),
+        "env_fingerprint": fingerprint_environment(child_env),
+        "executable": argv[0],
+        "cwd": _current_working_directory(),
+        "seal": bool(seal),
+        "uid": uid,
+        "gid": gid,
+    }
+
+
+def _record_launch_failed(
+    journal: Path, run_id: str, stage: str, reason: str, original: BaseException
+) -> None:
+    detail = {
+        "launch_mode": "v2",
+        "run_id": run_id,
+        "stage": stage,
+        "reason": (reason or "launch failed")[:3000],
+    }
+    try:
+        append_v2_event(journal, V2_LAUNCH_FAILED_EVENT_TYPE, detail)
+    except VerificationError as exc:
+        raise VerificationError(
+            f"launch failed ({reason}) and the launch-failed journal event "
+            f"also failed: {exc}"
+        ) from original
+
+
 def launch(
     root: Path,
     envelope: dict,
@@ -280,6 +344,9 @@ def launch(
     uid: int | None = None,
     gid: int | None = None,
     env: Mapping[str, str] | None = None,
+    mode: str = "v1",
+    journal: Path | None = None,
+    require_v2: bool = False,
 ) -> int:
     """Verify a manifest and run ``command`` against the verified handles.
 
@@ -287,12 +354,42 @@ def launch(
     the manifest, its signature, an artifact, or the launch itself fails
     — in every failure case the command is *not* run.
 
+    ``mode`` is the explicit per-launch v2 toggle (§5.0). The default is
+    ``"v1"``, which preserves the existing behaviour exactly and writes no
+    journal record. ``"v2"`` requires ``journal`` and a privileged launcher
+    that drops the child to a different uid; it writes strictly-validated
+    ``v2_launch`` / ``v2_finish`` / ``v2_launch_failed`` events around the
+    child. ``require_v2`` makes a v2-only deployment refuse a v1 invocation
+    at the point of invocation, rather than trying to infer compliance
+    from records later.
+
     The child does **not** inherit the caller's environment: it gets
     only the ``SEALRUN_*`` provenance and artifact-descriptor variables,
     plus ``PATH`` (so a command named rather than given by absolute
     path can be found). Pass ``env`` to supply a different base
     environment instead; it replaces that default entirely.
     """
+    if mode not in ("v1", "v2"):
+        raise VerificationError(f"launch mode must be 'v1' or 'v2', not {mode!r}")
+    if mode == "v1":
+        if require_v2:
+            raise VerificationError(
+                "this deployment requires v2, but the launch was invoked in "
+                "v1 mode; pass --mode v2 (v1 is never a silent downgrade)"
+            )
+        if journal is not None:
+            raise VerificationError(
+                "--journal is only valid with --mode v2; v1 launches write "
+                "no journal record"
+            )
+    else:
+        if journal is None:
+            raise VerificationError(
+                "--mode v2 requires --journal (the launch, finish, and "
+                "launch-failed events are mandatory)"
+            )
+        journal = Path(journal)
+
     argv = [arg for arg in command]
     while argv and argv[0] == "--":
         argv.pop(0)
@@ -314,6 +411,15 @@ def launch(
     if (uid is not None or gid is not None) and os.geteuid() == 0:
         drop_groups = ()
 
+    run_id: str | None = None
+    journal_nonce: str | None = None
+    if mode == "v2":
+        # Refuse an unisolated v2 invocation before any verification work:
+        # a v2 run-state claim is unavailable without the §5.7 predicate.
+        assert_journal_writer_isolation(journal, uid)
+        run_id = str(uuid.uuid4())
+        journal_nonce = uuid.uuid4().hex
+
     with verified_artifacts(root, envelope, public_key, min_release_seq) as artifacts:
         channels: list[tuple[str, int]] = []
         sealed_fds: list[int] = []
@@ -330,6 +436,28 @@ def launch(
                     fd = artifact.handle.fileno()
                 channels.append((artifact.path, fd))
             child_env = build_child_environment(envelope, channels, env)
+            if mode == "v2":
+                assert journal is not None and run_id is not None
+                assert uid is not None and gid is not None
+                assert journal_nonce is not None
+                # The launch event is fsynced by append_v2_event before the
+                # child is created (§6.1).
+                append_v2_event(
+                    journal,
+                    V2_LAUNCH_EVENT_TYPE,
+                    _v2_launch_detail(
+                        envelope,
+                        channels,
+                        argv,
+                        child_env,
+                        run_id=run_id,
+                        journal_nonce=journal_nonce,
+                        seal=seal,
+                        uid=uid,
+                        gid=gid,
+                    ),
+                )
+            started = time.monotonic()
             try:
                 completed = subprocess.run(
                     argv,
@@ -341,11 +469,45 @@ def launch(
                     check=False,
                 )
             except PermissionError as exc:
+                if mode == "v2":
+                    _record_launch_failed(
+                        journal,
+                        run_id,
+                        "privilege_drop",
+                        f"cannot drop privileges to uid={uid} gid={gid}: {exc}",
+                        exc,
+                    )
                 raise VerificationError(
                     f"cannot drop privileges to uid={uid} gid={gid}: {exc}"
                 ) from exc
             except OSError as exc:
+                if mode == "v2":
+                    _record_launch_failed(
+                        journal,
+                        run_id,
+                        "exec",
+                        f"cannot launch {argv[0]!r}: {exc}",
+                        exc,
+                    )
                 raise VerificationError(f"cannot launch {argv[0]!r}: {exc}") from exc
+            if mode == "v2":
+                duration_ms = max(0, int((time.monotonic() - started) * 1000))
+                try:
+                    append_v2_event(
+                        journal,
+                        V2_FINISH_EVENT_TYPE,
+                        {
+                            "launch_mode": "v2",
+                            "run_id": run_id,
+                            "exit_code": completed.returncode,
+                            "duration_ms": duration_ms,
+                        },
+                    )
+                except VerificationError as exc:
+                    raise VerificationError(
+                        f"child exited with status {completed.returncode} but "
+                        f"the v2 finish event could not be recorded: {exc}"
+                    ) from exc
             return completed.returncode
         finally:
             for fd in sealed_fds:

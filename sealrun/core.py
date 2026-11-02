@@ -3,13 +3,14 @@ from __future__ import annotations
 import base64
 import contextlib
 import dataclasses
+import errno
 import hashlib
 import json
 import os
 import re
 import stat
 from pathlib import Path
-from typing import Any, BinaryIO, Iterator
+from typing import Any, BinaryIO, Iterator, Mapping, Sequence
 
 from .bsv import PrivKey, _pubkey_point, sign_digest, verify_sig
 
@@ -34,6 +35,23 @@ MAX_EVENT_DETAIL_BYTES = 4096
 MAX_JOURNAL_EVENTS = 1_000_000
 
 UINT32_MAX = (1 << 32) - 1
+
+#: Per-event namespacing for v2 run-state events [frozen design §6.2].
+#: The ``v2_`` namespace is reserved: ``append_audit_event`` refuses it so
+#: in-process callers cannot mint a run-state event outside the strict
+#: schema, and audit verification refuses unknown types in the namespace.
+V2_LAUNCH_EVENT_TYPE = "v2_launch"
+V2_FINISH_EVENT_TYPE = "v2_finish"
+V2_LAUNCH_FAILED_EVENT_TYPE = "v2_launch_failed"
+V2_EVENT_TYPES = frozenset(
+    {V2_LAUNCH_EVENT_TYPE, V2_FINISH_EVENT_TYPE, V2_LAUNCH_FAILED_EVENT_TYPE}
+)
+V2_EVENT_TYPE_PREFIX = "v2_"
+_V2_STAGES = frozenset({"launch", "privilege_drop", "exec"})
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+_NONCE_RE = re.compile(r"^[0-9a-f]{32}$")
 
 # O_NOFOLLOW makes open(2) fail on a trailing symlink instead of following it.
 # It is Unix-only; where unavailable the per-component symlink walk in
@@ -76,6 +94,26 @@ def canonical_json_bytes(value: Any) -> bytes:
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
+
+
+def fingerprint_value(value: Any) -> str:
+    """SHA-256 over a canonical JSON encoding of ``value``.
+
+    V2 records fingerprints by default rather than verbatim argv/env
+    (§6.3). The encoding is the same canonical form the journal uses, so
+    a third party can recompute it from the recorded structure.
+    """
+    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def fingerprint_argv(argv: Sequence[str]) -> str:
+    """Return the v2 argv fingerprint (SHA-256 over canonical argv JSON)."""
+    return fingerprint_value(list(argv))
+
+
+def fingerprint_environment(env: Mapping[str, str]) -> str:
+    """Return the v2 environment fingerprint (SHA-256 over canonical JSON)."""
+    return fingerprint_value(dict(env))
 
 
 def sha256_file(path: Path) -> tuple[str, int]:
@@ -591,26 +629,196 @@ def record_manifest_acceptance(
     return append_audit_event(journal, MANIFEST_ACCEPTED_EVENT_TYPE, detail)
 
 
+_V2_LAUNCH_FIELDS = frozenset(
+    {
+        "launch_mode",
+        "run_id",
+        "journal_nonce",
+        "manifest_hash",
+        "artifact_count",
+        "argv_fingerprint",
+        "env_fingerprint",
+        "executable",
+        "cwd",
+        "seal",
+        "uid",
+        "gid",
+    }
+)
+_V2_FINISH_FIELDS = frozenset(
+    {"launch_mode", "run_id", "exit_code", "duration_ms"}
+)
+_V2_LAUNCH_FAILED_FIELDS = frozenset(
+    {"launch_mode", "run_id", "stage", "reason"}
+)
+
+
+def _v2_exact_fields(detail: Any, required: frozenset[str], event_type: str) -> dict:
+    if not isinstance(detail, dict):
+        raise VerificationError(f"{event_type} detail must be a JSON object")
+    keys = set(detail)
+    missing = sorted(required - keys)
+    unknown = sorted(keys - required)
+    if missing:
+        raise VerificationError(
+            f"{event_type} detail is missing required field(s): {', '.join(missing)}"
+        )
+    if unknown:
+        raise VerificationError(
+            f"{event_type} detail has unknown field(s): {', '.join(unknown)}"
+        )
+    return detail
+
+
+def _v2_check_launch_mode(value: Any, event_type: str) -> None:
+    if value != "v2":
+        raise VerificationError(
+            f"{event_type} detail must record launch_mode 'v2'"
+        )
+
+
+def _v2_string(value: Any, field: str, *, max_length: int = 4096) -> str:
+    if not isinstance(value, str) or not value:
+        raise VerificationError(f"{field} must be a non-empty string")
+    if len(value) > max_length:
+        raise VerificationError(f"{field} exceeds maximum length of {max_length}")
+    return value
+
+
+def _v2_uuid(value: Any) -> str:
+    text = _v2_string(value, "run_id", max_length=64)
+    if not _UUID_RE.fullmatch(text):
+        raise VerificationError("run_id must be a canonical lowercase UUID")
+    return text
+
+
+def _v2_hex64(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not HEX_64.fullmatch(value):
+        raise VerificationError(f"{field} must be a 64-character hex string")
+    return value
+
+
+def _v2_nonce(value: Any) -> str:
+    if not isinstance(value, str) or not _NONCE_RE.fullmatch(value):
+        raise VerificationError("journal_nonce must be 32 lowercase hex characters")
+    return value
+
+
+def _v2_int(
+    value: Any, field: str, *, minimum: int, maximum: int
+) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise VerificationError(f"{field} must be an integer")
+    if value < minimum or value > maximum:
+        raise VerificationError(
+            f"{field} must be between {minimum} and {maximum}"
+        )
+    return value
+
+
+def _validate_v2_event_detail(event_type: str, detail: Any) -> None:
+    """Strictly validate one v2 run-state event's ``detail`` object.
+
+    Unknown keys are refused as well as missing ones: the schema is
+    additive only by a code change here, so a hand-written journal cannot
+    smuggle an unvalidated field past ``audit-verify``.
+    """
+    if event_type == V2_LAUNCH_EVENT_TYPE:
+        detail = _v2_exact_fields(detail, _V2_LAUNCH_FIELDS, event_type)
+        _v2_check_launch_mode(detail["launch_mode"], event_type)
+        _v2_uuid(detail["run_id"])
+        _v2_nonce(detail["journal_nonce"])
+        _v2_hex64(detail["manifest_hash"], "manifest_hash")
+        _v2_int(detail["artifact_count"], "artifact_count",
+                minimum=0, maximum=UINT32_MAX)
+        _v2_hex64(detail["argv_fingerprint"], "argv_fingerprint")
+        _v2_hex64(detail["env_fingerprint"], "env_fingerprint")
+        _v2_string(detail["executable"], "executable")
+        _v2_string(detail["cwd"], "cwd")
+        if not isinstance(detail["seal"], bool):
+            raise VerificationError("seal must be a boolean")
+        _v2_int(detail["uid"], "uid", minimum=1, maximum=UINT32_MAX)
+        _v2_int(detail["gid"], "gid", minimum=0, maximum=UINT32_MAX)
+        return
+    if event_type == V2_FINISH_EVENT_TYPE:
+        detail = _v2_exact_fields(detail, _V2_FINISH_FIELDS, event_type)
+        _v2_check_launch_mode(detail["launch_mode"], event_type)
+        _v2_uuid(detail["run_id"])
+        _v2_int(detail["exit_code"], "exit_code", minimum=-255, maximum=255)
+        _v2_int(detail["duration_ms"], "duration_ms",
+                minimum=0, maximum=(1 << 63) - 1)
+        return
+    if event_type == V2_LAUNCH_FAILED_EVENT_TYPE:
+        detail = _v2_exact_fields(detail, _V2_LAUNCH_FAILED_FIELDS, event_type)
+        _v2_check_launch_mode(detail["launch_mode"], event_type)
+        _v2_uuid(detail["run_id"])
+        if detail["stage"] not in _V2_STAGES:
+            raise VerificationError(
+                f"stage must be one of: {', '.join(sorted(_V2_STAGES))}"
+            )
+        _v2_string(detail["reason"], "reason", max_length=3000)
+        return
+    raise VerificationError(f"unknown v2 event type: {event_type!r}")
+
+
+def append_v2_event(journal: Path, event_type: str, detail: dict) -> dict:
+    """Append one strictly-validated v2 run-state event.
+
+    The event type must be in the reserved ``v2_`` namespace and the
+    ``detail`` object must match that type's exact schema. The detail is
+    serialised canonically before hashing, exactly as
+    :func:`append_audit_event` does for legacy events.
+    """
+    if event_type not in V2_EVENT_TYPES:
+        raise VerificationError(f"unknown v2 event type: {event_type!r}")
+    _validate_v2_event_detail(event_type, detail)
+    serialized = canonical_json_bytes(detail).decode("utf-8")
+    return _append_audit_event(
+        journal, event_type, serialized, create_parent=False
+    )
+
+
 def append_audit_event(journal: Path, event_type: str, detail: str) -> dict:
     """Append an event only when the existing journal is valid.
 
     This prevents the normal append path from silently extending a journal
     whose earlier events have already been modified or truncated.
 
+    The ``v2_`` event-type namespace is reserved for the strictly-validated
+    v2 run-state schema (:func:`append_v2_event`). Refusing it here — in
+    ``core``, not only in the CLI — stops in-process callers from minting
+    a run-state event that bypasses that schema.
+
     On platforms that support it, an exclusive advisory lock is held across
     the verify-then-write critical section so concurrent writers cannot race.
     """
     if not isinstance(event_type, str) or not event_type:
         raise VerificationError("event_type must be a non-empty string")
+    if event_type.startswith(V2_EVENT_TYPE_PREFIX):
+        raise VerificationError(
+            f"event type {event_type!r} is in the reserved v2_ namespace; "
+            "use append_v2_event with the strict run-state schema"
+        )
     if not isinstance(detail, str):
         raise VerificationError("detail must be a string")
+    return _append_audit_event(journal, event_type, detail)
+
+
+def _append_audit_event(
+    journal: Path, event_type: str, detail: str, *, create_parent: bool = True
+) -> dict:
     detail_bytes = detail.encode("utf-8")
     if len(detail_bytes) > MAX_EVENT_DETAIL_BYTES:
         raise VerificationError(
             f"detail exceeds maximum of {MAX_EVENT_DETAIL_BYTES} UTF-8 bytes"
         )
 
-    journal.parent.mkdir(parents=True, exist_ok=True)
+    if create_parent:
+        journal.parent.mkdir(parents=True, exist_ok=True)
+    elif not journal.parent.is_dir():
+        raise VerificationError(
+            "audit journal directory must already exist"
+        )
     if journal.is_symlink():
         raise VerificationError("audit journal must be a regular non-symlink file")
 
@@ -731,6 +939,28 @@ def _verify_audit_events(events: list[dict]) -> int:
         seq = event.get("seq")
         if not isinstance(seq, int) or isinstance(seq, bool) or seq != expected_seq:
             raise VerificationError(f"audit sequence mismatch at sequence {expected_seq}")
+        event_type = event.get("event_type")
+        if isinstance(event_type, str) and event_type.startswith(V2_EVENT_TYPE_PREFIX):
+            if event_type not in V2_EVENT_TYPES:
+                raise VerificationError(
+                    f"unknown v2 event type at sequence {expected_seq}: "
+                    f"{event_type!r}"
+                )
+            detail = event.get("detail")
+            if not isinstance(detail, str):
+                raise VerificationError(
+                    f"malformed v2 event detail at sequence {expected_seq}"
+                )
+            try:
+                parsed = json.loads(detail, object_pairs_hook=_no_duplicate_object)
+            except ValueError as exc:
+                raise VerificationError(
+                    f"invalid v2 event detail at sequence {expected_seq}: {exc}"
+                ) from exc
+            _validate_v2_event_detail(event_type, parsed)
+        # Legacy free-form events are not run-state events (§6.2). Their
+        # event_type is not constrained by the v2 schema, and v1's
+        # verification behaviour (which never inspected it) is preserved.
         previous = event_hash.lower()
         expected_seq += 1
     return len(events)
@@ -772,3 +1002,187 @@ def _read_jsonl(path: Path) -> list[dict]:
                 raise VerificationError(f"audit event must be a JSON object at line {line_no}")
             events.append(event)
     return events
+
+
+#: Filesystems on which the kernel enforces the ownership and mode bits the
+#: §5.7 isolation predicate relies on. Network and FUSE filesystems are
+#: deliberately absent: there the local uid/mode view is not authoritative.
+#: An unknown type refuses (fail closed) rather than being assumed safe.
+OWNERSHIP_ENFORCING_FILESYSTEMS = frozenset(
+    {"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "tmpfs", "ramfs", "overlay"}
+)
+
+_ACL_XATTRS = ("system.posix_acl_access", "system.posix_acl_default")
+_ACL_ABSENT_ERRNOS = frozenset(
+    value
+    for value in (
+        errno.ENODATA,
+        getattr(errno, "ENOATTR", errno.ENODATA),
+        errno.ENOTSUP,
+        getattr(errno, "EOPNOTSUPP", errno.ENOTSUP),
+    )
+)
+
+
+def _mountinfo_unescape(field: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        return chr(int(match.group(1), 8))
+
+    return re.sub(r"\\([0-7]{3})", replace, field)
+
+
+def _filesystem_type(path: Path) -> str | None:
+    """Return the mount filesystem type for ``path``, or ``None``.
+
+    Reads ``/proc/self/mountinfo`` directly because the standard library
+    exposes no filesystem-type call. The longest matching mount point wins,
+    which handles nested mounts. Unknown or unreadable mountinfo returns
+    ``None`` so the caller refuses.
+    """
+    try:
+        lines = Path("/proc/self/mountinfo").read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines()
+    except OSError:
+        return None
+    target = os.path.abspath(os.fspath(path))
+    best_mount = None
+    best_type = None
+    for line in lines:
+        left, separator, right = line.partition(" - ")
+        if not separator:
+            continue
+        left_fields = left.split()
+        right_fields = right.split()
+        if len(left_fields) < 5 or not right_fields:
+            continue
+        mount_point = _mountinfo_unescape(left_fields[4])
+        prefix = mount_point.rstrip("/") + "/"
+        if target == mount_point or target.startswith(prefix):
+            if best_mount is None or len(mount_point) > len(best_mount):
+                best_mount = mount_point
+                best_type = right_fields[0]
+    return best_type
+
+
+def _refuse_acl(path: Path, role: str) -> None:
+    for name in _ACL_XATTRS:
+        try:
+            os.getxattr(os.fspath(path), name)
+        except OSError as exc:
+            if exc.errno in _ACL_ABSENT_ERRNOS:
+                continue
+            raise VerificationError(
+                f"cannot inspect ACLs on {role} {path}: {exc}"
+            ) from exc
+        raise VerificationError(
+            f"{role} {path} carries an ACL; v2 journal isolation "
+            "refuses ACL-bearing paths"
+        )
+
+
+def _check_isolated_path(
+    path: Path, child_uid: int, *, role: str, require_directory: bool
+) -> None:
+    """Apply the ownership/mode/ACL checks for one journal path component."""
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise VerificationError(f"cannot inspect {role} {path}: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise VerificationError(f"{role} {path} is a symlink; refusing")
+    if require_directory:
+        if not stat.S_ISDIR(info.st_mode):
+            raise VerificationError(f"{role} {path} is not a directory")
+    elif not stat.S_ISREG(info.st_mode):
+        raise VerificationError(f"{role} {path} is not a regular file")
+    if info.st_uid == child_uid:
+        raise VerificationError(
+            f"{role} {path} is owned by the child uid {child_uid}; "
+            "the child could write or replace it"
+        )
+    # Group/other write is refused even when the child's gid differs: the
+    # rule is a property of the path, not of a guess about group membership.
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        raise VerificationError(
+            f"{role} {path} is group- or world-writable; the child could "
+            "alter the journal store"
+        )
+    _refuse_acl(path, role)
+
+
+def _ancestor_directories(path: Path) -> list[Path]:
+    current = Path(os.path.abspath(os.fspath(path)))
+    ancestors = []
+    while True:
+        ancestors.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    return ancestors
+
+
+def assert_journal_writer_isolation(
+    journal: Path,
+    child_uid: int | None,
+    *,
+    launcher_euid: int | None = None,
+) -> None:
+    """Refuse a v2 journal placement the dropped child could write.
+
+    Implements the §5.7 launcher decision procedure: privileged launcher,
+    explicit non-root drop uid different from every journal path owner,
+    pre-existing journal directory, no group/other write bit on the file,
+    its directory, or any ancestor, no ACLs, and an ownership-enforcing
+    local filesystem. Anything unverifiable fails closed.
+
+    ``launcher_euid`` is injectable so the predicate can be unit-tested
+    without real privilege; production callers omit it.
+    """
+    if launcher_euid is None:
+        launcher_euid = os.geteuid()
+    if launcher_euid != 0:
+        raise VerificationError(
+            "v2 journal isolation requires a privileged launcher (euid 0) "
+            "that can drop the child to a different uid"
+        )
+    if child_uid is None:
+        raise VerificationError(
+            "v2 journal isolation requires --uid so the child runs as a "
+            "different user than the journal owner"
+        )
+    if isinstance(child_uid, bool) or not isinstance(child_uid, int):
+        raise VerificationError("v2 child uid must be an integer")
+    if child_uid == 0:
+        raise VerificationError(
+            "v2 journal isolation refuses a child uid of 0"
+        )
+
+    journal = Path(journal)
+    parent = journal.parent
+    if not parent.exists():
+        raise VerificationError(
+            f"v2 journal directory {parent} must already exist; the launcher "
+            "will not create it (an unisolated parent cannot be repaired "
+            "after the fact)"
+        )
+
+    _check_isolated_path(
+        parent, child_uid, role="journal directory", require_directory=True
+    )
+    for ancestor in _ancestor_directories(parent.parent):
+        _check_isolated_path(
+            ancestor, child_uid, role="journal ancestor", require_directory=True
+        )
+    if journal.exists() or journal.is_symlink():
+        _check_isolated_path(
+            journal, child_uid, role="journal file", require_directory=False
+        )
+
+    filesystem = _filesystem_type(parent)
+    if filesystem not in OWNERSHIP_ENFORCING_FILESYSTEMS:
+        raise VerificationError(
+            f"v2 journal directory {parent} is on filesystem type "
+            f"{filesystem!r}; ownership-enforcing local filesystems only "
+            "(NFS/FUSE/unknown refuse)"
+        )

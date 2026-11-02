@@ -646,8 +646,19 @@ _V2_LAUNCH_FIELDS = frozenset(
     }
 )
 _V2_FINISH_FIELDS = frozenset(
-    {"launch_mode", "run_id", "exit_code", "duration_ms"}
+    {
+        "launch_mode",
+        "run_id",
+        "exit_code",
+        "launcher_signal",
+        "escalated",
+        "duration_ms",
+    }
 )
+#: 0 (no signal) or a termination signal the v2 launcher forwards:
+#: SIGHUP, SIGINT, SIGTERM (POSIX numbering, so verification does not
+#: depend on the verifying host's signal module).
+_V2_LAUNCHER_SIGNALS = frozenset({0, 1, 2, 15})
 _V2_LAUNCH_FAILED_FIELDS = frozenset(
     {"launch_mode", "run_id", "stage", "reason"}
 )
@@ -745,6 +756,20 @@ def _validate_v2_event_detail(event_type: str, detail: Any) -> None:
         _v2_check_launch_mode(detail["launch_mode"], event_type)
         _v2_uuid(detail["run_id"])
         _v2_int(detail["exit_code"], "exit_code", minimum=-255, maximum=255)
+        launcher_signal = _v2_int(
+            detail["launcher_signal"], "launcher_signal", minimum=0, maximum=255
+        )
+        if launcher_signal not in _V2_LAUNCHER_SIGNALS:
+            raise VerificationError(
+                "launcher_signal must be 0 (none), 1 (SIGHUP), 2 (SIGINT) or 15 (SIGTERM)"
+            )
+        if not isinstance(detail["escalated"], bool):
+            raise VerificationError("escalated must be a boolean")
+        if detail["escalated"] and not launcher_signal:
+            raise VerificationError(
+                "escalated requires a launcher_signal: the launcher only "
+                "escalates after forwarding a signal it received"
+            )
         _v2_int(detail["duration_ms"], "duration_ms",
                 minimum=0, maximum=(1 << 63) - 1)
         return

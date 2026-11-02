@@ -94,6 +94,17 @@ class _RaisingSpy:
 def install_spy(monkeypatch, spy) -> None:
     monkeypatch.setattr(launcher, "subprocess", types.SimpleNamespace(run=spy))
 
+    # v2 launches go through the explicit signal-handling wait loop (item 4),
+    # not subprocess.run; route them to the same spy.
+    def run_v2_child(argv, *, pass_fds, child_env, uid, gid, drop_groups, signals):
+        completed = spy(
+            argv, pass_fds=pass_fds, env=child_env, user=uid, group=gid,
+            extra_groups=drop_groups, check=False,
+        )
+        return launcher._V2RunResult(completed.returncode, 0, False)
+
+    monkeypatch.setattr(launcher, "_run_v2_child", run_v2_child)
+
 
 def bypass_isolation(monkeypatch) -> None:
     monkeypatch.setattr(
@@ -131,6 +142,8 @@ def finish_detail(run_id=None, **overrides) -> dict:
         "launch_mode": "v2",
         "run_id": run_id or str(uuid.uuid4()),
         "exit_code": 0,
+        "launcher_signal": 0,
+        "escalated": False,
         "duration_ms": 12,
     }
     detail.update(overrides)

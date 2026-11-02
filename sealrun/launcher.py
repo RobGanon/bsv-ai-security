@@ -56,14 +56,19 @@ Residual limits are stated plainly because they matter:
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import hashlib
 import os
 import re
+import signal
 import subprocess
+import sys
+import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Mapping, Sequence
+from subprocess import SubprocessError
+from typing import Mapping, NamedTuple, NoReturn, Sequence
 
 from .core import (
     V2_FINISH_EVENT_TYPE,
@@ -85,6 +90,41 @@ except ImportError:  # pragma: no cover - non-Unix platforms
 
 _ENV_PREFIX = "SEALRUN_ARTIFACT_"
 _NON_ALNUM = re.compile(r"[^A-Za-z0-9]+")
+
+#: Seconds a v2 child's process group gets, after the launcher forwards a
+#: termination signal to it, before the launcher sends the group SIGKILL
+#: (§5.4: forward first, escalate after a stated timeout).
+V2_SIGNAL_FORWARD_TIMEOUT = 5.0
+
+#: Termination signals a v2 launcher records and forwards instead of dying
+#: on. A signal that was ignored when the launcher started stays ignored.
+_V2_FORWARDED_SIGNALS = tuple(
+    getattr(signal, name)
+    for name in ("SIGHUP", "SIGINT", "SIGTERM")
+    if hasattr(signal, name)
+)
+_V2_WAIT_POLL_INTERVAL = 0.05
+_PR_SET_PDEATHSIG = 1
+
+
+def _load_prctl():
+    """Return libc's ``prctl`` on Linux, or ``None`` where it is unavailable.
+
+    Resolved once at import so the child's ``preexec_fn`` does no dynamic
+    loading between fork and exec.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        prctl = ctypes.CDLL(None, use_errno=True).prctl
+    except (OSError, AttributeError):
+        return None
+    prctl.argtypes = [ctypes.c_int] + [ctypes.c_ulong] * 4
+    prctl.restype = ctypes.c_int
+    return prctl
+
+
+_PRCTL = _load_prctl()
 
 # F_SEAL_* values (linux/memfd.h). The fallbacks let the module import on
 # platforms whose fcntl lacks them; ``_seal_fd`` refuses at call time.
@@ -316,7 +356,11 @@ def _v2_launch_detail(
 
 
 def _record_launch_failed(
-    journal: Path, run_id: str, stage: str, reason: str, original: BaseException
+    journal: Path,
+    run_id: str,
+    stage: str,
+    reason: str,
+    original: BaseException | None = None,
 ) -> None:
     detail = {
         "launch_mode": "v2",
@@ -330,7 +374,336 @@ def _record_launch_failed(
         raise VerificationError(
             f"launch failed ({reason}) and the launch-failed journal event "
             f"also failed: {exc}"
-        ) from original
+        ) from (original or exc)
+
+
+def _signal_name(signum: int) -> str:
+    try:
+        return signal.Signals(signum).name
+    except ValueError:
+        return f"signal {signum}"
+
+
+def _require_v2_supervision() -> None:
+    """Refuse a v2 launch whose child could not be supervised (§5.4)."""
+    if threading.current_thread() is not threading.main_thread():
+        raise VerificationError(
+            "--mode v2 must launch from the main thread: signal handling "
+            "needs it, and the child's parent-death signal fires when the "
+            "thread that started it exits"
+        )
+    if _PRCTL is None:
+        raise VerificationError(
+            "--mode v2 requires Linux prctl(PR_SET_PDEATHSIG) so the child "
+            "is killed if the launcher dies; it is unavailable here"
+        )
+
+
+def _v2_preexec(
+    parent_pid: int, uid: int, gid: int, drop_groups: tuple[int, ...] | None
+) -> None:
+    """Child-side setup between fork and exec (``preexec_fn``).
+
+    The frozen design asserts no universal ordering between ``preexec_fn``
+    and CPython's ``user=``/``group=``/``extra_groups=`` handling, and the
+    kernel clears the parent-death signal on any later euid/egid change. So
+    this hook first checks that the drop already happened and refuses
+    otherwise, rather than assuming it. It then makes the child its own
+    process-group leader (same session), installs
+    ``PR_SET_PDEATHSIG(SIGKILL)``, and re-checks ``getppid()``: a launcher
+    that died before ``prctl`` has already reparented the child, which must
+    not exec unsupervised. Any failure raises, so ``Popen`` reports it and
+    the command never runs.
+    """
+    if (os.getuid(), os.geteuid(), os.getgid(), os.getegid()) != (uid, uid, gid, gid):
+        raise RuntimeError("the credential drop did not precede preexec_fn")
+    if drop_groups is not None and sorted(os.getgroups()) != sorted(drop_groups):
+        raise RuntimeError("supplementary groups were not reset before preexec_fn")
+    os.setpgid(0, 0)
+    if _PRCTL is None or _PRCTL(_PR_SET_PDEATHSIG, int(signal.SIGKILL), 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "cannot install the parent-death signal")
+    if os.getppid() != parent_pid:
+        raise RuntimeError("the launcher exited before the child was supervised")
+
+
+class _V2SignalGuard:
+    """Record the launcher's termination signals for one v2 run.
+
+    While active, SIGHUP/SIGINT/SIGTERM are recorded instead of raising
+    KeyboardInterrupt or killing the launcher, so a signal can delay the
+    launch -> child -> terminal-event sequence but never cut it short.
+    SIGCHLD is reset to its default for the run: an inherited ``SIG_IGN``
+    makes the kernel reap the child itself and discard its exit status.
+    """
+
+    def __init__(self) -> None:
+        self.signals: list[int] = []
+        self._previous: dict[int, object] = {}
+
+    def _record(self, signum: int, _frame) -> None:
+        self.signals.append(signum)
+
+    def __enter__(self) -> "_V2SignalGuard":
+        try:
+            for signum in _V2_FORWARDED_SIGNALS:
+                previous = signal.getsignal(signum)
+                if previous == signal.SIG_IGN:
+                    continue
+                self._previous[signum] = previous
+                signal.signal(signum, self._record)
+            self._previous[signal.SIGCHLD] = signal.getsignal(signal.SIGCHLD)
+            signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+        except BaseException:
+            self._restore()
+            raise
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self._restore()
+
+    def _restore(self) -> None:
+        for signum, previous in self._previous.items():
+            signal.signal(signum, signal.SIG_DFL if previous is None else previous)
+        self._previous.clear()
+
+
+class _V2RunResult(NamedTuple):
+    returncode: int
+    #: First termination signal the launcher received and forwarded, or 0.
+    launcher_signal: int
+    #: Whether the launcher sent the child's process group SIGKILL after
+    #: V2_SIGNAL_FORWARD_TIMEOUT.
+    escalated: bool
+
+
+def _signal_process_group(pgid: int, signum: int) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(pgid, signum)
+
+
+def _process_group_exists(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _reap_v2_child(proc: subprocess.Popen) -> int | None:
+    """Return the child's returncode once it has exited, else ``None``.
+
+    ``Popen.poll`` reports 0 when the status has been lost (ECHILD); a v2
+    finish event must never record a status the launcher did not observe.
+    """
+    try:
+        pid, status = os.waitpid(proc.pid, os.WNOHANG)
+    except ChildProcessError as exc:
+        raise VerificationError(
+            "the v2 child's exit status is unavailable (it was reaped outside "
+            "the launcher); refusing to record a status that was not observed"
+        ) from exc
+    if pid == 0:
+        return None
+    proc.returncode = os.waitstatus_to_exitcode(status)
+    return proc.returncode
+
+
+def _wait_v2_child(proc: subprocess.Popen, signals: list[int]) -> _V2RunResult:
+    """The explicit v2 wait loop (§5.4).
+
+    Each recorded launcher signal is forwarded to the child's process group,
+    followed by SIGCONT so a stopped child can act on it. If the group has
+    not exited V2_SIGNAL_FORWARD_TIMEOUT seconds after the first forward,
+    it is sent SIGKILL. With no launcher signal, the loop returns as soon as
+    the direct child exits and leaves any descendants alone; after a signal,
+    it also waits (up to the deadline) for the rest of the group.
+    """
+    pgid = proc.pid
+    returncode: int | None = None
+    launcher_signal = 0
+    forwarded = 0
+    deadline: float | None = None
+    escalated = False
+    while True:
+        if returncode is None:
+            returncode = _reap_v2_child(proc)
+        while forwarded < len(signals):
+            signum = signals[forwarded]
+            forwarded += 1
+            launcher_signal = launcher_signal or signum
+            if not escalated:
+                _signal_process_group(pgid, signum)
+                _signal_process_group(pgid, signal.SIGCONT)
+                if deadline is None:
+                    deadline = time.monotonic() + V2_SIGNAL_FORWARD_TIMEOUT
+        if returncode is not None and (
+            not launcher_signal or escalated or not _process_group_exists(pgid)
+        ):
+            return _V2RunResult(returncode, launcher_signal, escalated)
+        if deadline is not None and not escalated and time.monotonic() >= deadline:
+            _signal_process_group(pgid, signal.SIGKILL)
+            escalated = True
+            continue
+        time.sleep(_V2_WAIT_POLL_INTERVAL)
+
+
+def _run_v2_child(
+    argv: Sequence[str],
+    *,
+    pass_fds: tuple[int, ...],
+    child_env: Mapping[str, str],
+    uid: int,
+    gid: int,
+    drop_groups: tuple[int, ...] | None,
+    signals: list[int],
+) -> _V2RunResult:
+    """Start the v2 child and supervise it until it exits.
+
+    ``subprocess.run`` is not used: on KeyboardInterrupt it kills the child
+    and re-raises, so the finish event could never be written. Failures
+    starting the child propagate exactly as ``Popen`` raises them. Once the
+    child runs, any failure kills its process group and surfaces as
+    :class:`VerificationError`, never as a launch failure.
+
+    Terminal policy: the child gets its own process group in the
+    launcher's session and is NOT made the terminal's foreground group (no
+    ``tcsetpgrp``); terminal loss is accepted. Terminal-generated signals
+    reach the launcher, which forwards them; a child that reads the
+    controlling terminal is stopped by SIGTTIN until the launcher is
+    signalled. Descendants that leave the process group (e.g. ``setsid``)
+    escape both forwarding and escalation, and a SIGKILLed launcher writes
+    nothing: its child dies by the parent-death signal unless it escaped.
+    """
+    parent_pid = os.getpid()
+    proc = subprocess.Popen(
+        list(argv),
+        pass_fds=pass_fds,
+        env=dict(child_env),
+        user=uid,
+        group=gid,
+        extra_groups=drop_groups,
+        preexec_fn=lambda: _v2_preexec(parent_pid, uid, gid, drop_groups),
+    )
+    try:
+        return _wait_v2_child(proc, signals)
+    except BaseException as exc:
+        _signal_process_group(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            for _ in range(100):
+                if proc.returncode is not None or _reap_v2_child(proc) is not None:
+                    break
+                time.sleep(_V2_WAIT_POLL_INTERVAL)
+        if isinstance(exc, VerificationError) or not isinstance(exc, Exception):
+            raise
+        raise VerificationError(f"lost supervision of the v2 child: {exc}") from exc
+
+
+def _launch_v2(
+    journal: Path,
+    run_id: str,
+    launch_detail: dict,
+    argv: Sequence[str],
+    *,
+    pass_fds: tuple[int, ...],
+    child_env: Mapping[str, str],
+    uid: int,
+    gid: int,
+    drop_groups: tuple[int, ...] | None,
+) -> tuple[int | None, int]:
+    """Journal the launch, run the child, journal its terminal event.
+
+    Returns ``(returncode, signal_to_reraise)``. ``returncode`` is ``None``
+    when a termination signal arrived before the child was started; the
+    child is then never started and a ``v2_launch_failed`` event records
+    why. ``signal_to_reraise`` is 0 when the launcher received no signal.
+    """
+    with _V2SignalGuard() as guard:
+        # The launch event is fsynced by append_v2_event before the child
+        # is created (§6.1).
+        append_v2_event(journal, V2_LAUNCH_EVENT_TYPE, launch_detail)
+        if guard.signals:
+            signum = guard.signals[0]
+            _record_launch_failed(
+                journal,
+                run_id,
+                "launch",
+                f"launcher received {_signal_name(signum)} before the child "
+                f"was started",
+            )
+            return None, signum
+        started = time.monotonic()
+        try:
+            result = _run_v2_child(
+                argv,
+                pass_fds=pass_fds,
+                child_env=child_env,
+                uid=uid,
+                gid=gid,
+                drop_groups=drop_groups,
+                signals=guard.signals,
+            )
+        except PermissionError as exc:
+            _record_launch_failed(
+                journal,
+                run_id,
+                "privilege_drop",
+                f"cannot drop privileges to uid={uid} gid={gid}: {exc}",
+                exc,
+            )
+            raise VerificationError(
+                f"cannot drop privileges to uid={uid} gid={gid}: {exc}"
+            ) from exc
+        except OSError as exc:
+            _record_launch_failed(
+                journal, run_id, "exec", f"cannot launch {argv[0]!r}: {exc}", exc
+            )
+            raise VerificationError(f"cannot launch {argv[0]!r}: {exc}") from exc
+        except SubprocessError as exc:
+            reason = (
+                f"cannot launch {argv[0]!r}: child setup before exec failed "
+                f"(credential check, process group, or parent-death signal): {exc}"
+            )
+            _record_launch_failed(journal, run_id, "exec", reason, exc)
+            raise VerificationError(reason) from exc
+        duration_ms = max(0, int((time.monotonic() - started) * 1000))
+        try:
+            append_v2_event(
+                journal,
+                V2_FINISH_EVENT_TYPE,
+                {
+                    "launch_mode": "v2",
+                    "run_id": run_id,
+                    "exit_code": result.returncode,
+                    "launcher_signal": result.launcher_signal,
+                    "escalated": result.escalated,
+                    "duration_ms": duration_ms,
+                },
+            )
+        except VerificationError as exc:
+            raise VerificationError(
+                f"child exited with status {result.returncode} but "
+                f"the v2 finish event could not be recorded: {exc}"
+            ) from exc
+        reraise = guard.signals[0] if guard.signals else 0
+    return result.returncode, reraise
+
+
+def _reraise_signal(signum: int) -> NoReturn:
+    """Die by ``signum`` so a supervisor sees WIFSIGNALED (freeze decision 5).
+
+    An 8-bit exit code would collide with a legal child status. If the
+    default action is not applied — the kernel shields a PID namespace's
+    init process from it — fall back to the shell's 128+N convention.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.flush()
+    signal.signal(signum, signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signum})
+    signal.raise_signal(signum)
+    os._exit(128 + signum)
 
 
 def launch(
@@ -362,6 +735,14 @@ def launch(
     child. ``require_v2`` makes a v2-only deployment refuse a v1 invocation
     at the point of invocation, rather than trying to infer compliance
     from records later.
+
+    A v2 launch must run on the main thread. If the launcher receives
+    SIGHUP, SIGINT, or SIGTERM during the run, it forwards the signal to
+    the child's process group, sends the group SIGKILL if it has not exited
+    within :data:`V2_SIGNAL_FORWARD_TIMEOUT` seconds, records the
+    termination in the finish event, and then kills the calling process
+    with that same signal instead of returning, so a supervisor sees
+    WIFSIGNALED.
 
     The child does **not** inherit the caller's environment: it gets
     only the ``SEALRUN_*`` provenance and artifact-descriptor variables,
@@ -417,9 +798,11 @@ def launch(
         # Refuse an unisolated v2 invocation before any verification work:
         # a v2 run-state claim is unavailable without the §5.7 predicate.
         assert_journal_writer_isolation(journal, uid)
+        _require_v2_supervision()
         run_id = str(uuid.uuid4())
         journal_nonce = uuid.uuid4().hex
 
+    reraise_signal = 0
     with verified_artifacts(root, envelope, public_key, min_release_seq) as artifacts:
         channels: list[tuple[str, int]] = []
         sealed_fds: list[int] = []
@@ -436,15 +819,14 @@ def launch(
                     fd = artifact.handle.fileno()
                 channels.append((artifact.path, fd))
             child_env = build_child_environment(envelope, channels, env)
+            pass_fds = tuple(fd for _, fd in channels)
             if mode == "v2":
                 assert journal is not None and run_id is not None
                 assert uid is not None and gid is not None
                 assert journal_nonce is not None
-                # The launch event is fsynced by append_v2_event before the
-                # child is created (§6.1).
-                append_v2_event(
+                returncode, reraise_signal = _launch_v2(
                     journal,
-                    V2_LAUNCH_EVENT_TYPE,
+                    run_id,
                     _v2_launch_detail(
                         envelope,
                         channels,
@@ -456,60 +838,36 @@ def launch(
                         uid=uid,
                         gid=gid,
                     ),
-                )
-            started = time.monotonic()
-            try:
-                completed = subprocess.run(
                     argv,
-                    pass_fds=tuple(fd for _, fd in channels),
-                    env=child_env,
-                    user=uid,
-                    group=gid,
-                    extra_groups=drop_groups,
-                    check=False,
+                    pass_fds=pass_fds,
+                    child_env=child_env,
+                    uid=uid,
+                    gid=gid,
+                    drop_groups=drop_groups,
                 )
-            except PermissionError as exc:
-                if mode == "v2":
-                    _record_launch_failed(
-                        journal,
-                        run_id,
-                        "privilege_drop",
-                        f"cannot drop privileges to uid={uid} gid={gid}: {exc}",
-                        exc,
-                    )
-                raise VerificationError(
-                    f"cannot drop privileges to uid={uid} gid={gid}: {exc}"
-                ) from exc
-            except OSError as exc:
-                if mode == "v2":
-                    _record_launch_failed(
-                        journal,
-                        run_id,
-                        "exec",
-                        f"cannot launch {argv[0]!r}: {exc}",
-                        exc,
-                    )
-                raise VerificationError(f"cannot launch {argv[0]!r}: {exc}") from exc
-            if mode == "v2":
-                duration_ms = max(0, int((time.monotonic() - started) * 1000))
+            else:
                 try:
-                    append_v2_event(
-                        journal,
-                        V2_FINISH_EVENT_TYPE,
-                        {
-                            "launch_mode": "v2",
-                            "run_id": run_id,
-                            "exit_code": completed.returncode,
-                            "duration_ms": duration_ms,
-                        },
+                    completed = subprocess.run(
+                        argv,
+                        pass_fds=pass_fds,
+                        env=child_env,
+                        user=uid,
+                        group=gid,
+                        extra_groups=drop_groups,
+                        check=False,
                     )
-                except VerificationError as exc:
+                except PermissionError as exc:
                     raise VerificationError(
-                        f"child exited with status {completed.returncode} but "
-                        f"the v2 finish event could not be recorded: {exc}"
+                        f"cannot drop privileges to uid={uid} gid={gid}: {exc}"
                     ) from exc
-            return completed.returncode
+                except OSError as exc:
+                    raise VerificationError(f"cannot launch {argv[0]!r}: {exc}") from exc
+                returncode = completed.returncode
         finally:
             for fd in sealed_fds:
                 with contextlib.suppress(OSError):
                     os.close(fd)
+    if reraise_signal:
+        # Only now — terminal event durable, launcher resources released.
+        _reraise_signal(reraise_signal)
+    return returncode

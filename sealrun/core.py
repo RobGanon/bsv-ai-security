@@ -629,6 +629,16 @@ def record_manifest_acceptance(
     return append_audit_event(journal, MANIFEST_ACCEPTED_EVENT_TYPE, detail)
 
 
+_V2_EXECUTABLE_BINDING_FIELDS = frozenset(
+    {
+        "executable_binding",
+        "executable_path",
+        "executable_candidates",
+        "executable_artifact",
+        "executable_sha256",
+        "executable_fd",
+    }
+)
 _V2_LAUNCH_FIELDS = frozenset(
     {
         "launch_mode",
@@ -645,6 +655,7 @@ _V2_LAUNCH_FIELDS = frozenset(
         "gid",
     }
 )
+_V2_LAUNCH_ALLOWED_FIELDS = _V2_LAUNCH_FIELDS | _V2_EXECUTABLE_BINDING_FIELDS
 _V2_FINISH_FIELDS = frozenset(
     {
         "launch_mode",
@@ -664,12 +675,19 @@ _V2_LAUNCH_FAILED_FIELDS = frozenset(
 )
 
 
-def _v2_exact_fields(detail: Any, required: frozenset[str], event_type: str) -> dict:
+def _v2_exact_fields(
+    detail: Any,
+    required: frozenset[str],
+    event_type: str,
+    *,
+    allowed: frozenset[str] | None = None,
+) -> dict:
     if not isinstance(detail, dict):
         raise VerificationError(f"{event_type} detail must be a JSON object")
+    allowed = required if allowed is None else allowed
     keys = set(detail)
     missing = sorted(required - keys)
-    unknown = sorted(keys - required)
+    unknown = sorted(keys - allowed)
     if missing:
         raise VerificationError(
             f"{event_type} detail is missing required field(s): {', '.join(missing)}"
@@ -688,11 +706,24 @@ def _v2_check_launch_mode(value: Any, event_type: str) -> None:
         )
 
 
-def _v2_string(value: Any, field: str, *, max_length: int = 4096) -> str:
-    if not isinstance(value, str) or not value:
+def _v2_string(
+    value: Any, field: str, *, max_length: int = 4096, allow_empty: bool = False
+) -> str:
+    if not isinstance(value, str) or (not value and not allow_empty):
         raise VerificationError(f"{field} must be a non-empty string")
     if len(value) > max_length:
         raise VerificationError(f"{field} exceeds maximum length of {max_length}")
+    return value
+
+
+def _v2_string_list(value: Any, field: str, *, max_length: int = 4096) -> list[str]:
+    if not isinstance(value, list):
+        raise VerificationError(f"{field} must be an array of strings")
+    if len(value) > max_length:
+        raise VerificationError(f"{field} exceeds maximum length of {max_length}")
+    for item in value:
+        if not isinstance(item, str) or not item:
+            raise VerificationError(f"{field} must be an array of strings")
     return value
 
 
@@ -727,6 +758,37 @@ def _v2_int(
     return value
 
 
+def _v2_validate_executable_binding(detail: dict) -> None:
+    """Validate the optional v2 executable-binding group (§5.3).
+
+    Older v2 launch events have no binding fields; when any field is
+    present, the whole group is required so a partial claim cannot be
+    mistaken for a complete one.
+    """
+    binding = detail["executable_binding"]
+    if binding not in ("record-only", "verified"):
+        raise VerificationError(
+            "executable_binding must be 'record-only' or 'verified'"
+        )
+    _v2_string(detail["executable_path"], "executable_path", allow_empty=True)
+    _v2_string_list(
+        detail["executable_candidates"], "executable_candidates"
+    )
+    artifact = detail["executable_artifact"]
+    sha256 = detail["executable_sha256"]
+    fd = detail["executable_fd"]
+    if binding == "record-only":
+        if artifact is not None or sha256 is not None or fd is not None:
+            raise VerificationError(
+                "record-only executable_binding must not claim an executed "
+                "artifact"
+            )
+        return
+    _v2_string(artifact, "executable_artifact")
+    _v2_hex64(sha256, "executable_sha256")
+    _v2_int(fd, "executable_fd", minimum=0, maximum=UINT32_MAX)
+
+
 def _validate_v2_event_detail(event_type: str, detail: Any) -> None:
     """Strictly validate one v2 run-state event's ``detail`` object.
 
@@ -735,7 +797,12 @@ def _validate_v2_event_detail(event_type: str, detail: Any) -> None:
     smuggle an unvalidated field past ``audit-verify``.
     """
     if event_type == V2_LAUNCH_EVENT_TYPE:
-        detail = _v2_exact_fields(detail, _V2_LAUNCH_FIELDS, event_type)
+        detail = _v2_exact_fields(
+            detail,
+            _V2_LAUNCH_FIELDS,
+            event_type,
+            allowed=_V2_LAUNCH_ALLOWED_FIELDS,
+        )
         _v2_check_launch_mode(detail["launch_mode"], event_type)
         _v2_uuid(detail["run_id"])
         _v2_nonce(detail["journal_nonce"])
@@ -750,6 +817,14 @@ def _validate_v2_event_detail(event_type: str, detail: Any) -> None:
             raise VerificationError("seal must be a boolean")
         _v2_int(detail["uid"], "uid", minimum=1, maximum=UINT32_MAX)
         _v2_int(detail["gid"], "gid", minimum=0, maximum=UINT32_MAX)
+        if _V2_EXECUTABLE_BINDING_FIELDS & detail.keys():
+            missing = sorted(_V2_EXECUTABLE_BINDING_FIELDS - detail.keys())
+            if missing:
+                raise VerificationError(
+                    f"{event_type} detail is missing required executable-binding "
+                    f"field(s): {', '.join(missing)}"
+                )
+            _v2_validate_executable_binding(detail)
         return
     if event_type == V2_FINISH_EVENT_TYPE:
         detail = _v2_exact_fields(detail, _V2_FINISH_FIELDS, event_type)

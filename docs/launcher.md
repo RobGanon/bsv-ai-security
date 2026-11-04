@@ -37,14 +37,46 @@ unchanged. The launcher exits with the child's exit status.
 The launcher guarantees the bytes behind the descriptors it passes
 to the child: each one matches the signed manifest, and the child
 also receives the verified manifest hash. The command after `--`
-is the operator's choice, passed through unchanged — the launcher
-does not require the executed program to be one of the manifest
+is the operator's choice, passed through unchanged — by default the
+launcher does not require the executed program to be one of the manifest
 artifacts, and it cannot vouch for code the child loads outside
 those descriptors (an interpreter's own libraries, for example).
 Operators who want a script or executable itself pinned can list
-it as a manifest artifact and have the child execute or check the
-verified copy it receives. Deciding what to run remains the
-operator's responsibility.
+it as a manifest artifact and either check the verified copy the child
+receives, or opt in to `--executable-binding verified` (below).
+Deciding what to run remains the operator's responsibility.
+
+## Executable binding (`--executable-binding`)
+
+By default the executable is **record-only**: the v2 launch record names
+the command as given, the effective `PATH`, and every `PATH` candidate
+the launcher considered. It deliberately does not claim which candidate
+`execvp` used, because the launcher cannot observe that, and it makes no
+claim about the executed bytes.
+
+`--executable-binding verified` (v2 only) makes the narrower claim that
+the **main ELF image** is a manifest artifact, executed from its verified
+descriptor with Linux `execveat(AT_EMPTY_PATH)`. The launch record names
+that artifact, its SHA-256, and the descriptor on its own — not by
+inferring it from `argv[0]` or from the data-channel list. `argv[0]`
+must match a manifest artifact path exactly, or the artifact must be
+named explicitly with `--executable-artifact`; ambiguity is refused,
+never guessed.
+
+This claim is intentionally narrow:
+
+- It is Linux-only and ELF-only. Scripts and interpreters stay
+  record-only unless proven per interpreter; a script would be handed to
+  its interpreter by path, which reopens the file.
+- For a dynamically linked ELF, the dynamic loader, the interpreter
+  (e.g. `/lib64/ld-linux-*`), and every shared library still load by
+  path. A loader-path swap or `LD_PRELOAD` is outside the claim.
+- In verified mode, `execveat` unavailable or failing means the launch
+  is **refused**, never downgraded to pathname execution.
+- A sealed memfd is executable only when `vm.memfd_noexec` is 0. With
+  `--seal`, verified binding refuses if that sysctl is 1 or 2 instead of
+  silently falling back.
+- The artifact's inode must carry an execute bit, as with any exec.
 
 ## Environment contract
 

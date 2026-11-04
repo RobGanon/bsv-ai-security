@@ -38,6 +38,19 @@ sealing, so a mutation that lands between verification and the copy
 aborts the launch instead of reaching the child. Sealing costs a
 copy of every artifact into RAM, so it is opt-in.
 
+**Executable binding.** By default a launch is *record-only* with respect
+to the executable: the v2 launch record names the command as given, the
+effective ``PATH``, and every ``PATH`` candidate the launcher considered.
+That is deliberately not a claim about which candidate ``execvp`` used or
+what bytes ran. The opt-in ``executable_binding="verified"`` mode executes
+a manifest artifact through its verified descriptor with Linux
+``execveat(AT_EMPTY_PATH)``, and the launch record names that artifact on
+its own. The claim covers the main ELF image only: the dynamic loader and
+shared libraries are still loaded by path, and scripts stay record-only.
+Verified mode refuses (never downgrades to pathname execution) when the
+artifact is not an ELF, when ``execveat`` is unavailable, or when a sealed
+memfd could not be executed because ``vm.memfd_noexec`` is 1 or 2.
+
 Residual limits are stated plainly because they matter:
 
 * Without ``seal`` the fd pins the *inode*, not its contents — a writer
@@ -59,6 +72,7 @@ import contextlib
 import ctypes
 import hashlib
 import os
+import platform
 import re
 import signal
 import subprocess
@@ -68,13 +82,14 @@ import time
 import uuid
 from pathlib import Path
 from subprocess import SubprocessError
-from typing import Mapping, NamedTuple, NoReturn, Sequence
+from typing import Callable, Mapping, NamedTuple, NoReturn, Sequence
 
 from .core import (
     V2_FINISH_EVENT_TYPE,
     V2_LAUNCH_EVENT_TYPE,
     V2_LAUNCH_FAILED_EVENT_TYPE,
     VerificationError,
+    VerifiedArtifact,
     append_v2_event,
     assert_journal_writer_isolation,
     fingerprint_argv,
@@ -106,6 +121,31 @@ _V2_FORWARDED_SIGNALS = tuple(
 _V2_WAIT_POLL_INTERVAL = 0.05
 _PR_SET_PDEATHSIG = 1
 
+#: execveat(2) flag: execute the file referred to by the descriptor itself,
+#: with an empty pathname (§5.3 verified executable binding).
+_AT_EMPTY_PATH = 0x1000
+
+#: Linux execveat syscall numbers, used only when libc does not expose the
+#: wrapper. An unknown architecture falls back to refusing verified mode.
+_EXECVEAT_SYSCALLS = {
+    "x86_64": 322,
+    "amd64": 322,
+    "i386": 358,
+    "i486": 358,
+    "i586": 358,
+    "i686": 358,
+    "aarch64": 281,
+    "arm64": 281,
+    "armv7l": 387,
+    "armv6l": 387,
+    "riscv64": 281,
+    "ppc64": 362,
+    "ppc64le": 362,
+    "s390x": 322,
+}
+
+_MEMFD_NOEXEC_PATH = Path("/proc/sys/vm/memfd_noexec")
+
 
 def _load_prctl():
     """Return libc's ``prctl`` on Linux, or ``None`` where it is unavailable.
@@ -126,14 +166,86 @@ def _load_prctl():
 
 _PRCTL = _load_prctl()
 
+
+def _load_execveat():
+    """Return libc's ``execveat`` (or a syscall wrapper), or ``None``.
+
+    Python has no ``os.execveat`` (§5.3 stdlib gap), so the verified
+    executable path uses a raw call. Resolution happens at import time so
+    the child's ``preexec_fn`` does no dynamic loading between fork and
+    exec. A libc without the ``execveat`` wrapper falls back to the
+    architecture's ``syscall`` number; an unknown architecture refuses
+    verified mode rather than guessing.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+    except OSError:
+        return None
+    try:
+        execveat = libc.execveat
+    except AttributeError:
+        try:
+            number = _EXECVEAT_SYSCALLS[platform.machine().lower()]
+        except KeyError:
+            return None
+        try:
+            syscall = libc.syscall
+        except AttributeError:
+            return None
+        syscall.restype = ctypes.c_long
+
+        def call(fd, path, argv, envp, flags):
+            return syscall(
+                ctypes.c_long(number),
+                ctypes.c_int(fd),
+                path,
+                argv,
+                envp,
+                ctypes.c_int(flags),
+            )
+
+        return call
+    execveat.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_char_p),
+        ctypes.POINTER(ctypes.c_char_p),
+        ctypes.c_int,
+    ]
+    execveat.restype = ctypes.c_int
+    return execveat
+
+
+_EXECVEAT = _load_execveat()
+
 # F_SEAL_* values (linux/memfd.h). The fallbacks let the module import on
 # platforms whose fcntl lacks them; ``_seal_fd`` refuses at call time.
-_SEAL_BITS = (
-    getattr(fcntl, "F_SEAL_WRITE", 0x0008)
-    | getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
-    | getattr(fcntl, "F_SEAL_GROW", 0x0004)
-    | getattr(fcntl, "F_SEAL_SEAL", 0x1000)
-)
+# F_SEAL_SEAL is 0x0001 (not 0x1000); the fallback is part of the §5.3
+# memfd requirement.
+def _seal_bits() -> int:
+    return (
+        getattr(fcntl, "F_SEAL_WRITE", 0x0008)
+        | getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+        | getattr(fcntl, "F_SEAL_GROW", 0x0004)
+        | getattr(fcntl, "F_SEAL_SEAL", 0x0001)
+    )
+
+
+_SEAL_BITS = _seal_bits()
+
+
+def _read_memfd_noexec() -> int | None:
+    """Return ``vm.memfd_noexec`` (0, 1 or 2), or ``None`` if unreadable."""
+    try:
+        text = _MEMFD_NOEXEC_PATH.read_text(encoding="ascii").strip()
+    except OSError:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
 
 
 def artifact_env_name(path: str) -> str:
@@ -174,8 +286,18 @@ def _seal_fd(src_fd: int, *, expected_sha256: str | None = None,
         raise VerificationError("sealing requires memfd_create (Linux)")
     if fcntl is None or not hasattr(fcntl, "F_ADD_SEALS"):
         raise VerificationError("sealing requires fcntl.F_ADD_SEALS (Linux)")
-    os.lseek(src_fd, 0, os.SEEK_SET)
-    mem_fd = os.memfd_create("sealrun-artifact", os.MFD_ALLOW_SEALING)
+    try:
+        os.lseek(src_fd, 0, os.SEEK_SET)
+    except OSError as exc:
+        raise VerificationError(
+            f"cannot rewind the artifact descriptor for sealing: {exc}"
+        ) from exc
+    try:
+        mem_fd = os.memfd_create("sealrun-artifact", os.MFD_ALLOW_SEALING)
+    except OSError as exc:
+        raise VerificationError(
+            f"cannot create a sealed memfd copy of the artifact: {exc}"
+        ) from exc
     try:
         digest = hashlib.sha256()
         copied = 0
@@ -199,8 +321,19 @@ def _seal_fd(src_fd: int, *, expected_sha256: str | None = None,
         fcntl.fcntl(mem_fd, fcntl.F_ADD_SEALS, _SEAL_BITS)
         os.lseek(mem_fd, 0, os.SEEK_SET)
         return mem_fd
+    except VerificationError:
+        with contextlib.suppress(OSError):
+            os.close(mem_fd)
+        raise
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            os.close(mem_fd)
+        raise VerificationError(
+            f"cannot create a sealed copy of the artifact: {exc}"
+        ) from exc
     except BaseException:
-        os.close(mem_fd)
+        with contextlib.suppress(OSError):
+            os.close(mem_fd)
         raise
 
 
@@ -259,6 +392,117 @@ def build_child_environment(
             env["SEALRUN_RELEASE_SEQ"] = str(release_seq)
     env.update(_artifact_environment(channels))
     return env
+
+
+def _executable_search_path(child_env: Mapping[str, str]) -> list[str]:
+    """The PATH entry list ``execvp`` would search for this child."""
+    return list(os.get_exec_path(dict(child_env)))
+
+
+def _record_only_executable_fields(
+    argv0: str, child_env: Mapping[str, str]
+) -> tuple[str, list[str]]:
+    """Return ``(effective PATH, candidate list)`` for a record-only launch.
+
+    The list is every pathname the launcher considered, in search order.
+    It deliberately does not claim which candidate ``execvp`` actually
+    executed (§5.3 record-only).
+    """
+    search_path = _executable_search_path(child_env)
+    if os.sep in argv0 or (os.altsep is not None and os.altsep in argv0):
+        candidates = [argv0]
+    else:
+        candidates = [os.path.join(entry, argv0) for entry in search_path]
+    return os.pathsep.join(search_path), candidates
+
+
+def _select_executable_artifact(
+    artifacts: Sequence[VerifiedArtifact],
+    argv: Sequence[str],
+    explicit: str | None,
+) -> VerifiedArtifact:
+    """Resolve the manifest artifact to execute, never guessing (§5.3).
+
+    An explicit ``--executable-artifact`` must be the artifact's exact
+    manifest path. Otherwise ``argv[0]`` must match one exactly. A
+    basename match, a ``PATH`` match, or any other "looks like" match is
+    not accepted: ambiguity is refused rather than resolved by guesswork.
+    """
+    if explicit is not None:
+        matches = [artifact for artifact in artifacts if artifact.path == explicit]
+        if len(matches) != 1:
+            raise VerificationError(
+                f"--executable-artifact {explicit!r} does not name exactly one "
+                "verified manifest artifact; refusing to guess"
+            )
+        return matches[0]
+    matches = [artifact for artifact in artifacts if artifact.path == argv[0]]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise VerificationError(
+            f"argv[0] {argv[0]!r} matches more than one manifest artifact; "
+            "name the executable artifact explicitly"
+        )
+    raise VerificationError(
+        f"argv[0] {argv[0]!r} does not match a manifest artifact path exactly; "
+        "name the executable artifact with --executable-artifact "
+        "(a verified-executable launch is never guessed)"
+    )
+
+
+def _assert_elf_executable(fd: int, path: str) -> None:
+    """Refuse a verified executable that is not an executable ELF image."""
+    try:
+        header = os.pread(fd, 64, 0)
+    except OSError as exc:
+        raise VerificationError(
+            f"cannot inspect executable artifact {path!r}: {exc}"
+        ) from exc
+    if len(header) < 18 or header[:4] != b"\x7fELF":
+        raise VerificationError(
+            f"verified executable binding is Linux ELF only; artifact {path!r} "
+            "is not an ELF image (scripts stay record-only)"
+        )
+    data_encoding = header[5]
+    if data_encoding not in (1, 2):
+        raise VerificationError(
+            f"artifact {path!r} has an unsupported ELF data encoding"
+        )
+    byte_order = "little" if data_encoding == 1 else "big"
+    e_type = int.from_bytes(header[16:18], byte_order)
+    if e_type not in (2, 3):  # ET_EXEC, ET_DYN
+        raise VerificationError(
+            f"artifact {path!r} is an ELF image but not an executable object "
+            f"(e_type={e_type}); scripts and relocatable objects stay record-only"
+        )
+
+
+def _execveat(fd: int, argv: Sequence[str], env: Mapping[str, str]) -> NoReturn:
+    """Replace the current child with the ELF image at ``fd``.
+
+    The descriptor, not a pathname or ``argv[0]``, supplies the executed
+    bytes (``AT_EMPTY_PATH``). On failure this raises; it never returns
+    and never falls back to pathname execution.
+    """
+    if _EXECVEAT is None:
+        raise VerificationError(
+            "verified executable binding requires Linux execveat(AT_EMPTY_PATH); "
+            "it is unavailable on this platform"
+        )
+    argv_bytes = [os.fsencode(value) for value in argv]
+    env_bytes = [os.fsencode(f"{key}={value}") for key, value in env.items()]
+    argv_array = (ctypes.c_char_p * (len(argv_bytes) + 1))(*argv_bytes, None)
+    env_array = (ctypes.c_char_p * (len(env_bytes) + 1))(*env_bytes, None)
+    result = _EXECVEAT(
+        ctypes.c_int(fd), b"", argv_array, env_array, _AT_EMPTY_PATH
+    )
+    errno = ctypes.get_errno()
+    if result != 0 and errno:
+        raise OSError(errno, f"execveat failed: {os.strerror(errno)}")
+    raise VerificationError(
+        "execveat returned without executing the verified artifact"
+    )
 
 
 def _resolve_id(value, *, kind: str):
@@ -338,6 +582,12 @@ def _v2_launch_detail(
     seal: bool,
     uid: int,
     gid: int,
+    executable_binding: str,
+    executable_path: str,
+    executable_candidates: Sequence[str],
+    executable_artifact: str | None,
+    executable_sha256: str | None,
+    executable_fd: int | None,
 ) -> dict:
     return {
         "launch_mode": "v2",
@@ -352,6 +602,12 @@ def _v2_launch_detail(
         "seal": bool(seal),
         "uid": uid,
         "gid": gid,
+        "executable_binding": executable_binding,
+        "executable_path": executable_path,
+        "executable_candidates": list(executable_candidates),
+        "executable_artifact": executable_artifact,
+        "executable_sha256": executable_sha256,
+        "executable_fd": executable_fd,
     }
 
 
@@ -399,8 +655,53 @@ def _require_v2_supervision() -> None:
         )
 
 
+def _mark_unintended_fds_close_on_exec(keep_fds: Sequence[int]) -> None:
+    """Close every inherited descriptor outside stdio and ``keep_fds``.
+
+    Verified execution calls ``execveat`` from ``preexec_fn``, which is
+    *before* CPython's own ``close_fds`` step: returning from the hook
+    would let that step run, but the process is replaced instead. Popen's
+    descriptor hygiene would therefore be skipped, leaking every fd the
+    launcher happened to hold. ``execveat`` still honours close-on-exec,
+    so marking the rest of the table closes them on a successful exec
+    while leaving Popen's error pipe open if the exec fails (close-on-exec
+    only acts on success).
+    """
+    if fcntl is None:
+        raise VerificationError(
+            "verified executable binding requires fcntl.FD_CLOEXEC to close "
+            "unintended inherited descriptors before exec"
+        )
+    keep = {0, 1, 2, *keep_fds}
+    try:
+        names = os.listdir("/proc/self/fd")
+    except OSError as exc:
+        # Refuse rather than silently inherit an unknown descriptor table.
+        raise VerificationError(
+            f"verified executable binding cannot enumerate the inherited "
+            f"descriptors to close them before exec: {exc}"
+        ) from exc
+    for name in names:
+        if not name.isdigit():
+            continue
+        fd = int(name)
+        if fd in keep:
+            continue
+        try:
+            flags = fcntl.fcntl(fd, fcntl.F_GETFD)
+            fcntl.fcntl(fd, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)
+        except OSError:
+            # A descriptor that closed while walking the table is fine.
+            continue
+
+
 def _v2_preexec(
-    parent_pid: int, uid: int, gid: int, drop_groups: tuple[int, ...] | None
+    parent_pid: int,
+    uid: int,
+    gid: int,
+    drop_groups: tuple[int, ...] | None,
+    exec_hook: Callable[[], None] | None = None,
+    keep_fds: Sequence[int] = (),
 ) -> None:
     """Child-side setup between fork and exec (``preexec_fn``).
 
@@ -414,6 +715,13 @@ def _v2_preexec(
     that died before ``prctl`` has already reparented the child, which must
     not exec unsupervised. Any failure raises, so ``Popen`` reports it and
     the command never runs.
+
+    ``exec_hook`` is the verified-executable path's ``execveat`` call. It
+    must replace the process; if it returns, this raises rather than
+    letting ``Popen`` fall back to pathname execution. Because that exec
+    happens before ``Popen`` closes its inherited descriptors, the
+    verified path closes them itself with close-on-exec, preserving
+    ``keep_fds`` (the verified artifact descriptors).
     """
     if (os.getuid(), os.geteuid(), os.getgid(), os.getegid()) != (uid, uid, gid, gid):
         raise RuntimeError("the credential drop did not precede preexec_fn")
@@ -424,6 +732,10 @@ def _v2_preexec(
         raise OSError(ctypes.get_errno(), "cannot install the parent-death signal")
     if os.getppid() != parent_pid:
         raise RuntimeError("the launcher exited before the child was supervised")
+    if exec_hook is not None:
+        _mark_unintended_fds_close_on_exec(keep_fds)
+        exec_hook()
+        raise RuntimeError("the verified-executable hook returned without exec")
 
 
 class _V2SignalGuard:
@@ -558,6 +870,7 @@ def _run_v2_child(
     gid: int,
     drop_groups: tuple[int, ...] | None,
     signals: list[int],
+    exec_hook: Callable[[], None] | None = None,
 ) -> _V2RunResult:
     """Start the v2 child and supervise it until it exits.
 
@@ -575,8 +888,17 @@ def _run_v2_child(
     signalled. Descendants that leave the process group (e.g. ``setsid``)
     escape both forwarding and escalation, and a SIGKILLed launcher writes
     nothing: its child dies by the parent-death signal unless it escaped.
+
+    With ``exec_hook`` set, the child executes the verified descriptor in
+    ``preexec_fn`` instead of letting ``Popen`` exec ``argv[0]`` by path.
     """
     parent_pid = os.getpid()
+    if exec_hook is None:
+        preexec = lambda: _v2_preexec(parent_pid, uid, gid, drop_groups)
+    else:
+        preexec = lambda: _v2_preexec(
+            parent_pid, uid, gid, drop_groups, exec_hook, pass_fds
+        )
     proc = subprocess.Popen(
         list(argv),
         pass_fds=pass_fds,
@@ -584,7 +906,7 @@ def _run_v2_child(
         user=uid,
         group=gid,
         extra_groups=drop_groups,
-        preexec_fn=lambda: _v2_preexec(parent_pid, uid, gid, drop_groups),
+        preexec_fn=preexec,
     )
     try:
         return _wait_v2_child(proc, signals)
@@ -611,6 +933,7 @@ def _launch_v2(
     uid: int,
     gid: int,
     drop_groups: tuple[int, ...] | None,
+    exec_hook: Callable[[], None] | None = None,
 ) -> tuple[int | None, int]:
     """Journal the launch, run the child, journal its terminal event.
 
@@ -634,16 +957,18 @@ def _launch_v2(
             )
             return None, signum
         started = time.monotonic()
+        run_kwargs = {
+            "pass_fds": pass_fds,
+            "child_env": child_env,
+            "uid": uid,
+            "gid": gid,
+            "drop_groups": drop_groups,
+            "signals": guard.signals,
+        }
+        if exec_hook is not None:
+            run_kwargs["exec_hook"] = exec_hook
         try:
-            result = _run_v2_child(
-                argv,
-                pass_fds=pass_fds,
-                child_env=child_env,
-                uid=uid,
-                gid=gid,
-                drop_groups=drop_groups,
-                signals=guard.signals,
-            )
+            result = _run_v2_child(argv, **run_kwargs)
         except PermissionError as exc:
             _record_launch_failed(
                 journal,
@@ -663,7 +988,8 @@ def _launch_v2(
         except SubprocessError as exc:
             reason = (
                 f"cannot launch {argv[0]!r}: child setup before exec failed "
-                f"(credential check, process group, or parent-death signal): {exc}"
+                f"(credential check, process group, parent-death signal, or "
+                f"verified-executable hook): {exc}"
             )
             _record_launch_failed(journal, run_id, "exec", reason, exc)
             raise VerificationError(reason) from exc
@@ -720,6 +1046,8 @@ def launch(
     mode: str = "v1",
     journal: Path | None = None,
     require_v2: bool = False,
+    executable_binding: str = "record-only",
+    executable_artifact: str | None = None,
 ) -> int:
     """Verify a manifest and run ``command`` against the verified handles.
 
@@ -735,6 +1063,16 @@ def launch(
     child. ``require_v2`` makes a v2-only deployment refuse a v1 invocation
     at the point of invocation, rather than trying to infer compliance
     from records later.
+
+    ``executable_binding`` is ``"record-only"`` by default (§5.3): the v2
+    launch record names the executable as given, the effective ``PATH``,
+    and the candidates considered, but claims nothing about which bytes
+    ran. ``"verified"`` (v2 only) executes a manifest artifact through its
+    verified descriptor with Linux ``execveat(AT_EMPTY_PATH)``; it requires
+    an ELF image, refuses when ``execveat`` is unavailable or fails, and
+    never falls back to pathname execution. ``argv[0]`` must match a
+    manifest artifact path exactly unless ``executable_artifact`` names
+    the artifact explicitly. Scripts remain record-only.
 
     A v2 launch must run on the main thread. If the launcher receives
     SIGHUP, SIGINT, or SIGTERM during the run, it forwards the signal to
@@ -752,6 +1090,21 @@ def launch(
     """
     if mode not in ("v1", "v2"):
         raise VerificationError(f"launch mode must be 'v1' or 'v2', not {mode!r}")
+    if executable_binding not in ("record-only", "verified"):
+        raise VerificationError(
+            "executable_binding must be 'record-only' or 'verified', "
+            f"not {executable_binding!r}"
+        )
+    if executable_artifact is not None and executable_binding != "verified":
+        raise VerificationError(
+            "--executable-artifact requires --executable-binding verified; "
+            "a record-only launch makes no executable-artifact claim"
+        )
+    if executable_binding == "verified" and mode != "v2":
+        raise VerificationError(
+            "verified executable binding requires --mode v2 so the launch "
+            "record names the artifact it executed"
+        )
     if mode == "v1":
         if require_v2:
             raise VerificationError(
@@ -824,6 +1177,44 @@ def launch(
                 assert journal is not None and run_id is not None
                 assert uid is not None and gid is not None
                 assert journal_nonce is not None
+                executable_path = ""
+                executable_candidates: list[str] = []
+                executable_artifact_path: str | None = None
+                executable_sha256: str | None = None
+                executable_fd: int | None = None
+                exec_hook: Callable[[], None] | None = None
+                if executable_binding == "record-only":
+                    executable_path, executable_candidates = (
+                        _record_only_executable_fields(argv[0], child_env)
+                    )
+                else:
+                    if _EXECVEAT is None:
+                        raise VerificationError(
+                            "verified executable binding requires Linux "
+                            "execveat(AT_EMPTY_PATH); it is unavailable here"
+                        )
+                    memfd_noexec = _read_memfd_noexec()
+                    if seal and memfd_noexec in (1, 2):
+                        raise VerificationError(
+                            "verified executable binding with --seal is "
+                            "unavailable: vm.memfd_noexec is "
+                            f"{memfd_noexec}, so a sealed memfd copy is not "
+                            "executable (refusing rather than downgrading)"
+                        )
+                    selected = _select_executable_artifact(
+                        artifacts, argv, executable_artifact
+                    )
+                    channel_by_path = {path: fd for path, fd in channels}
+                    executable_fd = channel_by_path[selected.path]
+                    _assert_elf_executable(executable_fd, selected.path)
+                    executable_path = os.pathsep.join(
+                        _executable_search_path(child_env)
+                    )
+                    executable_artifact_path = selected.path
+                    executable_sha256 = selected.sha256
+                    exec_hook = lambda: _execveat(  # noqa: E731
+                        executable_fd, argv, child_env
+                    )
                 returncode, reraise_signal = _launch_v2(
                     journal,
                     run_id,
@@ -837,6 +1228,12 @@ def launch(
                         seal=seal,
                         uid=uid,
                         gid=gid,
+                        executable_binding=executable_binding,
+                        executable_path=executable_path,
+                        executable_candidates=executable_candidates,
+                        executable_artifact=executable_artifact_path,
+                        executable_sha256=executable_sha256,
+                        executable_fd=executable_fd,
                     ),
                     argv,
                     pass_fds=pass_fds,
@@ -844,6 +1241,7 @@ def launch(
                     uid=uid,
                     gid=gid,
                     drop_groups=drop_groups,
+                    exec_hook=exec_hook,
                 )
             else:
                 try:

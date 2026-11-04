@@ -152,6 +152,14 @@ def main(argv=None):
     p.add_argument("--seal", action="store_true",
                    help="copy each artifact into a sealed memfd before exec, so the "
                         "child reads a frozen snapshot (costs a copy of every artifact in RAM)")
+    p.add_argument("--executable-binding", choices=("record-only", "verified"),
+                   default="record-only",
+                   help="executable binding (default: record-only). 'verified' "
+                        "runs a Linux ELF manifest artifact via execveat(AT_EMPTY_PATH) "
+                        "and records that artifact; it requires --mode v2")
+    p.add_argument("--executable-artifact", default=None,
+                   help="manifest artifact path to execute in verified mode when "
+                        "argv[0] does not match an artifact path exactly")
     p.add_argument("--uid", default=None,
                    help="drop to this user (name or numeric id) before exec (needs privilege)")
     p.add_argument("--gid", default=None,
@@ -399,6 +407,8 @@ def main(argv=None):
                 mode=args.mode,
                 journal=args.journal,
                 require_v2=args.require_v2,
+                executable_binding=args.executable_binding,
+                executable_artifact=args.executable_artifact,
             )
         elif args.command == "audit-append":
             if args.event_type == MANIFEST_ACCEPTED_EVENT_TYPE:

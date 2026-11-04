@@ -380,7 +380,7 @@ def test_seal_fd_closes_memfd_on_read_failure(tmp_path):
     write_only = os.open(src, os.O_WRONLY)
     before = len(os.listdir("/proc/self/fd"))
     try:
-        with pytest.raises(OSError):
+        with pytest.raises(VerificationError):
             _seal_fd(write_only)
         assert len(os.listdir("/proc/self/fd")) == before
     finally:

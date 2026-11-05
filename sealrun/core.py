@@ -57,6 +57,32 @@ V2_EVENT_TYPES = frozenset(
     {V2_LAUNCH_EVENT_TYPE, V2_FINISH_EVENT_TYPE, V2_LAUNCH_FAILED_EVENT_TYPE}
 )
 V2_EVENT_TYPE_PREFIX = "v2_"
+
+#: The only four run-state verdicts [frozen design §5.5]. "Completed" is
+#: deliberately narrow: it means only that the isolated launcher attested
+#: this direct child return code, with the terminal event inside an
+#: authenticated anchor prefix. It is not a claim that the work was true,
+#: complete, or that descendants stopped.
+RUN_STATE_COMPLETED = "completed"
+RUN_STATE_INTERNALLY_CONSISTENT = "internally consistent, not proven"
+RUN_STATE_FAILED_LAUNCH = "failed launch"
+RUN_STATE_INCOMPLETE_UNVERIFIED = "incomplete/unverified"
+RUN_STATES = frozenset(
+    {
+        RUN_STATE_COMPLETED,
+        RUN_STATE_INTERNALLY_CONSISTENT,
+        RUN_STATE_FAILED_LAUNCH,
+        RUN_STATE_INCOMPLETE_UNVERIFIED,
+    }
+)
+
+#: A finish event follows the direct child only. A setsid or double-fork
+#: descendant can keep running (and reading its descriptors) after the
+#: finish is written, so every finish-derived verdict carries this wording.
+DIRECT_CHILD_SURVIVOR_QUALIFICATION = (
+    "This covers only the direct child's exit; setsid/double-fork "
+    "descendants may still be running and are not covered."
+)
 _V2_STAGES = frozenset({"launch", "privilege_drop", "exec"})
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
@@ -1568,6 +1594,284 @@ def verify_audit_journal_report(journal: Path) -> dict:
         "fragment": fragment.decode("utf-8", "replace") if fragment else None,
         "fragment_bytes": len(fragment) if fragment else 0,
         "channel_lists": channel_lists,
+    }
+
+
+def _run_event_detail(event: dict) -> dict:
+    """Return a v2 event's parsed detail object without trusting its type."""
+    detail = event.get("detail")
+    if isinstance(detail, dict):
+        return detail
+    if not isinstance(detail, str):
+        raise VerificationError("malformed v2 event detail")
+    try:
+        parsed = json.loads(detail, object_pairs_hook=_no_duplicate_object)
+    except ValueError as exc:
+        raise VerificationError(f"invalid v2 event detail: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise VerificationError("v2 event detail must be a JSON object")
+    return parsed
+
+
+def _validate_run_state_inputs(
+    authenticated_prefix_end: int | None,
+    writer_isolation_established: bool,
+) -> None:
+    if authenticated_prefix_end is not None:
+        if (
+            isinstance(authenticated_prefix_end, bool)
+            or not isinstance(authenticated_prefix_end, int)
+            or authenticated_prefix_end < 0
+            or authenticated_prefix_end > UINT32_MAX
+        ):
+            raise VerificationError(
+                "authenticated_prefix_end must be a non-negative integer "
+                "sequence or None"
+            )
+    if not isinstance(writer_isolation_established, bool):
+        raise VerificationError(
+            "writer_isolation_established must be a boolean"
+        )
+
+
+def _finish_summary(detail: dict, *, completed: bool, reasons: list[str]) -> str:
+    exit_code = detail["exit_code"]
+    launcher_signal = detail["launcher_signal"]
+    if exit_code < 0:
+        child = (
+            f"the direct child was terminated by signal {-exit_code} "
+            f"(recorded rc {exit_code})"
+        )
+    else:
+        child = f"the direct child exited with rc {exit_code}"
+    if launcher_signal:
+        child += f" after the launcher recorded signal {launcher_signal}"
+    if completed:
+        text = f"Completed: the isolated launcher attested that {child}."
+    else:
+        text = (
+            f"Internally consistent, not proven: {child}, but completion "
+            f"is not proven ({'; '.join(reasons)})."
+        )
+    return f"{text} {DIRECT_CHILD_SURVIVOR_QUALIFICATION}"
+
+
+def _failed_launch_summary(detail: dict, *, proven: bool, reasons: list[str]) -> str:
+    stage = detail.get("stage", "unknown")
+    reason = detail.get("reason", "")
+    text = (
+        f"Failed launch: no child ran (stage {stage}"
+        + (f": {reason}" if reason else "")
+        + ")."
+    )
+    if proven:
+        text += " The isolated launcher attested this failure."
+    else:
+        text += (
+            " The record is not proven as launcher-attested "
+            f"({'; '.join(reasons)})."
+        )
+    return text
+
+
+def classify_run_states(
+    events: Sequence[dict],
+    *,
+    authenticated_prefix_end: int | None = None,
+    writer_isolation_established: bool = False,
+    run_id: str | None = None,
+) -> list[dict]:
+    """Classify v2 runs into the four §5.5 run states.
+
+    ``authenticated_prefix_end`` is the last journal sequence covered by an
+    anchored prefix that satisfied the full anchor acceptance predicate.
+    Item 7 deliberately does not authenticate anchors itself; the caller
+    must pass only a sequence it has already established as authenticated.
+    A terminal event at or below that sequence is "inside" the prefix.
+
+    ``writer_isolation_established`` is the same caller-established fact
+    for the §5.7 journal-writer isolation predicate. Completion requires
+    both; without them a finish becomes "internally consistent, not
+    proven". A launch-failed record remains a "failed launch" but reports
+    whether it was proven. A launch with no terminal is always
+    "incomplete/unverified".
+
+    Only namespaced v2 events participate. Legacy free-form events are not
+    run-state evidence, so an old free-form "finish" cannot become an
+    orphan terminal event. Malformed v2 linkage (duplicate launch, orphan
+    terminal, or a second terminal for one run id) is a verification
+    failure.
+    """
+    _validate_run_state_inputs(
+        authenticated_prefix_end, writer_isolation_established
+    )
+    if run_id is not None:
+        _v2_uuid(run_id)
+
+    runs: dict[str, dict] = {}
+    order: list[str] = []
+    for event in events:
+        event_type = event.get("event_type")
+        if event_type not in V2_EVENT_TYPES:
+            continue
+        detail = _run_event_detail(event)
+        _validate_v2_event_detail(event_type, detail)
+        event_run_id = detail["run_id"]
+        seq = event.get("seq")
+        if not isinstance(seq, int) or isinstance(seq, bool):
+            raise VerificationError("v2 event seq must be an integer")
+
+        if event_type == V2_LAUNCH_EVENT_TYPE:
+            if event_run_id in runs:
+                raise VerificationError(
+                    f"duplicate v2 launch run id {event_run_id!r} at "
+                    f"sequence {seq}"
+                )
+            runs[event_run_id] = {
+                "run_id": event_run_id,
+                "launch_seq": seq,
+                "launch_detail": detail,
+                "terminal_seq": None,
+                "terminal_event_type": None,
+                "terminal_detail": None,
+            }
+            order.append(event_run_id)
+            continue
+
+        run = runs.get(event_run_id)
+        if run is None:
+            raise VerificationError(
+                f"orphan v2 terminal event for run id {event_run_id!r} at "
+                f"sequence {seq}: no v2 launch event precedes it"
+            )
+        if run["terminal_seq"] is not None:
+            raise VerificationError(
+                f"second terminal event for v2 run id {event_run_id!r} at "
+                f"sequence {seq}; the first was at "
+                f"sequence {run['terminal_seq']}"
+            )
+        run["terminal_seq"] = seq
+        run["terminal_event_type"] = event_type
+        run["terminal_detail"] = detail
+
+    results: list[dict] = []
+    for event_run_id in order:
+        if run_id is not None and event_run_id != run_id:
+            continue
+        run = runs[event_run_id]
+        terminal_seq = run["terminal_seq"]
+        terminal_type = run["terminal_event_type"]
+        terminal_detail = run["terminal_detail"]
+        authenticated = (
+            terminal_seq is not None
+            and authenticated_prefix_end is not None
+            and terminal_seq <= authenticated_prefix_end
+        )
+        reasons: list[str] = []
+        if terminal_seq is None:
+            state = RUN_STATE_INCOMPLETE_UNVERIFIED
+            summary = (
+                "Incomplete/unverified: a v2 launch event is present but no "
+                "terminal event follows. The journal cannot distinguish an "
+                "interrupted launcher from a completed-but-unrecorded run."
+            )
+            exit_code = None
+            launcher_signal = None
+        elif terminal_type == V2_LAUNCH_FAILED_EVENT_TYPE:
+            state = RUN_STATE_FAILED_LAUNCH
+            proven = authenticated and writer_isolation_established
+            if not authenticated:
+                reasons.append(
+                    "the terminal event is outside any authenticated anchor "
+                    "prefix"
+                )
+            if not writer_isolation_established:
+                reasons.append("journal-writer isolation is not established")
+            summary = _failed_launch_summary(
+                terminal_detail, proven=proven, reasons=reasons
+            )
+            exit_code = None
+            launcher_signal = None
+        else:
+            exit_code = terminal_detail["exit_code"]
+            launcher_signal = terminal_detail["launcher_signal"]
+            if not authenticated:
+                reasons.append(
+                    "the finish event is outside any authenticated anchor "
+                    "prefix"
+                )
+            if not writer_isolation_established:
+                reasons.append("journal-writer isolation is not established")
+            completed = not reasons
+            state = (
+                RUN_STATE_COMPLETED
+                if completed
+                else RUN_STATE_INTERNALLY_CONSISTENT
+            )
+            summary = _finish_summary(
+                terminal_detail, completed=completed, reasons=reasons
+            )
+
+        results.append(
+            {
+                "run_id": event_run_id,
+                "state": state,
+                "launch_seq": run["launch_seq"],
+                "terminal_seq": terminal_seq,
+                "terminal_event_type": terminal_type,
+                "exit_code": exit_code,
+                "launcher_signal": launcher_signal,
+                "authenticated_prefix": authenticated,
+                "writer_isolation": writer_isolation_established,
+                "proven": state == RUN_STATE_COMPLETED
+                or (
+                    state == RUN_STATE_FAILED_LAUNCH
+                    and authenticated
+                    and writer_isolation_established
+                ),
+                "reasons": reasons,
+                "summary": summary,
+            }
+        )
+
+    if run_id is not None and not results:
+        raise VerificationError(
+            f"no v2 run with run id {run_id!r} was found in the journal"
+        )
+    return results
+
+
+def verify_run_states(
+    journal: Path,
+    *,
+    authenticated_prefix_end: int | None = None,
+    writer_isolation_established: bool = False,
+    run_id: str | None = None,
+) -> dict:
+    """Verify a journal and return one §5.5 verdict per v2 run.
+
+    The complete-event prefix is verified (torn tail reported separately,
+    never treated as an event), then run linkage and the four-state verdict
+    are computed. ``authenticated_prefix_end`` and
+    ``writer_isolation_established`` are caller-established facts: only a
+    full anchor-predicate composition may set the former, and only the
+    §5.7 predicate may set the latter.
+    """
+    events, fragment = read_journal_prefix(journal)
+    _verify_audit_events(events)
+    runs = classify_run_states(
+        events,
+        authenticated_prefix_end=authenticated_prefix_end,
+        writer_isolation_established=writer_isolation_established,
+        run_id=run_id,
+    )
+    return {
+        "runs": runs,
+        "run_count": len(runs),
+        "authenticated_prefix_end": authenticated_prefix_end,
+        "writer_isolation_established": writer_isolation_established,
+        "fragment": fragment.decode("utf-8", "replace") if fragment else None,
+        "fragment_bytes": len(fragment) if fragment else 0,
     }
 
 

@@ -66,8 +66,8 @@ hook = os.environ.get("TEST_HOOK", "")
 if hook == "signal-after-launch-event":
     real_append = launcher.append_v2_event
 
-    def append(journal, event_type, detail):
-        event = real_append(journal, event_type, detail)
+    def append(journal, event_type, detail, **kwargs):
+        event = real_append(journal, event_type, detail, **kwargs)
         if event_type == "v2_launch":
             os.kill(os.getpid(), signal.SIGTERM)
         return event

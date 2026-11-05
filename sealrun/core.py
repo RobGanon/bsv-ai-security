@@ -34,6 +34,16 @@ LEGACY_MANIFEST_SCHEMA = "aiguard-manifest-v2"
 MAX_EVENT_DETAIL_BYTES = 4096
 MAX_JOURNAL_EVENTS = 1_000_000
 
+#: Practical operating limit for one journal, stated from measured cost
+#: (§9, launch-flow v2 §6.1). Every append re-reads and re-verifies the
+#: whole journal, so the mandatory pre-exec launch write pays O(n) before
+#: each exec. Measured on the reference host: one append at 100k events
+#: took 1.25 s and 113 MB RSS; 300k took 3.8 s and 302 MB; extrapolating
+#: near the 1,000,000 hard cap gives roughly 13 s and 1 GB per launch.
+#: Rotate/compact the journal (or start a new one) well before this; the
+#: hard cap below remains a refusal boundary, not an operating target.
+PRACTICAL_JOURNAL_EVENT_LIMIT = 100_000
+
 UINT32_MAX = (1 << 32) - 1
 
 #: Per-event namespacing for v2 run-state events [frozen design §6.2].
@@ -87,6 +97,186 @@ class VerifiedArtifact:
     sha256: str
     size: int
     handle: BinaryIO
+
+
+@dataclasses.dataclass(frozen=True)
+class JournalIdentity:
+    """The journal parent directory and file inode pinned before a v2 launch.
+
+    ``file_device`` / ``file_inode`` are ``None`` when the journal does not
+    exist yet; in that case only the pinned parent may create it. Re-checked
+    immediately before and after the append open, so a journal renamed over
+    the path after the §5.7 isolation check is refused rather than extended.
+    """
+
+    parent_device: int
+    parent_inode: int
+    file_device: int | None
+    file_inode: int | None
+
+
+def pin_journal_identity(
+    journal: Path, *, create: bool = False
+) -> JournalIdentity:
+    """Pin the journal parent directory and current inode (§6.1).
+
+    The parent must be a real directory (never a symlink) and, if the
+    journal exists, a regular non-symlink file. The returned identity is
+    passed to :func:`append_v2_event` so the append path can refuse a
+    replacement that happened before ``os.open``.
+
+    With ``create=True`` a missing journal is created (``O_EXCL``,
+    ``O_NOFOLLOW``), fsynced, and its directory fsynced, so the pinned
+    identity names a durable inode before the launch record is written.
+    """
+    journal = Path(os.path.abspath(os.fspath(journal)))
+    parent = journal.parent
+    try:
+        parent_info = os.lstat(parent)
+    except OSError as exc:
+        raise VerificationError(
+            f"cannot pin the audit journal directory {parent}: {exc}"
+        ) from exc
+    if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode):
+        raise VerificationError("audit journal parent must be a real directory")
+    file_device: int | None = None
+    file_inode: int | None = None
+    try:
+        file_info = os.lstat(journal)
+    except FileNotFoundError:
+        if create:
+            try:
+                fd = os.open(
+                    os.fspath(journal),
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW,
+                    0o644,
+                )
+            except OSError as exc:
+                raise VerificationError(
+                    f"cannot create the audit journal {journal}: {exc}"
+                ) from exc
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            _fsync_directory(parent)
+            try:
+                file_info = os.lstat(journal)
+            except OSError as exc:
+                raise VerificationError(
+                    f"cannot pin the new audit journal inode {journal}: {exc}"
+                ) from exc
+        else:
+            file_info = None
+    except OSError as exc:
+        raise VerificationError(
+            f"cannot pin the audit journal inode {journal}: {exc}"
+        ) from exc
+    if file_info is not None:
+        if stat.S_ISLNK(file_info.st_mode) or not stat.S_ISREG(file_info.st_mode):
+            raise VerificationError(
+                "audit journal must be a regular non-symlink file"
+            )
+        file_device = file_info.st_dev
+        file_inode = file_info.st_ino
+    return JournalIdentity(
+        parent_device=parent_info.st_dev,
+        parent_inode=parent_info.st_ino,
+        file_device=file_device,
+        file_inode=file_inode,
+    )
+
+
+def _assert_parent_identity(parent: Path, identity: JournalIdentity) -> None:
+    try:
+        info = os.lstat(parent)
+    except OSError as exc:
+        raise VerificationError(
+            f"audit journal directory {parent} changed after it was pinned: {exc}"
+        ) from exc
+    if (info.st_dev, info.st_ino) != (
+        identity.parent_device,
+        identity.parent_inode,
+    ):
+        raise VerificationError(
+            f"audit journal directory {parent} was replaced after it was pinned"
+        )
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise VerificationError("audit journal parent must be a real directory")
+
+
+def _assert_journal_identity_before_open(
+    journal: Path, identity: JournalIdentity
+) -> bool:
+    """Check the pinned identity and return whether the journal must be created."""
+    _assert_parent_identity(journal.parent, identity)
+    try:
+        info = os.lstat(journal)
+    except FileNotFoundError:
+        if identity.file_inode is not None:
+            raise VerificationError(
+                "audit journal disappeared after it was pinned; refusing to "
+                "create a replacement"
+            )
+        return True
+    except OSError as exc:
+        raise VerificationError(
+            f"cannot inspect the pinned audit journal: {exc}"
+        ) from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise VerificationError("audit journal must be a regular non-symlink file")
+    if identity.file_inode is None:
+        raise VerificationError(
+            "audit journal appeared after the isolation check; refusing to "
+            "extend an unpinned file"
+        )
+    if (info.st_dev, info.st_ino) != (
+        identity.file_device,
+        identity.file_inode,
+    ):
+        raise VerificationError(
+            "audit journal was replaced after it was pinned; refusing to "
+            "extend the replacement"
+        )
+    return False
+
+
+def _assert_journal_fd_identity(
+    fd: int,
+    journal: Path,
+    identity: JournalIdentity,
+    *,
+    created: bool,
+) -> None:
+    """Check the opened descriptor and the path still name the pinned inode."""
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        raise VerificationError("audit journal must be a regular non-symlink file")
+    if identity.file_inode is not None:
+        if (info.st_dev, info.st_ino) != (
+            identity.file_device,
+            identity.file_inode,
+        ):
+            raise VerificationError(
+                "audit journal was replaced after it was pinned; refusing to "
+                "extend the replacement"
+            )
+    elif not created:
+        raise VerificationError(
+            "audit journal appeared after the isolation check; refusing to "
+            "extend an unpinned file"
+        )
+    _assert_parent_identity(journal.parent, identity)
+    try:
+        path_info = os.lstat(journal)
+    except OSError as exc:
+        raise VerificationError(
+            f"audit journal vanished during the append open: {exc}"
+        ) from exc
+    if (path_info.st_dev, path_info.st_ino) != (info.st_dev, info.st_ino):
+        raise VerificationError(
+            "audit journal path was replaced during the append open"
+        )
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -639,6 +829,13 @@ _V2_EXECUTABLE_BINDING_FIELDS = frozenset(
         "executable_fd",
     }
 )
+_V2_CHANNEL_FIELDS = frozenset({"path", "env", "sha256", "fd"})
+_V2_CHANNEL_LIST_DETACHED_FIELDS = frozenset(
+    {"channel_list_sha256", "channel_list_file"}
+)
+_V2_CHANNEL_LIST_FIELDS = frozenset({"channel_list"}) | (
+    _V2_CHANNEL_LIST_DETACHED_FIELDS
+)
 _V2_LAUNCH_FIELDS = frozenset(
     {
         "launch_mode",
@@ -655,7 +852,11 @@ _V2_LAUNCH_FIELDS = frozenset(
         "gid",
     }
 )
-_V2_LAUNCH_ALLOWED_FIELDS = _V2_LAUNCH_FIELDS | _V2_EXECUTABLE_BINDING_FIELDS
+_V2_LAUNCH_ALLOWED_FIELDS = (
+    _V2_LAUNCH_FIELDS
+    | _V2_EXECUTABLE_BINDING_FIELDS
+    | _V2_CHANNEL_LIST_FIELDS
+)
 _V2_FINISH_FIELDS = frozenset(
     {
         "launch_mode",
@@ -789,6 +990,95 @@ def _v2_validate_executable_binding(detail: dict) -> None:
     _v2_int(fd, "executable_fd", minimum=0, maximum=UINT32_MAX)
 
 
+def _v2_validate_channel_records(
+    records: Any,
+    artifact_count: int,
+    *,
+    field: str = "channel_list",
+) -> list[dict]:
+    """Validate a descriptor channel list (path -> env var -> hash -> fd)."""
+    if not isinstance(records, list):
+        raise VerificationError(f"{field} must be an array of channel records")
+    if len(records) != artifact_count:
+        raise VerificationError(
+            f"{field} has {len(records)} record(s) but artifact_count is "
+            f"{artifact_count}"
+        )
+    seen_paths: set[str] = set()
+    seen_envs: set[str] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            raise VerificationError(f"{field} entries must be JSON objects")
+        keys = set(record)
+        missing = sorted(_V2_CHANNEL_FIELDS - keys)
+        unknown = sorted(keys - _V2_CHANNEL_FIELDS)
+        if missing:
+            raise VerificationError(
+                f"{field} entry is missing field(s): {', '.join(missing)}"
+            )
+        if unknown:
+            raise VerificationError(
+                f"{field} entry has unknown field(s): {', '.join(unknown)}"
+            )
+        path = _v2_string(record["path"], f"{field} path")
+        env = _v2_string(record["env"], f"{field} env")
+        _v2_hex64(record["sha256"], f"{field} sha256")
+        _v2_int(
+            record["fd"], f"{field} fd", minimum=0, maximum=UINT32_MAX
+        )
+        if path in seen_paths:
+            raise VerificationError(
+                f"{field} names artifact path {path!r} more than once"
+            )
+        if env in seen_envs:
+            raise VerificationError(
+                f"{field} names channel {env!r} more than once"
+            )
+        seen_paths.add(path)
+        seen_envs.add(env)
+    return records
+
+
+def _v2_channel_list_filename(value: Any) -> str:
+    name = _v2_string(value, "channel_list_file", max_length=255)
+    if (
+        os.path.basename(name) != name
+        or name in (".", "..")
+        or "/" in name
+        or "\\" in name
+        or os.path.isabs(name)
+    ):
+        raise VerificationError(
+            "channel_list_file must be a bare filename in the journal directory"
+        )
+    return name
+
+
+def _v2_check_launch_channel_list(detail: dict) -> None:
+    present = _V2_CHANNEL_LIST_FIELDS & detail.keys()
+    if not present:
+        # Older v2 launch events make no channel-map claim at all.
+        return
+    if "channel_list" in detail:
+        if _V2_CHANNEL_LIST_DETACHED_FIELDS & detail.keys():
+            raise VerificationError(
+                "a launch event cannot record both an inline channel_list and "
+                "a detached channel list"
+            )
+        _v2_validate_channel_records(
+            detail["channel_list"], detail["artifact_count"]
+        )
+        return
+    missing = sorted(_V2_CHANNEL_LIST_DETACHED_FIELDS - detail.keys())
+    if missing:
+        raise VerificationError(
+            f"v2_launch detail is missing required detached channel-list "
+            f"field(s): {', '.join(missing)}"
+        )
+    _v2_hex64(detail["channel_list_sha256"], "channel_list_sha256")
+    _v2_channel_list_filename(detail["channel_list_file"])
+
+
 def _validate_v2_event_detail(event_type: str, detail: Any) -> None:
     """Strictly validate one v2 run-state event's ``detail`` object.
 
@@ -809,6 +1099,7 @@ def _validate_v2_event_detail(event_type: str, detail: Any) -> None:
         _v2_hex64(detail["manifest_hash"], "manifest_hash")
         _v2_int(detail["artifact_count"], "artifact_count",
                 minimum=0, maximum=UINT32_MAX)
+        _v2_check_launch_channel_list(detail)
         _v2_hex64(detail["argv_fingerprint"], "argv_fingerprint")
         _v2_hex64(detail["env_fingerprint"], "env_fingerprint")
         _v2_string(detail["executable"], "executable")
@@ -861,20 +1152,41 @@ def _validate_v2_event_detail(event_type: str, detail: Any) -> None:
     raise VerificationError(f"unknown v2 event type: {event_type!r}")
 
 
-def append_v2_event(journal: Path, event_type: str, detail: dict) -> dict:
+def append_v2_event(
+    journal: Path,
+    event_type: str,
+    detail: dict,
+    *,
+    journal_identity: JournalIdentity | None = None,
+) -> dict:
     """Append one strictly-validated v2 run-state event.
 
     The event type must be in the reserved ``v2_`` namespace and the
     ``detail`` object must match that type's exact schema. The detail is
     serialised canonically before hashing, exactly as
     :func:`append_audit_event` does for legacy events.
+
+    ``journal_identity`` is the identity pinned before a v2 launch. When
+    supplied, the append refuses a journal parent or inode that no longer
+    matches it, closing the pre-``os.open`` replacement window (§6.1).
+
+    A launch event reserves two slots: the launch itself and the terminal
+    finish event. At fewer than two slots remaining the launch is refused
+    before anything is written, so a completed run cannot be forced into
+    the cap-cliff "incomplete" state.
     """
     if event_type not in V2_EVENT_TYPES:
         raise VerificationError(f"unknown v2 event type: {event_type!r}")
     _validate_v2_event_detail(event_type, detail)
     serialized = canonical_json_bytes(detail).decode("utf-8")
+    reserve_slots = 2 if event_type == V2_LAUNCH_EVENT_TYPE else 1
     return _append_audit_event(
-        journal, event_type, serialized, create_parent=False
+        journal,
+        event_type,
+        serialized,
+        create_parent=False,
+        journal_identity=journal_identity,
+        reserve_slots=reserve_slots,
     )
 
 
@@ -904,31 +1216,223 @@ def append_audit_event(journal: Path, event_type: str, detail: str) -> dict:
     return _append_audit_event(journal, event_type, detail)
 
 
+def _write_all_fd(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written == 0:
+            raise VerificationError("short write")
+        view = view[written:]
+
+
+def _fsync_directory(path: Path) -> None:
+    """fsync a directory so a newly created entry survives a crash (§6.1)."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _O_NOFOLLOW
+    try:
+        fd = os.open(os.fspath(path), flags)
+    except OSError as exc:
+        raise VerificationError(
+            f"cannot open directory {path} for fsync: {exc}"
+        ) from exc
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        raise VerificationError(
+            f"cannot fsync directory {path}: {exc}"
+        ) from exc
+    finally:
+        os.close(fd)
+
+
+def _ensure_journal_parent(journal: Path, *, create_parent: bool) -> list[Path]:
+    """Create the parent if allowed; return the directories that were created."""
+    parent = journal.parent
+    if not create_parent:
+        if not parent.is_dir():
+            raise VerificationError("audit journal directory must already exist")
+        return []
+    missing: list[Path] = []
+    current = parent
+    while not current.exists():
+        missing.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    return missing
+
+
+def _parse_jsonl_bytes(data: bytes) -> list[dict]:
+    events: list[dict] = []
+    if not data:
+        return events
+    lines = data.split(b"\n")
+    if lines and lines[-1] == b"":
+        lines.pop()
+    for line_no, raw in enumerate(lines, 1):
+        if not raw.strip():
+            raise VerificationError(f"blank line in audit journal at line {line_no}")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise VerificationError(
+                f"invalid UTF-8 at audit line {line_no}: {exc}"
+            ) from exc
+        try:
+            event = json.loads(text, object_pairs_hook=_no_duplicate_object)
+        except ValueError as exc:
+            raise VerificationError(
+                f"invalid JSON at audit line {line_no}: {exc}"
+            ) from exc
+        if not isinstance(event, dict):
+            raise VerificationError(
+                f"audit event must be a JSON object at line {line_no}"
+            )
+        events.append(event)
+    return events
+
+
+def _read_jsonl_fd(fd: int) -> list[dict]:
+    """Read and parse the journal from the already-locked descriptor.
+
+    Reading from the same (locked) fd used for the append closes the window
+    in which a path swap between verification and writing could make the
+    chain check inspect a different file (§6.1 append atomicity).
+    """
+    chunks: list[bytes] = []
+    offset = 0
+    while True:
+        chunk = os.pread(fd, 1 << 20, offset)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        offset += len(chunk)
+    return _parse_jsonl_bytes(b"".join(chunks))
+
+
+def _split_complete_and_fragment(data: bytes) -> tuple[list[dict], bytes | None]:
+    """Split a journal into complete events and a trailing torn fragment.
+
+    A final complete JSON object is an event even without a trailing
+    newline; only an unterminated, unparseable final segment is a fragment
+    (§6.1 torn-line rule). Corruption before the final segment still fails.
+    """
+    if not data:
+        return [], None
+    if data.endswith(b"\n"):
+        return _parse_jsonl_bytes(data), None
+    body, separator, tail = data.rpartition(b"\n")
+    complete = _parse_jsonl_bytes(body + b"\n" if separator else b"")
+    if not tail.strip():
+        raise VerificationError(
+            f"blank line in audit journal at line {len(complete) + 1}"
+        )
+    try:
+        text = tail.decode("utf-8")
+    except UnicodeDecodeError:
+        return complete, tail
+    try:
+        event = json.loads(text, object_pairs_hook=_no_duplicate_object)
+    except ValueError:
+        return complete, tail
+    if not isinstance(event, dict):
+        raise VerificationError(
+            f"audit event must be a JSON object at line {len(complete) + 1}"
+        )
+    complete.append(event)
+    return complete, None
+
+
+def read_journal_prefix(journal: Path) -> tuple[list[dict], bytes | None]:
+    """Return the complete-event prefix and any trailing torn fragment."""
+    journal = Path(journal)
+    if journal.is_symlink():
+        raise VerificationError("audit journal must be a regular non-symlink file")
+    if not journal.exists():
+        return [], None
+    if not journal.is_file():
+        raise VerificationError("audit journal must be a regular non-symlink file")
+    return _split_complete_and_fragment(journal.read_bytes())
+
+
+def verify_audit_prefix(journal: Path) -> dict:
+    """Verify the complete-event prefix and report a torn tail separately.
+
+    This is the torn-tolerant primitive used to compare a journal prefix
+    against an anchor: the chain is verified over complete events only, and
+    an incomplete trailing fragment is reported rather than raised before
+    the comparison can run.
+    """
+    events, fragment = read_journal_prefix(journal)
+    count = _verify_audit_events(events)
+    return {
+        "events": count,
+        "fragment": fragment.decode("utf-8", "replace") if fragment else None,
+        "fragment_bytes": len(fragment) if fragment else 0,
+    }
+
+
 def _append_audit_event(
-    journal: Path, event_type: str, detail: str, *, create_parent: bool = True
+    journal: Path,
+    event_type: str,
+    detail: str,
+    *,
+    create_parent: bool = True,
+    journal_identity: JournalIdentity | None = None,
+    reserve_slots: int = 1,
 ) -> dict:
     detail_bytes = detail.encode("utf-8")
     if len(detail_bytes) > MAX_EVENT_DETAIL_BYTES:
         raise VerificationError(
             f"detail exceeds maximum of {MAX_EVENT_DETAIL_BYTES} UTF-8 bytes"
         )
+    if reserve_slots < 1:
+        raise VerificationError("reserve_slots must be at least 1")
 
-    if create_parent:
-        journal.parent.mkdir(parents=True, exist_ok=True)
-    elif not journal.parent.is_dir():
-        raise VerificationError(
-            "audit journal directory must already exist"
-        )
+    created_directories = _ensure_journal_parent(
+        journal, create_parent=create_parent
+    )
     if journal.is_symlink():
         raise VerificationError("audit journal must be a regular non-symlink file")
+
+    must_create = False
+    if journal_identity is not None:
+        must_create = _assert_journal_identity_before_open(
+            journal, journal_identity
+        )
 
     # Open with create + append so we can lock the same FD used for writing.
     # O_NOFOLLOW makes the open itself fail on a trailing symlink instead of
     # following it, closing the check-then-open race on the is_symlink()
     # pre-check above for an attacker racing a parent-directory swap.
-    flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | _O_NOFOLLOW
+    common_flags = os.O_RDWR | os.O_APPEND | _O_NOFOLLOW
+    created = False
     try:
-        fd = os.open(os.fspath(journal), flags, 0o644)
+        if must_create:
+            fd = os.open(
+                os.fspath(journal),
+                common_flags | os.O_CREAT | os.O_EXCL,
+                0o644,
+            )
+            created = True
+        elif journal_identity is not None:
+            # The pinned inode must still exist. Do not O_CREAT here: if the
+            # path vanished between the identity check and the open, creating
+            # a fresh empty journal would discard the pinned chain (and leave
+            # the replacement behind after the identity check below refuses).
+            fd = os.open(os.fspath(journal), common_flags)
+        else:
+            try:
+                fd = os.open(
+                    os.fspath(journal),
+                    common_flags | os.O_CREAT | os.O_EXCL,
+                    0o644,
+                )
+                created = True
+            except FileExistsError:
+                fd = os.open(
+                    os.fspath(journal), common_flags | os.O_CREAT, 0o644
+                )
     except OSError as exc:
         raise VerificationError(
             "audit journal must be a regular non-symlink file"
@@ -941,27 +1445,38 @@ def _append_audit_event(
         mode = os.fstat(fd).st_mode
         if not stat.S_ISREG(mode):
             raise VerificationError("audit journal must be a regular non-symlink file")
+        if journal_identity is not None:
+            _assert_journal_fd_identity(
+                fd, journal, journal_identity, created=created
+            )
 
         prior: list[dict] = []
         size = os.fstat(fd).st_size
         if size:
-            # Read existing content via a separate text handle on the same path
-            # (the locked FD is binary). The lock serialises concurrent writers.
-            prior = _read_jsonl(journal)
+            # Read from the locked fd, never the path: a path swap between
+            # this read and the write cannot make the chain check inspect a
+            # different file (§6.1 append atomicity).
+            prior = _read_jsonl_fd(fd)
             _verify_audit_events(prior)
             # The journal must end with a newline: otherwise the new line
             # would concatenate onto the last line and corrupt two lines.
             # A journal missing only its terminator still verifies (its
             # content is intact), so this refuses to append rather than
             # treating the journal as corrupt.
-            os.lseek(fd, -1, os.SEEK_END)
-            if os.read(fd, 1) != b"\n":
+            if not _fd_ends_with_newline(fd, size):
                 raise VerificationError(
                     "audit journal does not end with a newline; "
                     "refusing to append"
                 )
 
-        if len(prior) >= MAX_JOURNAL_EVENTS:
+        remaining = MAX_JOURNAL_EVENTS - len(prior)
+        if remaining < reserve_slots:
+            if reserve_slots > 1:
+                raise VerificationError(
+                    f"journal has {remaining} slot(s) remaining; a v2 launch "
+                    "needs at least 2 (launch + finish), so fewer than 2 "
+                    "slots remain and the launch is refused"
+                )
             raise VerificationError(
                 f"journal already contains the maximum of {MAX_JOURNAL_EVENTS} events"
             )
@@ -982,20 +1497,19 @@ def _append_audit_event(
         # Loop until every byte is written: os.write may write short
         # (signals, disk pressure), and a torn line would brick the
         # journal on the next verification.
-        data = memoryview(line.encode("utf-8"))
         try:
-            while data:
-                written = os.write(fd, data)
-                if written == 0:
-                    raise VerificationError(
-                        "short write appending to audit journal"
-                    )
-                data = data[written:]
+            _write_all_fd(fd, line.encode("utf-8"))
         except OSError as exc:
             raise VerificationError(
                 f"failed writing to audit journal: {exc}"
             ) from exc
         os.fsync(fd)
+        if created:
+            # The directory entry naming a newly created journal is not
+            # durable until the directory itself is fsynced (§6.1).
+            _fsync_directory(journal.parent)
+            for directory in created_directories:
+                _fsync_directory(directory.parent)
         return event
     finally:
         if fcntl is not None:
@@ -1006,6 +1520,12 @@ def _append_audit_event(
         os.close(fd)
 
 
+def _fd_ends_with_newline(fd: int, size: int) -> bool:
+    if size <= 0:
+        return True
+    return os.pread(fd, 1, size - 1) == b"\n"
+
+
 def verify_audit_journal(journal: Path) -> int:
     if journal.is_symlink():
         raise VerificationError("audit journal must be a regular non-symlink file")
@@ -1014,6 +1534,258 @@ def verify_audit_journal(journal: Path) -> int:
     if not journal.is_file():
         raise VerificationError("audit journal must be a regular non-symlink file")
     return _verify_audit_events(_read_jsonl(journal))
+
+
+def verify_audit_journal_report(journal: Path) -> dict:
+    """Verify the complete-event prefix and report torn tails and channel maps.
+
+    Unlike :func:`verify_audit_journal`, this tolerates an incomplete final
+    fragment (it is reported, never auto-repaired) and resolves each v2
+    launch event's descriptor channel list. A missing detached side file is
+    reported as ``present: False``; the map is never reconstructed from its
+    hash (§6.1).
+    """
+    events, fragment = read_journal_prefix(journal)
+    count = _verify_audit_events(events)
+    channel_lists: list[dict] = []
+    for event in events:
+        if event.get("event_type") != V2_LAUNCH_EVENT_TYPE:
+            continue
+        detail = event.get("detail")
+        if not isinstance(detail, str):
+            continue
+        parsed = json.loads(detail, object_pairs_hook=_no_duplicate_object)
+        resolved = load_channel_list(journal, parsed)
+        channel_lists.append(
+            {
+                "seq": event.get("seq"),
+                "run_id": parsed.get("run_id"),
+                **resolved,
+            }
+        )
+    return {
+        "events": count,
+        "fragment": fragment.decode("utf-8", "replace") if fragment else None,
+        "fragment_bytes": len(fragment) if fragment else 0,
+        "channel_lists": channel_lists,
+    }
+
+
+def _channel_list_name(journal: Path, run_id: str) -> str:
+    return f"{journal.name}.channels.{run_id}.json"
+
+
+def write_detached_channel_list(
+    journal: Path,
+    run_id: str,
+    records: Sequence[Mapping[str, Any]],
+    *,
+    child_uid: int,
+    journal_identity: JournalIdentity | None = None,
+) -> tuple[str, str]:
+    """Write a detached channel list and return ``(filename, sha256)``.
+
+    Implements the §6.1 write protocol: the canonical bytes are hashed in
+    memory (never re-read from the path), created inside the §5.7-isolated
+    journal directory with ``O_CREAT|O_EXCL|O_NOFOLLOW``, fsynced, and the
+    directory fsynced before the caller journals the hash. The file itself
+    is re-checked against the isolation predicate after creation.
+    """
+    journal = Path(journal)
+    _v2_uuid(run_id)
+    records = list(records)
+    _v2_validate_channel_records(records, len(records))
+    payload = canonical_json_bytes(records)
+    digest = hashlib.sha256(payload).hexdigest()
+
+    parent = journal.parent
+    if journal_identity is not None:
+        _assert_parent_identity(parent, journal_identity)
+    _check_isolated_path(
+        parent, child_uid, role="journal directory", require_directory=True
+    )
+
+    name = _channel_list_name(journal, run_id)
+    path = parent / name
+    try:
+        fd = os.open(
+            os.fspath(path),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW,
+            0o600,
+        )
+    except OSError as exc:
+        raise VerificationError(
+            f"cannot create detached channel list {path}: {exc}"
+        ) from exc
+    try:
+        try:
+            _write_all_fd(fd, payload)
+        except OSError as exc:
+            raise VerificationError(
+                f"cannot write detached channel list {path}: {exc}"
+            ) from exc
+        os.fsync(fd)
+        _check_isolated_path(
+            path, child_uid, role="channel list file", require_directory=False
+        )
+        _fsync_directory(parent)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise
+    else:
+        os.close(fd)
+    return name, digest
+
+
+def load_channel_list(journal: Path, launch_detail: dict) -> dict:
+    """Resolve a v2 launch event's descriptor channel list.
+
+    Inline records are returned as recorded. For a detached map the side
+    file is opened from the journal directory, its bytes are hashed and
+    compared with the committed hash, and the records are schema-checked.
+    A missing side file is reported as ``present: False`` — the map is not
+    reconstructed from the hash, because the hash cannot recover it.
+    """
+    artifact_count = launch_detail["artifact_count"]
+    if "channel_list" in launch_detail:
+        records = _v2_validate_channel_records(
+            launch_detail["channel_list"], artifact_count
+        )
+        return {
+            "present": True,
+            "inline": True,
+            "records": records,
+            "sha256": hashlib.sha256(canonical_json_bytes(records)).hexdigest(),
+            "reason": None,
+        }
+    if "channel_list_sha256" not in launch_detail:
+        return {
+            "present": False,
+            "inline": False,
+            "records": None,
+            "sha256": None,
+            "reason": "launch event records no channel list",
+        }
+
+    journal = Path(journal)
+    run_id = launch_detail["run_id"]
+    expected_name = _channel_list_name(journal, run_id)
+    name = launch_detail["channel_list_file"]
+    if name != expected_name:
+        raise VerificationError(
+            f"channel_list_file must be {expected_name!r} for this journal "
+            "and run id"
+        )
+    # The side file is a second store and must still satisfy §5.7. The
+    # child uid is recorded in the launch event; use it to refuse a
+    # journal directory the child could have written since the launch.
+    child_uid = launch_detail.get("uid")
+    isolated_child_uid = (
+        child_uid
+        if isinstance(child_uid, int) and not isinstance(child_uid, bool)
+        else None
+    )
+    if isolated_child_uid is not None:
+        _check_isolated_path(
+            journal.parent,
+            isolated_child_uid,
+            role="journal directory",
+            require_directory=True,
+        )
+        filesystem = _filesystem_type(journal.parent)
+        if filesystem not in OWNERSHIP_ENFORCING_FILESYSTEMS:
+            raise VerificationError(
+                f"journal directory {journal.parent} is on filesystem type "
+                f"{filesystem!r}; ownership-enforcing local filesystems only"
+            )
+
+    path = journal.parent / name
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return {
+            "present": False,
+            "inline": False,
+            "records": None,
+            "sha256": launch_detail["channel_list_sha256"],
+            "reason": "detached channel list file is missing",
+        }
+    except OSError as exc:
+        raise VerificationError(
+            f"cannot inspect detached channel list {path}: {exc}"
+        ) from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise VerificationError(f"detached channel list {path} is a symlink")
+    if not stat.S_ISREG(info.st_mode):
+        raise VerificationError(
+            f"detached channel list {path} is not a regular file"
+        )
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        raise VerificationError(
+            f"detached channel list {path} is group- or world-writable"
+        )
+    try:
+        parent_info = os.lstat(journal.parent)
+    except OSError as exc:
+        raise VerificationError(
+            f"cannot inspect journal directory {journal.parent}: {exc}"
+        ) from exc
+    if info.st_uid != parent_info.st_uid:
+        raise VerificationError(
+            f"detached channel list {path} is not owned by the journal "
+            "directory owner"
+        )
+    _refuse_acl(path, "channel list file")
+
+    try:
+        fd = os.open(os.fspath(path), os.O_RDONLY | _O_NOFOLLOW)
+    except OSError as exc:
+        raise VerificationError(
+            f"cannot open detached channel list {path}: {exc}"
+        ) from exc
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            raise VerificationError(
+                f"detached channel list {path} was replaced while opening it"
+            )
+        chunks: list[bytes] = []
+        offset = 0
+        while True:
+            chunk = os.pread(fd, 1 << 20, offset)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            offset += len(chunk)
+        data = b"".join(chunks)
+    finally:
+        os.close(fd)
+
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != launch_detail["channel_list_sha256"]:
+        raise VerificationError(
+            "detached channel list hash does not match the launch event; "
+            "the committed map cannot be trusted"
+        )
+    try:
+        parsed = json.loads(
+            data.decode("utf-8"), object_pairs_hook=_no_duplicate_object
+        )
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise VerificationError(
+            f"invalid detached channel list {path}: {exc}"
+        ) from exc
+    records = _v2_validate_channel_records(parsed, artifact_count)
+    return {
+        "present": True,
+        "inline": False,
+        "records": records,
+        "sha256": actual,
+        "reason": None,
+    }
 
 
 def _verify_audit_events(events: list[dict]) -> int:
@@ -1087,21 +1859,7 @@ def _no_duplicate_object(pairs: list[tuple[str, Any]]) -> dict:
 
 
 def _read_jsonl(path: Path) -> list[dict]:
-    events = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line_no, line in enumerate(handle, 1):
-            if not line.strip():
-                raise VerificationError(f"blank line in audit journal at line {line_no}")
-            try:
-                event = json.loads(line, object_pairs_hook=_no_duplicate_object)
-            except ValueError as exc:
-                raise VerificationError(
-                    f"invalid JSON at audit line {line_no}: {exc}"
-                ) from exc
-            if not isinstance(event, dict):
-                raise VerificationError(f"audit event must be a JSON object at line {line_no}")
-            events.append(event)
-    return events
+    return _parse_jsonl_bytes(Path(path).read_bytes())
 
 
 #: Filesystems on which the kernel enforces the ownership and mode bits the

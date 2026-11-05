@@ -58,6 +58,7 @@ from .core import (
     record_manifest_acceptance,
     sign_manifest,
     verify_audit_journal,
+    verify_audit_journal_report,
     verify_manifest,
 )
 from .launcher import (
@@ -421,8 +422,27 @@ def main(argv=None):
             event = append_audit_event(args.journal, args.event_type, args.detail)
             print(f"Audit event appended: seq={event['seq']} hash={event['event_hash']}")
         elif args.command == "audit-verify":
-            count = verify_audit_journal(args.journal)
-            print(f"AUDIT OK: {count} event(s)")
+            report = verify_audit_journal_report(args.journal)
+            print(f"AUDIT OK: {report['events']} event(s)")
+            if report["fragment_bytes"]:
+                print(
+                    "TORN TAIL: "
+                    f"{report['fragment_bytes']} byte(s) after the last complete "
+                    "event (reported, not repaired)"
+                )
+            for entry in report["channel_lists"]:
+                if entry["present"]:
+                    kind = "inline" if entry["inline"] else "detached"
+                    print(
+                        f"CHANNEL LIST OK: run {entry['run_id']} "
+                        f"({len(entry['records'])} channel(s), {kind})"
+                    )
+                else:
+                    print(
+                        f"CHANNEL LIST MISSING: run {entry['run_id']} "
+                        f"({entry['reason']}; the map is not reconstructable "
+                        "from the committed hash)"
+                    )
         elif args.command == "audit-manifest-accepted":
             # An acceptance is bound to exactly one signed manifest, and
             # that binding is checked HERE, at record time. An acceptance

@@ -147,6 +147,49 @@ This repository does not ship a setuid binary; the operator starts the
 launcher privileged (sudo, systemd, container entrypoint) and is
 responsible for that install decision.
 
+## Journal durability and size
+
+V2 launches write `v2_launch` / `v2_finish` / `v2_launch_failed` events to
+the hash-chained journal. Three properties matter for the run-state claim:
+
+- **The launch event is durable before exec.** Creating a journal also
+  fsyncs its directory, so the directory entry naming a newly created
+  journal cannot disappear in a crash after the append returned.
+- **Prior events are read from the locked descriptor.** The append does
+  not re-open the path to re-verify the chain, and the journal directory
+  plus inode are pinned during the §5.7 isolation check. A journal renamed
+  over the path after that check is refused, not extended.
+- **A complete final JSON object is an event even without a trailing
+  newline.** Only an unterminated *incomplete* JSON object is a fragment.
+  Anchor prefix comparison verifies the complete-event chain and reports
+  the fragment separately; the strict verifier still refuses it, and
+  appending to a journal without a final newline is refused.
+
+The launch record includes the descriptor channel list: artifact path →
+`SEALRUN_ARTIFACT_*` variable → SHA-256 → file descriptor. When the full
+list fits in the 4 KiB event-detail limit it is recorded inline. Otherwise
+the canonical bytes are written to a side file in the isolated journal
+directory before the launch event, using `O_CREAT|O_EXCL|O_NOFOLLOW`, and
+both the file and its directory are fsynced. The launch event then commits
+the side file's bare filename and SHA-256.
+
+The side file is a second store and is subject to the same isolation
+predicate as the journal: it must not be child-writable, group/world
+writable, or an ACL-bearing path. If it is later deleted, verification
+reports the map **missing**; it is never reconstructed from the hash,
+because the hash cannot recover the channel list.
+
+**Operating limit.** Every append re-reads and re-verifies the whole
+journal, so the mandatory pre-exec launch write costs O(n) before every
+exec. On the reference host an append took 1.25 s and 113 MB RSS at
+100,000 events, 3.8 s and 302 MB at 300,000, and extrapolates to roughly
+13 s and 1 GB near the 1,000,000 hard cap. The practical operating limit
+is therefore **100,000 events** per journal, not the hard cap. Rotate or
+compact the journal (or start a new one) before then. A v2 launch also
+refuses when fewer than two slots remain at the hard cap, so the launch
+and its finish event cannot straddle the cliff and turn a completed run
+into a permanently "incomplete" one.
+
 ## What this does not fix
 
 Stated plainly, because a launcher that overclaims is worse than none:

@@ -85,17 +85,22 @@ from subprocess import SubprocessError
 from typing import Callable, Mapping, NamedTuple, NoReturn, Sequence
 
 from .core import (
+    MAX_EVENT_DETAIL_BYTES,
     V2_FINISH_EVENT_TYPE,
     V2_LAUNCH_EVENT_TYPE,
     V2_LAUNCH_FAILED_EVENT_TYPE,
+    JournalIdentity,
     VerificationError,
     VerifiedArtifact,
     append_v2_event,
     assert_journal_writer_isolation,
+    canonical_json_bytes,
     fingerprint_argv,
     fingerprint_environment,
     manifest_hash,
+    pin_journal_identity,
     verified_artifacts,
+    write_detached_channel_list,
 )
 
 try:
@@ -574,6 +579,7 @@ def _current_working_directory() -> str:
 def _v2_launch_detail(
     envelope: dict,
     channels: Sequence[tuple[str, int]],
+    channel_records: Sequence[Mapping[str, object]],
     argv: Sequence[str],
     child_env: Mapping[str, str],
     *,
@@ -595,6 +601,7 @@ def _v2_launch_detail(
         "journal_nonce": journal_nonce,
         "manifest_hash": manifest_hash(envelope),
         "artifact_count": len(channels),
+        "channel_list": [dict(record) for record in channel_records],
         "argv_fingerprint": fingerprint_argv(argv),
         "env_fingerprint": fingerprint_environment(child_env),
         "executable": argv[0],
@@ -611,12 +618,51 @@ def _v2_launch_detail(
     }
 
 
+def _commit_channel_list(
+    journal: Path,
+    run_id: str,
+    detail: dict,
+    *,
+    child_uid: int,
+    journal_identity: JournalIdentity | None,
+) -> dict:
+    """Keep the channel list inline when it fits, otherwise detach it.
+
+    The launch event is limited to ``MAX_EVENT_DETAIL_BYTES``. When the
+    full descriptor map would exceed that, its canonical bytes are written
+    to a §5.7-isolated side file (fsynced, directory fsynced) and the
+    launch event commits only the filename and hash, before the append.
+    """
+    if "channel_list" not in detail:
+        return detail
+    if len(canonical_json_bytes(detail)) <= MAX_EVENT_DETAIL_BYTES:
+        return detail
+    records = detail.pop("channel_list")
+    name, digest = write_detached_channel_list(
+        journal,
+        run_id,
+        records,
+        child_uid=child_uid,
+        journal_identity=journal_identity,
+    )
+    detail["channel_list_sha256"] = digest
+    detail["channel_list_file"] = name
+    if len(canonical_json_bytes(detail)) > MAX_EVENT_DETAIL_BYTES:
+        raise VerificationError(
+            "launch event detail still exceeds the maximum after detaching "
+            "the channel list; refusing to launch"
+        )
+    return detail
+
+
 def _record_launch_failed(
     journal: Path,
     run_id: str,
     stage: str,
     reason: str,
     original: BaseException | None = None,
+    *,
+    journal_identity: JournalIdentity | None = None,
 ) -> None:
     detail = {
         "launch_mode": "v2",
@@ -625,7 +671,12 @@ def _record_launch_failed(
         "reason": (reason or "launch failed")[:3000],
     }
     try:
-        append_v2_event(journal, V2_LAUNCH_FAILED_EVENT_TYPE, detail)
+        append_v2_event(
+            journal,
+            V2_LAUNCH_FAILED_EVENT_TYPE,
+            detail,
+            journal_identity=journal_identity,
+        )
     except VerificationError as exc:
         raise VerificationError(
             f"launch failed ({reason}) and the launch-failed journal event "
@@ -934,6 +985,7 @@ def _launch_v2(
     gid: int,
     drop_groups: tuple[int, ...] | None,
     exec_hook: Callable[[], None] | None = None,
+    journal_identity: JournalIdentity | None = None,
 ) -> tuple[int | None, int]:
     """Journal the launch, run the child, journal its terminal event.
 
@@ -945,7 +997,17 @@ def _launch_v2(
     with _V2SignalGuard() as guard:
         # The launch event is fsynced by append_v2_event before the child
         # is created (§6.1).
-        append_v2_event(journal, V2_LAUNCH_EVENT_TYPE, launch_detail)
+        append_v2_event(
+            journal,
+            V2_LAUNCH_EVENT_TYPE,
+            launch_detail,
+            journal_identity=journal_identity,
+        )
+        if journal_identity is not None:
+            # The first append may have created the journal. Re-pin the
+            # resulting inode so the terminal append is checked against the
+            # file this launch actually wrote, not the pre-creation state.
+            journal_identity = pin_journal_identity(journal)
         if guard.signals:
             signum = guard.signals[0]
             _record_launch_failed(
@@ -954,6 +1016,7 @@ def _launch_v2(
                 "launch",
                 f"launcher received {_signal_name(signum)} before the child "
                 f"was started",
+                journal_identity=journal_identity,
             )
             return None, signum
         started = time.monotonic()
@@ -976,13 +1039,15 @@ def _launch_v2(
                 "privilege_drop",
                 f"cannot drop privileges to uid={uid} gid={gid}: {exc}",
                 exc,
+                journal_identity=journal_identity,
             )
             raise VerificationError(
                 f"cannot drop privileges to uid={uid} gid={gid}: {exc}"
             ) from exc
         except OSError as exc:
             _record_launch_failed(
-                journal, run_id, "exec", f"cannot launch {argv[0]!r}: {exc}", exc
+                journal, run_id, "exec", f"cannot launch {argv[0]!r}: {exc}", exc,
+                journal_identity=journal_identity,
             )
             raise VerificationError(f"cannot launch {argv[0]!r}: {exc}") from exc
         except SubprocessError as exc:
@@ -991,7 +1056,8 @@ def _launch_v2(
                 f"(credential check, process group, parent-death signal, or "
                 f"verified-executable hook): {exc}"
             )
-            _record_launch_failed(journal, run_id, "exec", reason, exc)
+            _record_launch_failed(journal, run_id, "exec", reason, exc,
+                                  journal_identity=journal_identity)
             raise VerificationError(reason) from exc
         duration_ms = max(0, int((time.monotonic() - started) * 1000))
         try:
@@ -1006,6 +1072,7 @@ def _launch_v2(
                     "escalated": result.escalated,
                     "duration_ms": duration_ms,
                 },
+                journal_identity=journal_identity,
             )
         except VerificationError as exc:
             raise VerificationError(
@@ -1147,17 +1214,22 @@ def launch(
 
     run_id: str | None = None
     journal_nonce: str | None = None
+    journal_identity: JournalIdentity | None = None
     if mode == "v2":
         # Refuse an unisolated v2 invocation before any verification work:
         # a v2 run-state claim is unavailable without the §5.7 predicate.
         assert_journal_writer_isolation(journal, uid)
         _require_v2_supervision()
+        # Pin the directory and (if present) the journal inode now, so an
+        # append cannot extend a journal renamed over the path later.
+        journal_identity = pin_journal_identity(journal)
         run_id = str(uuid.uuid4())
         journal_nonce = uuid.uuid4().hex
 
     reraise_signal = 0
     with verified_artifacts(root, envelope, public_key, min_release_seq) as artifacts:
         channels: list[tuple[str, int]] = []
+        channel_records: list[dict[str, object]] = []
         sealed_fds: list[int] = []
         try:
             for artifact in artifacts:
@@ -1171,6 +1243,14 @@ def launch(
                 else:
                     fd = artifact.handle.fileno()
                 channels.append((artifact.path, fd))
+                channel_records.append(
+                    {
+                        "path": artifact.path,
+                        "env": artifact_env_name(artifact.path),
+                        "sha256": artifact.sha256,
+                        "fd": fd,
+                    }
+                )
             child_env = build_child_environment(envelope, channels, env)
             pass_fds = tuple(fd for _, fd in channels)
             if mode == "v2":
@@ -1215,26 +1295,35 @@ def launch(
                     exec_hook = lambda: _execveat(  # noqa: E731
                         executable_fd, argv, child_env
                     )
+                launch_detail = _v2_launch_detail(
+                    envelope,
+                    channels,
+                    channel_records,
+                    argv,
+                    child_env,
+                    run_id=run_id,
+                    journal_nonce=journal_nonce,
+                    seal=seal,
+                    uid=uid,
+                    gid=gid,
+                    executable_binding=executable_binding,
+                    executable_path=executable_path,
+                    executable_candidates=executable_candidates,
+                    executable_artifact=executable_artifact_path,
+                    executable_sha256=executable_sha256,
+                    executable_fd=executable_fd,
+                )
+                launch_detail = _commit_channel_list(
+                    journal,
+                    run_id,
+                    launch_detail,
+                    child_uid=uid,
+                    journal_identity=journal_identity,
+                )
                 returncode, reraise_signal = _launch_v2(
                     journal,
                     run_id,
-                    _v2_launch_detail(
-                        envelope,
-                        channels,
-                        argv,
-                        child_env,
-                        run_id=run_id,
-                        journal_nonce=journal_nonce,
-                        seal=seal,
-                        uid=uid,
-                        gid=gid,
-                        executable_binding=executable_binding,
-                        executable_path=executable_path,
-                        executable_candidates=executable_candidates,
-                        executable_artifact=executable_artifact_path,
-                        executable_sha256=executable_sha256,
-                        executable_fd=executable_fd,
-                    ),
+                    launch_detail,
                     argv,
                     pass_fds=pass_fds,
                     child_env=child_env,
@@ -1242,6 +1331,7 @@ def launch(
                     gid=gid,
                     drop_groups=drop_groups,
                     exec_hook=exec_hook,
+                    journal_identity=journal_identity,
                 )
             else:
                 try:

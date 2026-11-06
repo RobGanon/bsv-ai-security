@@ -595,6 +595,13 @@ def verify_journal_against_anchor_chain(
     last anchor's ``end_seq`` (0 when the chain covers the whole
     journal). A non-zero tail is legitimate between anchors; it is
     reported so callers can see it, not treated as failure.
+
+    Freshness is never provided. The result therefore always reports
+    ``freshness: "unavailable"`` and ``freshness_available: False``; an
+    empty anchor list is not "current", it is a withheld freshness claim.
+    An empty list still verifies the journal chain (``_verify_audit_events``)
+    so a tampered journal cannot pass vacuously, and a missing journal is a
+    :class:`VerificationError`, not a leaked ``FileNotFoundError``.
     """
     chain = verify_anchor_chain(anchors, genesis_txid)
     per_anchor = [
@@ -613,19 +620,41 @@ def verify_journal_against_anchor_chain(
         unanchored = per_anchor[-1]["journal_events"] - chain["last_seq"]
         journal_fragment = per_anchor[-1]["journal_fragment"]
         journal_fragment_bytes = per_anchor[-1]["journal_fragment_bytes"]
+        prefix_matches_anchor = True
+        tip_inside_anchor = unanchored == 0
     else:
-        # No anchors: every complete journal event is unanchored.
+        # No anchors: verify the journal chain anyway. Empty anchors are a
+        # withheld freshness claim, never a successful current-state
+        # verification, and the journal must still be well formed.
+        journal = Path(journal)
+        if (
+            journal.is_symlink()
+            or not journal.exists()
+            or not journal.is_file()
+        ):
+            raise VerificationError(
+                "journal missing or not a regular non-symlink file"
+            )
         events, fragment = read_journal_prefix(journal)
+        _verify_audit_events(events)
         unanchored = len(events)
         journal_fragment = (
             fragment.decode("utf-8", "replace") if fragment else None
         )
         journal_fragment_bytes = len(fragment) if fragment else 0
+        prefix_matches_anchor = False
+        tip_inside_anchor = False
     return {
-        "verified": True,
+        # Chain continuity is vacuous with no anchors, but the v2
+        # current-state claim is withheld: no anchors is not "current".
+        "verified": bool(per_anchor),
         "chain": chain,
         "anchors": per_anchor,
         "chain_inclusion_verified": False,
+        "prefix_matches_anchor": prefix_matches_anchor,
+        "tip_inside_anchor": tip_inside_anchor,
+        "freshness": "unavailable",
+        "freshness_available": False,
         "unanchored_events": unanchored,
         "journal_fragment": journal_fragment,
         "journal_fragment_bytes": journal_fragment_bytes,

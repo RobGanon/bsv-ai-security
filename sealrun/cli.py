@@ -66,6 +66,11 @@ from .launcher import (
     resolve_gid,
     resolve_uid,
 )
+from .v2_anchor import (
+    VERDICT_PREFIX,
+    VERDICT_TIP,
+    verify_v2_anchor_chain,
+)
 from .proof_bundle import create_bundle, verify_bundle
 from . import __version__ as _SEALRUN_VERSION
 
@@ -232,6 +237,12 @@ def main(argv=None):
     p.add_argument("--anchor-record", type=Path, default=None,
                    help="publisher anchor-record JSON; its broadcast records "
                    "are chain-checked (pending/superseded drafts are not chain members)")
+    p.add_argument("--v2", action="store_true",
+                   help="require the full anchor-only acceptance predicate "
+                   "(payload binding + anchor signature + exactly one of "
+                   "--spv/--bump-file/--beef-file + header chain to a pinned "
+                   "checkpoint) and print the two named verdicts. No signed "
+                   "pins are used.")
     p.add_argument("--journal", type=Path, default=None,
                    help="if given, also verify the journal against every anchor "
                    "in the chain (head hash + binding re-derivation)")
@@ -569,6 +580,136 @@ def main(argv=None):
                                 "txid": record["txid"],
                             }
                         )
+            if args.v2:
+                # Anchor-only acceptance: no signed pin, no pin_seq, no
+                # pin store. Every authenticator is required; omission is
+                # a refusal, not a weaker acceptance.
+                if args.journal is None:
+                    raise VerificationError(
+                        "--v2 requires --journal to verify the anchored "
+                        "journal prefix and identity"
+                    )
+                if not args.anchor_sig:
+                    raise VerificationError(
+                        "--v2 requires --anchor-sig and --anchor-pubkey: "
+                        "the anchor transaction signature is part of the "
+                        "acceptance predicate"
+                    )
+                pubkey = args.anchor_pubkey or ""
+                if (
+                    len(pubkey) != 66
+                    or pubkey[:2] not in ("02", "03")
+                    or not all(c in "0123456789abcdefABCDEF" for c in pubkey)
+                ):
+                    raise VerificationError(
+                        "--anchor-sig requires --anchor-pubkey as 66-char "
+                        "compressed pubkey hex (02/03 prefix)"
+                    )
+                inclusion_sources = (
+                    bool(args.spv)
+                    + (args.bump_file is not None)
+                    + (args.beef_file is not None)
+                )
+                if inclusion_sources != 1:
+                    raise VerificationError(
+                        "--v2 requires exactly one inclusion source: --spv, "
+                        "--bump-file, or --beef-file (ancestry-only BEEF "
+                        "does not count as inclusion)"
+                    )
+                if not args.header_chain:
+                    raise VerificationError(
+                        "--v2 requires --header-chain with a pinned "
+                        "--checkpoint-hash and --checkpoint-height"
+                    )
+                checkpoint_hash = args.checkpoint_hash or ""
+                if (
+                    len(checkpoint_hash) != 64
+                    or not all(
+                        c in "0123456789abcdefABCDEF" for c in checkpoint_hash
+                    )
+                    or args.checkpoint_height is None
+                    or args.checkpoint_height < 0
+                ):
+                    raise VerificationError(
+                        "--header-chain requires --checkpoint-hash as "
+                        "64-char block hash hex and --checkpoint-height "
+                        "as a non-negative integer"
+                    )
+                manifests = None
+                public_key = None
+                if args.manifest is not None or args.public_key is not None:
+                    if args.manifest is None or args.public_key is None:
+                        raise VerificationError(
+                            "anchor-chain-verify requires --manifest and "
+                            "--public-key together to re-check acceptance binding"
+                        )
+                    manifests = [_read_json(path) for path in args.manifest]
+                    public_key = load_public_key(args.public_key)
+                fetcher = WoCBlockFetcher(base_url=args.woc_base)
+                bumps = None
+                beef = None
+                if args.spv:
+                    inclusion = "spv"
+                    inclusion_verifier = SPVVerifier(fetcher)
+                elif args.bump_file is not None:
+                    inclusion = "bump"
+                    bumps = _read_json(args.bump_file)
+                    if not isinstance(bumps, dict):
+                        raise VerificationError(
+                            "--bump-file JSON must map txid -> BUMP"
+                        )
+                    inclusion_verifier = BUMPVerifier(fetcher)
+                else:
+                    inclusion = "beef"
+                    beef = _read_beef(args.beef_file)
+                    inclusion_verifier = BeefVerifier(fetcher)
+                result = verify_v2_anchor_chain(
+                    args.journal,
+                    anchors,
+                    args.genesis_txid,
+                    payload_fetcher=fetcher,
+                    signature_verifier=AnchorSignatureVerifier(fetcher, pubkey),
+                    inclusion=inclusion,
+                    inclusion_verifier=inclusion_verifier,
+                    header_verifier=HeaderChainVerifier(
+                        fetcher,
+                        checkpoint_hash=checkpoint_hash,
+                        checkpoint_height=args.checkpoint_height,
+                        daa=DAAParams.mainnet() if args.daa else None,
+                    ),
+                    bumps=bumps,
+                    beef=beef,
+                    manifests=manifests,
+                    public_key=public_key,
+                )
+                print(json.dumps(result, indent=2, sort_keys=True))
+                acceptance = result["acceptance"]
+                print(
+                    f"{VERDICT_PREFIX}: "
+                    f"{'yes' if acceptance['prefix_matches_anchor'] else 'no'}"
+                )
+                print(
+                    f"{VERDICT_TIP}: "
+                    f"{'yes' if acceptance['tip_inside_anchor'] else 'no'}"
+                )
+                print(
+                    "freshness: unavailable (no tip service; a shorter "
+                    "anchor set is not detected)"
+                )
+                if acceptance["authenticated_prefix_end"] is not None:
+                    print(
+                        "authenticated prefix end (seq): "
+                        f"{acceptance['authenticated_prefix_end']}"
+                    )
+                for reason in acceptance["reasons"]:
+                    print(f"  WITHHELD: {reason}")
+                if not acceptance["accepted"]:
+                    print(
+                        "ANCHOR AUTHENTICATION WITHHELD: the full anchor-only "
+                        "acceptance predicate did not hold."
+                    )
+                    return 1
+                return 0
             if args.journal is not None:
                 manifests = None
                 public_key = None

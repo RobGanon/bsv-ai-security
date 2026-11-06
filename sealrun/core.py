@@ -1398,6 +1398,61 @@ def verify_audit_prefix(journal: Path) -> dict:
     }
 
 
+def journal_genesis_identity(events: Sequence[dict]) -> dict:
+    """Return the v2 journal identity: genesis hash plus its genesis nonce.
+
+    A bare genesis hash is not an identity (frozen design §6.5): journal
+    events carry no timestamp, so two journals can share a repeatable first
+    event. V2 therefore requires the first v2 event to carry a unique
+    ``journal_nonce``; the identity hashes the genesis event hash together
+    with that nonce, never the bare hash. The first event may be a legacy
+    event, so the nonce is taken from the first v2 event in the journal.
+    """
+    _verify_audit_events(list(events))
+    if not events:
+        raise VerificationError(
+            "cannot derive a v2 journal identity from an empty journal"
+        )
+    genesis_hash = str(events[0]["event_hash"]).lower()
+    for event in events:
+        if event.get("event_type") not in V2_EVENT_TYPES:
+            continue
+        detail = _run_event_detail(event)
+        nonce = detail.get("journal_nonce")
+        if nonce is None:
+            raise VerificationError(
+                "the first v2 event has no journal_nonce; a v2 journal "
+                "identity requires a unique genesis nonce"
+            )
+        nonce = _v2_nonce(nonce)
+        identity = hashlib.sha256(
+            canonical_json_bytes(
+                {"genesis_hash": genesis_hash, "genesis_nonce": nonce}
+            )
+        ).hexdigest()
+        return {
+            "identity": identity,
+            "genesis_hash": genesis_hash,
+            "genesis_event_seq": events[0]["seq"],
+            "genesis_nonce": nonce,
+            "genesis_nonce_seq": event["seq"],
+            "journal_events": len(events),
+        }
+    raise VerificationError(
+        "journal has no v2 event with a genesis nonce; a bare genesis hash "
+        "is not a v2 journal identity"
+    )
+
+
+def journal_genesis_identity_for_path(journal: Path) -> dict:
+    """Read and verify a journal, then return its v2 genesis identity."""
+    journal = Path(journal)
+    if journal.is_symlink() or not journal.exists() or not journal.is_file():
+        raise VerificationError("journal missing or not a regular non-symlink file")
+    events, _fragment = read_journal_prefix(journal)
+    return journal_genesis_identity(events)
+
+
 def _append_audit_event(
     journal: Path,
     event_type: str,

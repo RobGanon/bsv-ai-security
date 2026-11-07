@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 import sealrun.launcher as launcher
+from sealrun.checkpoint_cache import append_checkpoint_cache
 from sealrun.cli import main
 from sealrun.core import (
     V2_FINISH_EVENT_TYPE,
@@ -35,6 +36,7 @@ from sealrun.core import (
     create_manifest,
     generate_keypair,
     load_private_key,
+    read_journal_prefix,
     sign_manifest,
     verify_audit_journal,
 )
@@ -96,11 +98,23 @@ class Bundle:
         self.manifest = base / "manifest.signed.json"
         self.manifest.write_text(json.dumps(self.envelope), encoding="utf-8")
         self.journal = base / "audit.jsonl"
+        self.checkpoint = base / "checkpoint.jsonl"
         self.uid = uid
         self.gid = gid
+        self._write_checkpoint()
+
+    def _write_checkpoint(self) -> None:
+        events, _fragment = read_journal_prefix(self.journal)
+        append_checkpoint_cache(
+            self.checkpoint,
+            release_seq=0,
+            anchor_end_seq=len(events),
+            head_hash=events[-1]["event_hash"] if events else "0" * 64,
+        )
 
     def run(self, command, **kwargs):
         kwargs.setdefault("env", {"PATH": "/usr/bin:/bin"})
+        self._write_checkpoint()
         return launch(
             self.root,
             self.envelope,
@@ -110,6 +124,8 @@ class Bundle:
             journal=self.journal,
             uid=self.uid,
             gid=self.gid,
+            min_release_seq=0,
+            checkpoint_cache=self.checkpoint,
             **kwargs,
         )
 
@@ -256,6 +272,8 @@ def test_cli_verified_binding_launches_the_artifact_fd(make_bundle):
         "--public-key", str(bundle.public),
         "--mode", "v2",
         "--journal", str(bundle.journal),
+        "--min-release-seq", "0",
+        "--checkpoint-cache", str(bundle.checkpoint),
         "--uid", str(bundle.uid),
         "--gid", str(bundle.gid),
         "--executable-binding", "verified",

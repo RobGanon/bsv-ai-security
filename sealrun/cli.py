@@ -145,7 +145,11 @@ def main(argv=None):
     p.add_argument("--manifest", required=True, type=Path)
     p.add_argument("--public-key", required=True, type=Path)
     p.add_argument("--min-release-seq", type=int, default=None,
-                   help="reject manifests older than this release sequence (rollback protection)")
+                   help="reject manifests older than this release sequence (rollback protection); "
+                        "required in v2 mode")
+    p.add_argument("--checkpoint-cache", type=Path, default=None,
+                   help="v2 only: append-only anchored release checkpoint cache; "
+                        "required in v2 mode (a missing cache is not checkpoint 0)")
     p.add_argument("--mode", choices=("v1", "v2"), default="v1",
                    help="launch mode (default: v1, unchanged); v2 is the "
                         "explicit per-launch opt-in that writes strict journal events")
@@ -413,6 +417,7 @@ def main(argv=None):
                 load_public_key(args.public_key),
                 args.command_argv,
                 min_release_seq=args.min_release_seq,
+                checkpoint_cache=args.checkpoint_cache,
                 seal=args.seal,
                 uid=resolve_uid(args.uid),
                 gid=resolve_gid(args.gid),

@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 import sealrun.launcher as launcher
+from sealrun.checkpoint_cache import append_checkpoint_cache
 from sealrun.core import (
     V2_FINISH_EVENT_TYPE,
     V2_LAUNCH_EVENT_TYPE,
@@ -35,6 +36,7 @@ from sealrun.core import (
     generate_keypair,
     load_private_key,
     load_public_key,
+    read_journal_prefix,
     sign_manifest,
     verify_audit_journal,
 )
@@ -230,11 +232,21 @@ class V2Harness:
         self.uid, self.gid = child_ids
         self.root, self.manifest, self.public, self.envelope = write_bundle(tmp_path)
         self.journal = tmp_path / "audit.jsonl"
+        self.checkpoint = tmp_path / "checkpoint.jsonl"
         self.ready = tmp_path / "ready"
         self.proc: subprocess.Popen | None = None
         self.master: int | None = None
         self._pty_output: list[bytes] = []
         self._pids: list[int] = []
+
+    def _write_checkpoint(self) -> None:
+        events, _fragment = read_journal_prefix(self.journal)
+        append_checkpoint_cache(
+            self.checkpoint,
+            release_seq=0,
+            anchor_end_seq=len(events),
+            head_hash=events[-1]["event_hash"] if events else "0" * 64,
+        )
 
     def child(self, mode: str, *args) -> list[str]:
         script = self.tmp_path / "child.py"
@@ -244,6 +256,7 @@ class V2Harness:
     def start(self, *command, timeout=0.5, hook="", ignore_signals="", pty=False):
         driver = self.tmp_path / "driver.py"
         driver.write_text(DRIVER, encoding="utf-8")
+        self._write_checkpoint()
         argv = [
             sys.executable, str(driver), "launch",
             "--root", str(self.root),
@@ -251,6 +264,8 @@ class V2Harness:
             "--public-key", str(self.public),
             "--mode", "v2",
             "--journal", str(self.journal),
+            "--min-release-seq", "0",
+            "--checkpoint-cache", str(self.checkpoint),
             "--uid", str(self.uid),
             "--gid", str(self.gid),
             "--", *command,
@@ -360,10 +375,12 @@ def in_process(tmp_path, child_ids, monkeypatch):
     harness = V2Harness(tmp_path, child_ids)
 
     def run(mode, *args):
+        harness._write_checkpoint()
         return launch(
             harness.root, harness.envelope, load_public_key(harness.public),
             harness.child(mode, *args),
             mode="v2", journal=harness.journal, uid=harness.uid, gid=harness.gid,
+            min_release_seq=0, checkpoint_cache=harness.checkpoint,
         )
 
     harness.run = run

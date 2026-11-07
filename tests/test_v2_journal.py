@@ -17,6 +17,7 @@ import pytest
 
 import sealrun.core as core
 import sealrun.launcher as launcher
+from sealrun.checkpoint_cache import append_checkpoint_cache
 from sealrun.cli import main
 from sealrun.core import (
     V2_FINISH_EVENT_TYPE,
@@ -112,10 +113,21 @@ class Bundle:
         )
         self.envelope = sign_manifest(payload, self.private)
         self.journal = base / "audit.jsonl"
+        self.checkpoint = base / "checkpoint.jsonl"
         self.uid = uid
         self.gid = gid
 
+    def _write_checkpoint(self) -> None:
+        events, _fragment = read_journal_prefix(self.journal)
+        append_checkpoint_cache(
+            self.checkpoint,
+            release_seq=0,
+            anchor_end_seq=len(events),
+            head_hash=events[-1]["event_hash"] if events else "0" * 64,
+        )
+
     def run(self, command=("true",), **kwargs):
+        self._write_checkpoint()
         return launch(
             self.root,
             self.envelope,
@@ -125,6 +137,8 @@ class Bundle:
             journal=self.journal,
             uid=self.uid,
             gid=self.gid,
+            min_release_seq=0,
+            checkpoint_cache=self.checkpoint,
             env={"PATH": "/usr/bin:/bin"},
             **kwargs,
         )

@@ -84,6 +84,11 @@ from pathlib import Path
 from subprocess import SubprocessError
 from typing import Callable, Mapping, NamedTuple, NoReturn, Sequence
 
+from .checkpoint_cache import (
+    read_checkpoint_cache,
+    verify_checkpoint_against_journal,
+)
+from .checkpoint_seq import validate_checkpoint_seq
 from .core import (
     MAX_EVENT_DETAIL_BYTES,
     V2_FINISH_EVENT_TYPE,
@@ -684,6 +689,76 @@ def _record_launch_failed(
         ) from (original or exc)
 
 
+def _enforce_v2_rollback(
+    journal: Path,
+    run_id: str,
+    envelope: dict,
+    min_release_seq: int | None,
+    checkpoint_cache: Path | None,
+    *,
+    journal_identity: JournalIdentity | None,
+) -> int:
+    """Apply the v2 anchored-checkpoint rollback rule (§8).
+
+    Returns the effective minimum sequence handed to verification. Every
+    refusal is recorded as ``v2_launch_failed`` (stage ``launch``) before
+    the exception escapes, so a refused launch never runs the child and
+    leaves a durable explanation. A missing cache is never read as 0.
+    """
+
+    def refuse(reason: str, original: BaseException | None = None) -> NoReturn:
+        _record_launch_failed(
+            journal,
+            run_id,
+            "launch",
+            reason,
+            original,
+            journal_identity=journal_identity,
+        )
+        raise VerificationError(reason) from (original or None)
+
+    if min_release_seq is None:
+        refuse(
+            "v2 launch requires --min-release-seq: an explicit pinned "
+            "minimum is mandatory in v2 mode"
+        )
+    try:
+        minimum = validate_checkpoint_seq(min_release_seq)
+    except ValueError as exc:
+        refuse(f"invalid --min-release-seq: {exc}", exc)
+
+    if checkpoint_cache is None:
+        refuse(
+            "v2 launch requires --checkpoint-cache: the anchored release "
+            "checkpoint is mandatory, and a missing cache is not checkpoint 0"
+        )
+    try:
+        record = read_checkpoint_cache(checkpoint_cache)
+        checkpoint = verify_checkpoint_against_journal(record, journal)
+    except VerificationError as exc:
+        refuse(f"rollback check refused the launch: {exc}", exc)
+
+    if minimum < checkpoint:
+        refuse(
+            f"rollback rejected: --min-release-seq {minimum} is below the "
+            f"anchored release checkpoint {checkpoint}"
+        )
+
+    payload = envelope.get("payload") if isinstance(envelope, dict) else None
+    manifest_seq_raw = payload.get("release_seq") if isinstance(payload, dict) else None
+    try:
+        manifest_seq = validate_checkpoint_seq(manifest_seq_raw)
+    except ValueError as exc:
+        refuse(f"manifest release_seq is invalid: {exc}", exc)
+    if manifest_seq < checkpoint:
+        refuse(
+            f"rollback rejected: manifest release_seq {manifest_seq} is "
+            f"older than the anchored release checkpoint {checkpoint}"
+        )
+
+    return max(minimum, checkpoint)
+
+
 def _signal_name(signum: int) -> str:
     try:
         return signal.Signals(signum).name
@@ -1106,6 +1181,7 @@ def launch(
     command: Sequence[str],
     *,
     min_release_seq: int | None = None,
+    checkpoint_cache: Path | None = None,
     seal: bool = False,
     uid: int | None = None,
     gid: int | None = None,
@@ -1130,6 +1206,16 @@ def launch(
     child. ``require_v2`` makes a v2-only deployment refuse a v1 invocation
     at the point of invocation, rather than trying to infer compliance
     from records later.
+
+    A v2 launch also requires both ``min_release_seq`` and
+    ``checkpoint_cache`` (§8, freeze decision 4). ``checkpoint_cache`` is
+    the append-only anchored checkpoint store read by
+    :func:`sealrun.checkpoint_cache.read_checkpoint_cache`; the launcher
+    binds its anchored prefix to the journal and requires the manifest's
+    sequence to be at least the anchored ``release_seq``. Omitting either
+    value, or supplying ``min_release_seq`` below the anchored checkpoint,
+    refuses the launch and records ``v2_launch_failed`` without running the
+    child. A missing cache is never treated as checkpoint 0.
 
     ``executable_binding`` is ``"record-only"`` by default (§5.3): the v2
     launch record names the executable as given, the effective ``PATH``,
@@ -1183,6 +1269,11 @@ def launch(
                 "--journal is only valid with --mode v2; v1 launches write "
                 "no journal record"
             )
+        if checkpoint_cache is not None:
+            raise VerificationError(
+                "--checkpoint-cache is only valid with --mode v2; v1 "
+                "launches consume no anchored release checkpoint"
+            )
     else:
         if journal is None:
             raise VerificationError(
@@ -1215,6 +1306,7 @@ def launch(
     run_id: str | None = None
     journal_nonce: str | None = None
     journal_identity: JournalIdentity | None = None
+    effective_min_release_seq = min_release_seq
     if mode == "v2":
         # Refuse an unisolated v2 invocation before any verification work:
         # a v2 run-state claim is unavailable without the §5.7 predicate.
@@ -1225,9 +1317,20 @@ def launch(
         journal_identity = pin_journal_identity(journal)
         run_id = str(uuid.uuid4())
         journal_nonce = uuid.uuid4().hex
+        assert journal is not None
+        effective_min_release_seq = _enforce_v2_rollback(
+            journal,
+            run_id,
+            envelope,
+            min_release_seq,
+            checkpoint_cache,
+            journal_identity=journal_identity,
+        )
 
     reraise_signal = 0
-    with verified_artifacts(root, envelope, public_key, min_release_seq) as artifacts:
+    with verified_artifacts(
+        root, envelope, public_key, effective_min_release_seq
+    ) as artifacts:
         channels: list[tuple[str, int]] = []
         channel_records: list[dict[str, object]] = []
         sealed_fds: list[int] = []

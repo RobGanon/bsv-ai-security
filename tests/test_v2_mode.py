@@ -23,6 +23,7 @@ from sealrun.bsv import PrivKey
 
 import sealrun.core as core
 import sealrun.launcher as launcher
+from sealrun.checkpoint_cache import append_checkpoint_cache
 from sealrun.cli import main
 from sealrun.core import (
     V2_FINISH_EVENT_TYPE,
@@ -36,6 +37,7 @@ from sealrun.core import (
     generate_keypair,
     load_private_key,
     manifest_hash,
+    read_journal_prefix,
     sign_manifest,
     verify_audit_journal,
 )
@@ -110,6 +112,19 @@ def bypass_isolation(monkeypatch) -> None:
     monkeypatch.setattr(
         launcher, "assert_journal_writer_isolation", lambda *args, **kwargs: None
     )
+
+
+def write_checkpoint(tmp_path: Path, journal: Path, release_seq: int = 0) -> Path:
+    """Create an anchored checkpoint cache matching the journal's current prefix."""
+    path = tmp_path / "checkpoint.jsonl"
+    events, _fragment = read_journal_prefix(journal)
+    append_checkpoint_cache(
+        path,
+        release_seq=release_seq,
+        anchor_end_seq=len(events),
+        head_hash=events[-1]["event_hash"] if events else "0" * 64,
+    )
+    return path
 
 
 def read_events(journal: Path) -> list[dict]:
@@ -263,6 +278,7 @@ def test_v2_mode_writes_launch_and_finish(tmp_path, monkeypatch):
     rc = launch(
         root, envelope, private.pubkey_compressed(), ["python3", "child.py"],
         mode="v2", journal=journal, uid=12345, gid=12345,
+        min_release_seq=0, checkpoint_cache=write_checkpoint(tmp_path, journal),
     )
 
     assert rc == 7
@@ -308,6 +324,7 @@ def test_v2_launch_event_is_durable_before_exec(tmp_path, monkeypatch):
     rc = launch(
         root, envelope, private.pubkey_compressed(), ["true"],
         mode="v2", journal=journal, uid=12345, gid=12345,
+        min_release_seq=0, checkpoint_cache=write_checkpoint(tmp_path, journal),
     )
     assert rc == 0
     assert observed["events_at_exec"] == [V2_LAUNCH_EVENT_TYPE]
@@ -473,6 +490,7 @@ def test_launch_failed_event_is_written_and_reason_preserved(tmp_path, monkeypat
         launch(
             root, envelope, private.pubkey_compressed(), ["missing-binary"],
             mode="v2", journal=journal, uid=12345, gid=12345,
+            min_release_seq=0, checkpoint_cache=write_checkpoint(tmp_path, journal),
         )
 
     events = read_events(journal)

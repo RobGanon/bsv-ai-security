@@ -66,6 +66,7 @@ from .launcher import (
     resolve_gid,
     resolve_uid,
 )
+from .checkpoint_cache import bootstrap_checkpoint
 from .v2_anchor import (
     VERDICT_PREFIX,
     VERDICT_TIP,
@@ -302,6 +303,67 @@ def main(argv=None):
     p.add_argument("--woc-base", default=WOC_TTN_BASE,
                    help="WhatsOnChain base URL for --spv / --anchor-sig "
                    "chain data (default: Teratestnet)")
+
+    p = sub.add_parser(
+        "bootstrap",
+        aliases=("checkpoint-bootstrap",),
+        help="deployment-time: verify the anchor chain online and record "
+             "its release_seq in the isolated checkpoint cache",
+    )
+    p.add_argument("--journal", required=True, type=Path)
+    p.add_argument("--checkpoint-cache", required=True, type=Path,
+                   help="append-only checkpoint cache to write (its directory "
+                        "must already satisfy the §5.7 isolation rules)")
+    p.add_argument("--genesis-txid", required=True,
+                   help="trusted genesis anchor txid from operator-pinned "
+                        "config; never inferred from the anchors being checked")
+    p.add_argument("--anchor", action="append", type=Path, default=None,
+                   help="JSON file with payload_hex + txid for one anchor; "
+                        "repeatable, in chain order")
+    p.add_argument("--anchor-record", type=Path, default=None,
+                   help="publisher anchor-record JSON; its broadcast records "
+                        "are chain-checked")
+    p.add_argument("--manifest", action="append", type=Path, default=None,
+                   help="signed manifest envelope JSON for binding "
+                        "re-verification; repeatable; required when the "
+                        "anchored prefix contains acceptances")
+    p.add_argument("--public-key", type=Path, default=None,
+                   help="trusted manifest-signing public key; required with "
+                        "--manifest when the anchored prefix contains "
+                        "acceptances")
+    p.add_argument("--spv", action="store_true",
+                   help="verify each anchor tx is inside its claimed block "
+                        "via the --woc-base endpoint (exactly one inclusion "
+                        "source is required)")
+    p.add_argument("--bump-file", type=Path, default=None,
+                   help="JSON file mapping txid -> BUMP (exactly one "
+                        "inclusion source is required)")
+    p.add_argument("--beef-file", type=Path, default=None,
+                   help="BEEF envelope file (exactly one inclusion source is "
+                        "required; ancestry-only BEEF does not count)")
+    p.add_argument("--anchor-sig", action="store_true",
+                   help="accepted for parity with anchor-chain-verify; "
+                        "bootstrap always verifies the anchor signature")
+    p.add_argument("--anchor-pubkey", default=None,
+                   help="trusted anchor compressed pubkey hex (66 chars, "
+                        "02/03 prefix); required")
+    p.add_argument("--header-chain", action="store_true",
+                   help="accepted for parity with anchor-chain-verify; "
+                        "bootstrap always verifies the header chain")
+    p.add_argument("--checkpoint-hash", default=None,
+                   help="trusted checkpoint block hash (64 hex chars); "
+                        "required")
+    p.add_argument("--checkpoint-height", type=int, default=None,
+                   help="height of the trusted checkpoint header; required")
+    p.add_argument("--daa", choices=["mainnet"], default=None,
+                   help="also validate the difficulty schedule above the "
+                        "checkpoint against mainnet cash-DAA parameters")
+    p.add_argument("--woc-base", default=WOC_TTN_BASE,
+                   help="WhatsOnChain base URL (default: Teratestnet)")
+    p.add_argument("--uid", "--child-uid", dest="uid", default=None,
+                   help="uid the launcher will drop the child to; required so "
+                        "the cache can be checked against the §5.7 isolation "
+                        "rules (a name or numeric id)")
 
     p = sub.add_parser(
         "publish",
@@ -938,6 +1000,142 @@ def main(argv=None):
                 failed = failed or not result.get("header_chain_verified")
             if failed:
                 return 1
+        elif args.command in ("bootstrap", "checkpoint-bootstrap"):
+            anchors: list[dict] = []
+            for path in args.anchor or []:
+                entry = _read_json(path)
+                if (
+                    not isinstance(entry, dict)
+                    or not isinstance(entry.get("payload_hex"), str)
+                    or not isinstance(entry.get("txid"), str)
+                ):
+                    raise VerificationError(
+                        "anchor JSON must contain payload_hex and txid"
+                    )
+                anchors.append(
+                    {"payload_hex": entry["payload_hex"], "txid": entry["txid"]}
+                )
+            if args.anchor_record is not None:
+                store = _read_json(args.anchor_record)
+                records = store.get("anchors") if isinstance(store, dict) else None
+                if not isinstance(records, list):
+                    raise VerificationError(
+                        "anchor-record JSON must contain an anchors list"
+                    )
+                for record in records:
+                    if isinstance(record, dict) and record.get("status") == "broadcast":
+                        anchors.append(
+                            {
+                                "payload_hex": record["payload_hex"],
+                                "txid": record["txid"],
+                            }
+                        )
+            if not anchors:
+                raise VerificationError(
+                    "bootstrap requires at least one --anchor or a broadcast "
+                    "record in --anchor-record"
+                )
+            inclusion_sources = (
+                bool(args.spv)
+                + (args.bump_file is not None)
+                + (args.beef_file is not None)
+            )
+            if inclusion_sources != 1:
+                raise VerificationError(
+                    "bootstrap requires exactly one inclusion source: --spv, "
+                    "--bump-file, or --beef-file (ancestry-only BEEF does not "
+                    "count as inclusion)"
+                )
+            pubkey = args.anchor_pubkey or ""
+            if (
+                len(pubkey) != 66
+                or pubkey[:2] not in ("02", "03")
+                or not all(c in "0123456789abcdefABCDEF" for c in pubkey)
+            ):
+                raise VerificationError(
+                    "bootstrap requires --anchor-pubkey as 66-char "
+                    "compressed pubkey hex (02/03 prefix)"
+                )
+            checkpoint_hash = args.checkpoint_hash or ""
+            if (
+                len(checkpoint_hash) != 64
+                or not all(
+                    c in "0123456789abcdefABCDEF" for c in checkpoint_hash
+                )
+                or args.checkpoint_height is None
+                or args.checkpoint_height < 0
+            ):
+                raise VerificationError(
+                    "bootstrap requires --checkpoint-hash as 64-char block "
+                    "hash hex and --checkpoint-height as a non-negative integer"
+                )
+            if (args.manifest is None) != (args.public_key is None):
+                raise VerificationError(
+                    "bootstrap requires --manifest and --public-key together "
+                    "to re-check acceptance binding"
+                )
+            manifests = None
+            public_key = None
+            if args.manifest is not None:
+                manifests = [_read_json(path) for path in args.manifest]
+                public_key = load_public_key(args.public_key)
+            child_uid = resolve_uid(args.uid)
+            if child_uid is None:
+                raise VerificationError(
+                    "bootstrap requires --uid (or --child-uid): the cache must "
+                    "be isolated from the uid the launcher will drop to"
+                )
+            fetcher = WoCBlockFetcher(base_url=args.woc_base)
+            bumps = None
+            beef = None
+            if args.spv:
+                inclusion = "spv"
+                inclusion_verifier = SPVVerifier(fetcher)
+            elif args.bump_file is not None:
+                inclusion = "bump"
+                bumps = _read_json(args.bump_file)
+                if not isinstance(bumps, dict):
+                    raise VerificationError(
+                        "--bump-file JSON must map txid -> BUMP"
+                    )
+                inclusion_verifier = BUMPVerifier(fetcher)
+            else:
+                inclusion = "beef"
+                beef = _read_beef(args.beef_file)
+                inclusion_verifier = BeefVerifier(fetcher)
+            result = bootstrap_checkpoint(
+                args.journal,
+                args.checkpoint_cache,
+                anchors,
+                args.genesis_txid,
+                payload_fetcher=fetcher,
+                signature_verifier=AnchorSignatureVerifier(fetcher, pubkey),
+                inclusion=inclusion,
+                inclusion_verifier=inclusion_verifier,
+                header_verifier=HeaderChainVerifier(
+                    fetcher,
+                    checkpoint_hash=checkpoint_hash,
+                    checkpoint_height=args.checkpoint_height,
+                    daa=DAAParams.mainnet() if args.daa else None,
+                ),
+                bumps=bumps,
+                beef=beef,
+                manifests=manifests,
+                public_key=public_key,
+                child_uid=child_uid,
+            )
+            record = result["checkpoint"]
+            print(json.dumps(result, indent=2, sort_keys=True))
+            print(
+                "CHECKPOINT BOOTSTRAPPED: release_seq="
+                f"{record['release_seq']} anchor_end_seq="
+                f"{record['anchor_end_seq']} checkpoint_seq="
+                f"{record['checkpoint_seq']}"
+            )
+            print(
+                "Offline launches now read only this cache; no network call "
+                "is made at launch time."
+            )
         elif args.command == "proof-bundle-create":
             try:
                 summary = create_bundle(

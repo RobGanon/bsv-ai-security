@@ -2,8 +2,10 @@
 
 A v2 launch must be tied to the release checkpoint the operator has
 already anchored, not to a value the launcher invents. The cache is an
-append-only JSONL file of checkpoint snapshots produced by the anchoring
-workflow:
+append-only JSONL file of checkpoint snapshots produced by the
+deployment-time :func:`bootstrap_checkpoint` workflow (after the anchor
+chain passes the item 8 anchor-only predicate while the network is
+available):
 
     {"anchor_end_seq": 42, "checkpoint_seq": 1, "head_hash": "<64 hex>",
      "release_seq": 10}
@@ -38,8 +40,9 @@ import os
 import re
 import stat
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
+from . import core as _core
 from .checkpoint_seq import validate_checkpoint_seq
 from .core import (
     MANIFEST_ACCEPTED_EVENT_TYPE,
@@ -262,6 +265,270 @@ def verify_checkpoint_against_journal(
             f"({derived}) inside the anchored prefix"
         )
     return record["release_seq"]
+
+
+def assert_checkpoint_cache_isolation(
+    path: Path,
+    child_uid: int | None,
+    *,
+    launcher_euid: int | None = None,
+) -> None:
+    """Refuse a checkpoint cache the dropped child could write (§5.7).
+
+    The cache is a second trust store, so it follows the same placement
+    rules as the journal: a privileged deployment, an explicit non-root
+    child uid, an existing parent directory, no path owned by the child,
+    no group/other write bit, no ACLs, and an ownership-enforcing local
+    filesystem. A missing cache file is allowed (bootstrap creates it),
+    but its directory must already be isolated.
+    """
+    if launcher_euid is None:
+        launcher_euid = os.geteuid()
+    if launcher_euid != 0:
+        raise VerificationError(
+            "checkpoint cache isolation requires a privileged launcher "
+            "(euid 0) that can drop the child to a different uid"
+        )
+    if child_uid is None:
+        raise VerificationError(
+            "checkpoint cache isolation requires --uid so the child runs "
+            "as a different user than the cache owner"
+        )
+    if isinstance(child_uid, bool) or not isinstance(child_uid, int):
+        raise VerificationError("checkpoint cache child uid must be an integer")
+    if child_uid == 0:
+        raise VerificationError(
+            "checkpoint cache isolation refuses a child uid of 0"
+        )
+
+    path = Path(path)
+    parent = path.parent
+    if not parent.exists():
+        raise VerificationError(
+            f"checkpoint cache directory {parent} must already exist; the "
+            "bootstrap will not create an unisolated parent"
+        )
+    _core._check_isolated_path(
+        parent,
+        child_uid,
+        role="checkpoint cache directory",
+        require_directory=True,
+    )
+    for ancestor in _core._ancestor_directories(parent.parent):
+        _core._check_isolated_path(
+            ancestor,
+            child_uid,
+            role="checkpoint cache ancestor",
+            require_directory=True,
+        )
+    if path.exists() or path.is_symlink():
+        _core._check_isolated_path(
+            path,
+            child_uid,
+            role="checkpoint cache file",
+            require_directory=False,
+        )
+
+    filesystem = _core._filesystem_type(parent)
+    if filesystem not in _core.OWNERSHIP_ENFORCING_FILESYSTEMS:
+        raise VerificationError(
+            f"checkpoint cache directory {parent} is on filesystem type "
+            f"{filesystem!r}; ownership-enforcing local filesystems only "
+            "(NFS/FUSE/unknown refuse)"
+        )
+
+
+def _has_manifest_acceptance(
+    events: Sequence[dict], end_seq: int
+) -> bool:
+    return any(
+        event.get("event_type") == MANIFEST_ACCEPTED_EVENT_TYPE
+        for event in events[:end_seq]
+    )
+
+
+def bootstrap_checkpoint(
+    journal: Path,
+    cache_path: Path,
+    anchors: Any,
+    genesis_txid: Any,
+    *,
+    payload_fetcher: Any,
+    signature_verifier: Any,
+    inclusion: str,
+    inclusion_verifier: Any,
+    header_verifier: Any,
+    bumps: Mapping[str, Any] | None = None,
+    beef: Any = None,
+    manifests: Any = None,
+    public_key: Any = None,
+    expected_journal_identity: str | None = None,
+    terminal_seq: int | None = None,
+    child_uid: int | None,
+    launcher_euid: int | None = None,
+    require_isolation: bool = True,
+) -> dict[str, Any]:
+    """Verify an anchor chain online and record its checkpoint offline.
+
+    This is the deployment-time half of freeze decision 4. The anchor
+    chain is authenticated with the item 8 anchor-only predicate
+    (:func:`sealrun.v2_anchor.verify_v2_anchor_chain`); only when the
+    full predicate accepts does the anchored prefix's bound
+    ``manifest_accepted`` release sequence become a cache record. Launch
+    and finish events never advance the checkpoint, and an anchored
+    prefix that contains an acceptance which cannot be re-derived from a
+    signed manifest is refused rather than counted.
+
+    The cache record is written with
+    :func:`append_checkpoint_cache`, so the cache stays append-only with
+    a contiguous ``checkpoint_seq`` and non-decreasing ``release_seq`` /
+    ``anchor_end_seq``. When ``require_isolation`` is true (the default)
+    the cache directory and file are checked against the §5.7 rules
+    before and after the append.
+    """
+    journal = Path(journal)
+    cache_path = Path(cache_path)
+    if require_isolation:
+        assert_checkpoint_cache_isolation(
+            cache_path, child_uid, launcher_euid=launcher_euid
+        )
+
+    # Imported lazily so the cache reader stays importable without the
+    # network-facing anchor verifier stack.
+    from .v2_anchor import verify_v2_anchor_chain
+
+    result = verify_v2_anchor_chain(
+        journal,
+        anchors,
+        genesis_txid,
+        payload_fetcher=payload_fetcher,
+        signature_verifier=signature_verifier,
+        inclusion=inclusion,
+        inclusion_verifier=inclusion_verifier,
+        header_verifier=header_verifier,
+        bumps=bumps,
+        beef=beef,
+        manifests=manifests,
+        public_key=public_key,
+        expected_journal_identity=expected_journal_identity,
+        terminal_seq=terminal_seq,
+    )
+    acceptance = result.get("acceptance")
+    if not isinstance(acceptance, dict):
+        raise VerificationError(
+            "bootstrap refused: the anchor verifier returned no acceptance"
+        )
+    if not acceptance.get("accepted"):
+        reasons = "; ".join(acceptance.get("reasons") or [])
+        raise VerificationError(
+            "bootstrap refused: anchor authentication withheld"
+            + (f" ({reasons})" if reasons else "")
+        )
+
+    chain = result.get("chain")
+    if not isinstance(chain, dict):
+        raise VerificationError(
+            "bootstrap refused: the anchor verifier returned no chain result"
+        )
+    last_seq = chain.get("last_seq")
+    if (
+        isinstance(last_seq, bool)
+        or not isinstance(last_seq, int)
+        or last_seq < 0
+    ):
+        raise VerificationError(
+            "bootstrap refused: the anchored prefix end is not a sequence"
+        )
+    anchored_release = chain.get("last_release_seq")
+    if (
+        isinstance(anchored_release, bool)
+        or not isinstance(anchored_release, int)
+        or anchored_release < 0
+    ):
+        raise VerificationError(
+            "bootstrap refused: the anchor has no usable release_seq"
+        )
+
+    events, _fragment = read_journal_prefix(journal)
+    try:
+        _verify_audit_events(events)
+    except VerificationError as exc:
+        raise VerificationError(
+            f"bootstrap cannot verify the journal: {exc}"
+        ) from exc
+    if last_seq > len(events):
+        raise VerificationError(
+            f"bootstrap refused: anchored prefix end {last_seq} is beyond "
+            f"the journal's {len(events)} complete event(s)"
+        )
+
+    has_acceptance = _has_manifest_acceptance(events, last_seq)
+    if has_acceptance and (manifests is None or public_key is None):
+        raise VerificationError(
+            "bootstrap refused: the anchored prefix contains "
+            "manifest_accepted events, but --manifest and --public-key were "
+            "not supplied to prove the acceptance binding; only bound "
+            "acceptances may advance the checkpoint"
+        )
+    if has_acceptance:
+        per_anchor = result.get("anchors")
+        if (
+            not isinstance(per_anchor, list)
+            or not per_anchor
+            or not isinstance(per_anchor[-1], dict)
+            or not per_anchor[-1].get("release_seq_rederived")
+        ):
+            raise VerificationError(
+                "bootstrap refused: the anchored release_seq was not "
+                "re-derived from bound manifest_accepted events"
+            )
+
+    derived = anchored_release_seq(events, last_seq)
+    if derived != anchored_release:
+        raise VerificationError(
+            "bootstrap refused: anchor release_seq "
+            f"{anchored_release} is not the max bound manifest_accepted "
+            f"sequence ({derived}) inside the anchored prefix"
+        )
+
+    head_hash = (
+        events[last_seq - 1]["event_hash"].lower()
+        if last_seq
+        else _ZERO_HASH
+    )
+    chain_anchors = chain.get("anchors")
+    if isinstance(chain_anchors, list) and chain_anchors:
+        last_anchor = chain_anchors[-1]
+        if isinstance(last_anchor, dict) and last_anchor.get("head_hash"):
+            if last_anchor["head_hash"].lower() != head_hash:
+                raise VerificationError(
+                    "bootstrap refused: anchor head hash does not match the "
+                    "journal event at the anchored prefix end"
+                )
+
+    record = append_checkpoint_cache(
+        cache_path,
+        release_seq=derived,
+        anchor_end_seq=last_seq,
+        head_hash=head_hash,
+    )
+    if require_isolation:
+        assert_checkpoint_cache_isolation(
+            cache_path, child_uid, launcher_euid=launcher_euid
+        )
+    stored = read_checkpoint_cache(cache_path)
+    verify_checkpoint_against_journal(stored, journal)
+    return {
+        "checkpoint": record,
+        "acceptance": acceptance,
+        "chain": chain,
+        "journal_identity": result.get("journal_identity"),
+        "verifier_result": result,
+    }
+
+
+#: Backwards/forwards-friendly alias for the deployment-time entry point.
+bootstrap_checkpoint_cache = bootstrap_checkpoint
 
 
 def append_checkpoint_cache(

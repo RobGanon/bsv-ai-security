@@ -190,6 +190,61 @@ refuses when fewer than two slots remain at the hard cap, so the launch
 and its finish event cannot straddle the cliff and turn a completed run
 into a permanently "incomplete" one.
 
+## Bootstrapping the anchored checkpoint (online, deployment time)
+
+A v2 launch is offline: it reads a cached release checkpoint and makes no
+network call. The cache is populated once at deployment time, while the
+network is available, by `sealrun bootstrap` (alias
+`sealrun checkpoint-bootstrap`). That command authenticates the anchor
+chain with the full anchor-only predicate — payload binding, the anchor
+transaction signature, real block inclusion (SPV, BUMP, or mined BEEF;
+ancestry-only BEEF never counts), and the header walk back to an
+operator-pinned block checkpoint.
+
+The recorded value is not the anchor's claimed number on trust. It is
+re-derived as the maximum `release_seq` over **bound** `manifest_accepted`
+events inside the anchored prefix, using the signed manifests and their
+trusted public key. Launch, finish, and launch-failed events never
+advance the checkpoint. If the anchored prefix contains an acceptance
+that cannot be re-derived from a verified manifest, bootstrap refuses
+rather than counts it.
+
+The cache is a second trust store and follows the same §5.7 placement
+rules as the journal: the deployment must be privileged, the child uid
+must be explicit and different from the cache owner, the cache directory
+must already exist, no path may be child-owned, group/world-writable, or
+ACL-bearing, and the filesystem must enforce local ownership (NFS/FUSE
+and unknown types refuse). The cache is written append-only with a
+contiguous `checkpoint_seq` and non-decreasing `release_seq` /
+`anchor_end_seq`.
+
+```bash
+sudo sealrun bootstrap \
+  --journal /srv/sealrun/audit.jsonl \
+  --checkpoint-cache /srv/sealrun/checkpoint.jsonl \
+  --genesis-txid <trusted-genesis-txid> \
+  --anchor /srv/sealrun/anchor-1.json \
+  --manifest /srv/sealrun/manifest.signed.json \
+  --public-key /etc/sealrun/public.pub \
+  --anchor-pubkey <trusted-anchor-pubkey> \
+  --spv \
+  --checkpoint-hash <pinned-block-hash> \
+  --checkpoint-height <height> \
+  --uid model
+```
+
+**Rollback limits.** The append-only cache with its monotonic sequence
+detects an *appended* older checkpoint and refuses it. Truncating the
+cache back to an older, internally valid prefix is **not detectable**
+from the cache alone: without an external trusted high-water mark
+(another append-only store, a published anchor, or an operator-pinned
+value kept outside the child's reach) an attacker who can rewrite the
+cache file can present an earlier valid prefix as current. This is a
+stated residual, not a property the local cache can provide. Keep the
+cache on storage the child and its uid cannot write, and treat an
+external record of the latest anchored checkpoint as the high-water
+mark when that threat is in scope.
+
 ## What this does not fix
 
 Stated plainly, because a launcher that overclaims is worse than none:

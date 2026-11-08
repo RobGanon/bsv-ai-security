@@ -115,8 +115,8 @@ the original file. Sealing copies every artifact into RAM, so it is
 opt-in; for large models the copy cost is real.
 
 `--seal` needs Linux (and a kernel with `memfd_create` sealing). Without
-it the launcher refuses to launch, as sealing is required for the
-executable binding mode. When not using `--executable-binding verified`,
+it the launcher refuses to launch when sealing is requested, rather than
+falling back to passing the verified descriptor directly. Without --seal,
 the launcher passes the verified descriptor directly, which is still
 immune to path swaps but not to in-place mutation.
 

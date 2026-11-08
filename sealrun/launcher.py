@@ -1108,17 +1108,29 @@ def _launch_v2(
         try:
             result = _run_v2_child(argv, **run_kwargs)
         except PermissionError as exc:
+            # ``PermissionError`` covers both a failed credential drop and a
+            # failed exec (e.g. a non-executable file). CPython sets
+            # ``filename`` for the exec failure but leaves it ``None`` for
+            # the drop, so classify by that field rather than errno alone.
+            if exc.filename is None:
+                reason = (
+                    f"cannot drop privileges to uid={uid} gid={gid}: {exc}"
+                )
+                _record_launch_failed(
+                    journal,
+                    run_id,
+                    "privilege_drop",
+                    reason,
+                    exc,
+                    journal_identity=journal_identity,
+                )
+                raise VerificationError(reason) from exc
+            reason = f"cannot launch {argv[0]!r}: {exc}"
             _record_launch_failed(
-                journal,
-                run_id,
-                "privilege_drop",
-                f"cannot drop privileges to uid={uid} gid={gid}: {exc}",
-                exc,
+                journal, run_id, "exec", reason, exc,
                 journal_identity=journal_identity,
             )
-            raise VerificationError(
-                f"cannot drop privileges to uid={uid} gid={gid}: {exc}"
-            ) from exc
+            raise VerificationError(reason) from exc
         except OSError as exc:
             _record_launch_failed(
                 journal, run_id, "exec", f"cannot launch {argv[0]!r}: {exc}", exc,

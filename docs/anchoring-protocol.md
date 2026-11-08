@@ -264,7 +264,7 @@ security margin for how much history is exposed to silent rewrite.
   after the fact, by out-of-band audit of event *contents*).
 - The verify→launch TOCTOU gap is closed by `sealrun launch`, which
   consumes `verified_artifacts()` handles instead of reopening paths; the
-  residual in-place-mutation window is closed by `--seal` (see
+  residual in-place-mutation window is closed when `--seal` is used (see
   `docs/launcher.md`). The launcher does not sandbox the child.
 - Private-key protection on the AI host itself.
 - Liveness of the anchor publisher (monitor it; alert on missed intervals).

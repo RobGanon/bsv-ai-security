@@ -58,12 +58,19 @@ from .core import (
     record_manifest_acceptance,
     sign_manifest,
     verify_audit_journal,
+    verify_audit_journal_report,
     verify_manifest,
 )
 from .launcher import (
     launch,
     resolve_gid,
     resolve_uid,
+)
+from .checkpoint_cache import bootstrap_checkpoint
+from .v2_anchor import (
+    VERDICT_PREFIX,
+    VERDICT_TIP,
+    verify_v2_anchor_chain,
 )
 from .proof_bundle import create_bundle, verify_bundle
 from . import __version__ as _SEALRUN_VERSION
@@ -139,10 +146,31 @@ def main(argv=None):
     p.add_argument("--manifest", required=True, type=Path)
     p.add_argument("--public-key", required=True, type=Path)
     p.add_argument("--min-release-seq", type=int, default=None,
-                   help="reject manifests older than this release sequence (rollback protection)")
+                   help="reject manifests older than this release sequence (rollback protection); "
+                        "required in v2 mode")
+    p.add_argument("--checkpoint-cache", type=Path, default=None,
+                   help="v2 only: append-only anchored release checkpoint cache; "
+                        "required in v2 mode (a missing cache is not checkpoint 0)")
+    p.add_argument("--mode", choices=("v1", "v2"), default="v1",
+                   help="launch mode (default: v1, unchanged); v2 is the "
+                        "explicit per-launch opt-in that writes strict journal events")
+    p.add_argument("--journal", type=Path, default=None,
+                   help="v2 journal path (required with --mode v2; invalid in v1, "
+                        "which writes no journal record)")
+    p.add_argument("--require-v2", action="store_true",
+                   help="refuse to launch unless --mode v2 is used (a v2-only "
+                        "deployment refuses a v1 invocation at invocation time)")
     p.add_argument("--seal", action="store_true",
                    help="copy each artifact into a sealed memfd before exec, so the "
                         "child reads a frozen snapshot (costs a copy of every artifact in RAM)")
+    p.add_argument("--executable-binding", choices=("record-only", "verified"),
+                   default="record-only",
+                   help="executable binding (default: record-only). 'verified' "
+                        "runs a Linux ELF manifest artifact via execveat(AT_EMPTY_PATH) "
+                        "and records that artifact; it requires --mode v2")
+    p.add_argument("--executable-artifact", default=None,
+                   help="manifest artifact path to execute in verified mode when "
+                        "argv[0] does not match an artifact path exactly")
     p.add_argument("--uid", default=None,
                    help="drop to this user (name or numeric id) before exec (needs privilege)")
     p.add_argument("--gid", default=None,
@@ -214,6 +242,12 @@ def main(argv=None):
     p.add_argument("--anchor-record", type=Path, default=None,
                    help="publisher anchor-record JSON; its broadcast records "
                    "are chain-checked (pending/superseded drafts are not chain members)")
+    p.add_argument("--v2", action="store_true",
+                   help="require the full anchor-only acceptance predicate "
+                   "(payload binding + anchor signature + exactly one of "
+                   "--spv/--bump-file/--beef-file + header chain to a pinned "
+                   "checkpoint) and print the two named verdicts. No signed "
+                   "pins are used.")
     p.add_argument("--journal", type=Path, default=None,
                    help="if given, also verify the journal against every anchor "
                    "in the chain (head hash + binding re-derivation)")
@@ -269,6 +303,67 @@ def main(argv=None):
     p.add_argument("--woc-base", default=WOC_TTN_BASE,
                    help="WhatsOnChain base URL for --spv / --anchor-sig "
                    "chain data (default: Teratestnet)")
+
+    p = sub.add_parser(
+        "bootstrap",
+        aliases=("checkpoint-bootstrap",),
+        help="deployment-time: verify the anchor chain online and record "
+             "its release_seq in the isolated checkpoint cache",
+    )
+    p.add_argument("--journal", required=True, type=Path)
+    p.add_argument("--checkpoint-cache", required=True, type=Path,
+                   help="append-only checkpoint cache to write (its directory "
+                        "must already satisfy the §5.7 isolation rules)")
+    p.add_argument("--genesis-txid", required=True,
+                   help="trusted genesis anchor txid from operator-pinned "
+                        "config; never inferred from the anchors being checked")
+    p.add_argument("--anchor", action="append", type=Path, default=None,
+                   help="JSON file with payload_hex + txid for one anchor; "
+                        "repeatable, in chain order")
+    p.add_argument("--anchor-record", type=Path, default=None,
+                   help="publisher anchor-record JSON; its broadcast records "
+                        "are chain-checked")
+    p.add_argument("--manifest", action="append", type=Path, default=None,
+                   help="signed manifest envelope JSON for binding "
+                        "re-verification; repeatable; required when the "
+                        "anchored prefix contains acceptances")
+    p.add_argument("--public-key", type=Path, default=None,
+                   help="trusted manifest-signing public key; required with "
+                        "--manifest when the anchored prefix contains "
+                        "acceptances")
+    p.add_argument("--spv", action="store_true",
+                   help="verify each anchor tx is inside its claimed block "
+                        "via the --woc-base endpoint (exactly one inclusion "
+                        "source is required)")
+    p.add_argument("--bump-file", type=Path, default=None,
+                   help="JSON file mapping txid -> BUMP (exactly one "
+                        "inclusion source is required)")
+    p.add_argument("--beef-file", type=Path, default=None,
+                   help="BEEF envelope file (exactly one inclusion source is "
+                        "required; ancestry-only BEEF does not count)")
+    p.add_argument("--anchor-sig", action="store_true",
+                   help="accepted for parity with anchor-chain-verify; "
+                        "bootstrap always verifies the anchor signature")
+    p.add_argument("--anchor-pubkey", default=None,
+                   help="trusted anchor compressed pubkey hex (66 chars, "
+                        "02/03 prefix); required")
+    p.add_argument("--header-chain", action="store_true",
+                   help="accepted for parity with anchor-chain-verify; "
+                        "bootstrap always verifies the header chain")
+    p.add_argument("--checkpoint-hash", default=None,
+                   help="trusted checkpoint block hash (64 hex chars); "
+                        "required")
+    p.add_argument("--checkpoint-height", type=int, default=None,
+                   help="height of the trusted checkpoint header; required")
+    p.add_argument("--daa", choices=["mainnet"], default=None,
+                   help="also validate the difficulty schedule above the "
+                        "checkpoint against mainnet cash-DAA parameters")
+    p.add_argument("--woc-base", default=WOC_TTN_BASE,
+                   help="WhatsOnChain base URL (default: Teratestnet)")
+    p.add_argument("--uid", "--child-uid", dest="uid", default=None,
+                   help="uid the launcher will drop the child to; required so "
+                        "the cache can be checked against the §5.7 isolation "
+                        "rules (a name or numeric id)")
 
     p = sub.add_parser(
         "publish",
@@ -384,9 +479,15 @@ def main(argv=None):
                 load_public_key(args.public_key),
                 args.command_argv,
                 min_release_seq=args.min_release_seq,
+                checkpoint_cache=args.checkpoint_cache,
                 seal=args.seal,
                 uid=resolve_uid(args.uid),
                 gid=resolve_gid(args.gid),
+                mode=args.mode,
+                journal=args.journal,
+                require_v2=args.require_v2,
+                executable_binding=args.executable_binding,
+                executable_artifact=args.executable_artifact,
             )
         elif args.command == "audit-append":
             if args.event_type == MANIFEST_ACCEPTED_EVENT_TYPE:
@@ -399,8 +500,27 @@ def main(argv=None):
             event = append_audit_event(args.journal, args.event_type, args.detail)
             print(f"Audit event appended: seq={event['seq']} hash={event['event_hash']}")
         elif args.command == "audit-verify":
-            count = verify_audit_journal(args.journal)
-            print(f"AUDIT OK: {count} event(s)")
+            report = verify_audit_journal_report(args.journal)
+            print(f"AUDIT OK: {report['events']} event(s)")
+            if report["fragment_bytes"]:
+                print(
+                    "TORN TAIL: "
+                    f"{report['fragment_bytes']} byte(s) after the last complete "
+                    "event (reported, not repaired)"
+                )
+            for entry in report["channel_lists"]:
+                if entry["present"]:
+                    kind = "inline" if entry["inline"] else "detached"
+                    print(
+                        f"CHANNEL LIST OK: run {entry['run_id']} "
+                        f"({len(entry['records'])} channel(s), {kind})"
+                    )
+                else:
+                    print(
+                        f"CHANNEL LIST MISSING: run {entry['run_id']} "
+                        f"({entry['reason']}; the map is not reconstructable "
+                        "from the committed hash)"
+                    )
         elif args.command == "audit-manifest-accepted":
             # An acceptance is bound to exactly one signed manifest, and
             # that binding is checked HERE, at record time. An acceptance
@@ -527,6 +647,136 @@ def main(argv=None):
                                 "txid": record["txid"],
                             }
                         )
+            if args.v2:
+                # Anchor-only acceptance: no signed pin, no pin_seq, no
+                # pin store. Every authenticator is required; omission is
+                # a refusal, not a weaker acceptance.
+                if args.journal is None:
+                    raise VerificationError(
+                        "--v2 requires --journal to verify the anchored "
+                        "journal prefix and identity"
+                    )
+                if not args.anchor_sig:
+                    raise VerificationError(
+                        "--v2 requires --anchor-sig and --anchor-pubkey: "
+                        "the anchor transaction signature is part of the "
+                        "acceptance predicate"
+                    )
+                pubkey = args.anchor_pubkey or ""
+                if (
+                    len(pubkey) != 66
+                    or pubkey[:2] not in ("02", "03")
+                    or not all(c in "0123456789abcdefABCDEF" for c in pubkey)
+                ):
+                    raise VerificationError(
+                        "--anchor-sig requires --anchor-pubkey as 66-char "
+                        "compressed pubkey hex (02/03 prefix)"
+                    )
+                inclusion_sources = (
+                    bool(args.spv)
+                    + (args.bump_file is not None)
+                    + (args.beef_file is not None)
+                )
+                if inclusion_sources != 1:
+                    raise VerificationError(
+                        "--v2 requires exactly one inclusion source: --spv, "
+                        "--bump-file, or --beef-file (ancestry-only BEEF "
+                        "does not count as inclusion)"
+                    )
+                if not args.header_chain:
+                    raise VerificationError(
+                        "--v2 requires --header-chain with a pinned "
+                        "--checkpoint-hash and --checkpoint-height"
+                    )
+                checkpoint_hash = args.checkpoint_hash or ""
+                if (
+                    len(checkpoint_hash) != 64
+                    or not all(
+                        c in "0123456789abcdefABCDEF" for c in checkpoint_hash
+                    )
+                    or args.checkpoint_height is None
+                    or args.checkpoint_height < 0
+                ):
+                    raise VerificationError(
+                        "--header-chain requires --checkpoint-hash as "
+                        "64-char block hash hex and --checkpoint-height "
+                        "as a non-negative integer"
+                    )
+                manifests = None
+                public_key = None
+                if args.manifest is not None or args.public_key is not None:
+                    if args.manifest is None or args.public_key is None:
+                        raise VerificationError(
+                            "anchor-chain-verify requires --manifest and "
+                            "--public-key together to re-check acceptance binding"
+                        )
+                    manifests = [_read_json(path) for path in args.manifest]
+                    public_key = load_public_key(args.public_key)
+                fetcher = WoCBlockFetcher(base_url=args.woc_base)
+                bumps = None
+                beef = None
+                if args.spv:
+                    inclusion = "spv"
+                    inclusion_verifier = SPVVerifier(fetcher)
+                elif args.bump_file is not None:
+                    inclusion = "bump"
+                    bumps = _read_json(args.bump_file)
+                    if not isinstance(bumps, dict):
+                        raise VerificationError(
+                            "--bump-file JSON must map txid -> BUMP"
+                        )
+                    inclusion_verifier = BUMPVerifier(fetcher)
+                else:
+                    inclusion = "beef"
+                    beef = _read_beef(args.beef_file)
+                    inclusion_verifier = BeefVerifier(fetcher)
+                result = verify_v2_anchor_chain(
+                    args.journal,
+                    anchors,
+                    args.genesis_txid,
+                    payload_fetcher=fetcher,
+                    signature_verifier=AnchorSignatureVerifier(fetcher, pubkey),
+                    inclusion=inclusion,
+                    inclusion_verifier=inclusion_verifier,
+                    header_verifier=HeaderChainVerifier(
+                        fetcher,
+                        checkpoint_hash=checkpoint_hash,
+                        checkpoint_height=args.checkpoint_height,
+                        daa=DAAParams.mainnet() if args.daa else None,
+                    ),
+                    bumps=bumps,
+                    beef=beef,
+                    manifests=manifests,
+                    public_key=public_key,
+                )
+                print(json.dumps(result, indent=2, sort_keys=True))
+                acceptance = result["acceptance"]
+                print(
+                    f"{VERDICT_PREFIX}: "
+                    f"{'yes' if acceptance['prefix_matches_anchor'] else 'no'}"
+                )
+                print(
+                    f"{VERDICT_TIP}: "
+                    f"{'yes' if acceptance['tip_inside_anchor'] else 'no'}"
+                )
+                print(
+                    "freshness: unavailable (no tip service; a shorter "
+                    "anchor set is not detected)"
+                )
+                if acceptance["authenticated_prefix_end"] is not None:
+                    print(
+                        "authenticated prefix end (seq): "
+                        f"{acceptance['authenticated_prefix_end']}"
+                    )
+                for reason in acceptance["reasons"]:
+                    print(f"  WITHHELD: {reason}")
+                if not acceptance["accepted"]:
+                    print(
+                        "ANCHOR AUTHENTICATION WITHHELD: the full anchor-only "
+                        "acceptance predicate did not hold."
+                    )
+                    return 1
+                return 0
             if args.journal is not None:
                 manifests = None
                 public_key = None
@@ -750,6 +1000,142 @@ def main(argv=None):
                 failed = failed or not result.get("header_chain_verified")
             if failed:
                 return 1
+        elif args.command in ("bootstrap", "checkpoint-bootstrap"):
+            anchors: list[dict] = []
+            for path in args.anchor or []:
+                entry = _read_json(path)
+                if (
+                    not isinstance(entry, dict)
+                    or not isinstance(entry.get("payload_hex"), str)
+                    or not isinstance(entry.get("txid"), str)
+                ):
+                    raise VerificationError(
+                        "anchor JSON must contain payload_hex and txid"
+                    )
+                anchors.append(
+                    {"payload_hex": entry["payload_hex"], "txid": entry["txid"]}
+                )
+            if args.anchor_record is not None:
+                store = _read_json(args.anchor_record)
+                records = store.get("anchors") if isinstance(store, dict) else None
+                if not isinstance(records, list):
+                    raise VerificationError(
+                        "anchor-record JSON must contain an anchors list"
+                    )
+                for record in records:
+                    if isinstance(record, dict) and record.get("status") == "broadcast":
+                        anchors.append(
+                            {
+                                "payload_hex": record["payload_hex"],
+                                "txid": record["txid"],
+                            }
+                        )
+            if not anchors:
+                raise VerificationError(
+                    "bootstrap requires at least one --anchor or a broadcast "
+                    "record in --anchor-record"
+                )
+            inclusion_sources = (
+                bool(args.spv)
+                + (args.bump_file is not None)
+                + (args.beef_file is not None)
+            )
+            if inclusion_sources != 1:
+                raise VerificationError(
+                    "bootstrap requires exactly one inclusion source: --spv, "
+                    "--bump-file, or --beef-file (ancestry-only BEEF does not "
+                    "count as inclusion)"
+                )
+            pubkey = args.anchor_pubkey or ""
+            if (
+                len(pubkey) != 66
+                or pubkey[:2] not in ("02", "03")
+                or not all(c in "0123456789abcdefABCDEF" for c in pubkey)
+            ):
+                raise VerificationError(
+                    "bootstrap requires --anchor-pubkey as 66-char "
+                    "compressed pubkey hex (02/03 prefix)"
+                )
+            checkpoint_hash = args.checkpoint_hash or ""
+            if (
+                len(checkpoint_hash) != 64
+                or not all(
+                    c in "0123456789abcdefABCDEF" for c in checkpoint_hash
+                )
+                or args.checkpoint_height is None
+                or args.checkpoint_height < 0
+            ):
+                raise VerificationError(
+                    "bootstrap requires --checkpoint-hash as 64-char block "
+                    "hash hex and --checkpoint-height as a non-negative integer"
+                )
+            if (args.manifest is None) != (args.public_key is None):
+                raise VerificationError(
+                    "bootstrap requires --manifest and --public-key together "
+                    "to re-check acceptance binding"
+                )
+            manifests = None
+            public_key = None
+            if args.manifest is not None:
+                manifests = [_read_json(path) for path in args.manifest]
+                public_key = load_public_key(args.public_key)
+            child_uid = resolve_uid(args.uid)
+            if child_uid is None:
+                raise VerificationError(
+                    "bootstrap requires --uid (or --child-uid): the cache must "
+                    "be isolated from the uid the launcher will drop to"
+                )
+            fetcher = WoCBlockFetcher(base_url=args.woc_base)
+            bumps = None
+            beef = None
+            if args.spv:
+                inclusion = "spv"
+                inclusion_verifier = SPVVerifier(fetcher)
+            elif args.bump_file is not None:
+                inclusion = "bump"
+                bumps = _read_json(args.bump_file)
+                if not isinstance(bumps, dict):
+                    raise VerificationError(
+                        "--bump-file JSON must map txid -> BUMP"
+                    )
+                inclusion_verifier = BUMPVerifier(fetcher)
+            else:
+                inclusion = "beef"
+                beef = _read_beef(args.beef_file)
+                inclusion_verifier = BeefVerifier(fetcher)
+            result = bootstrap_checkpoint(
+                args.journal,
+                args.checkpoint_cache,
+                anchors,
+                args.genesis_txid,
+                payload_fetcher=fetcher,
+                signature_verifier=AnchorSignatureVerifier(fetcher, pubkey),
+                inclusion=inclusion,
+                inclusion_verifier=inclusion_verifier,
+                header_verifier=HeaderChainVerifier(
+                    fetcher,
+                    checkpoint_hash=checkpoint_hash,
+                    checkpoint_height=args.checkpoint_height,
+                    daa=DAAParams.mainnet() if args.daa else None,
+                ),
+                bumps=bumps,
+                beef=beef,
+                manifests=manifests,
+                public_key=public_key,
+                child_uid=child_uid,
+            )
+            record = result["checkpoint"]
+            print(json.dumps(result, indent=2, sort_keys=True))
+            print(
+                "CHECKPOINT BOOTSTRAPPED: release_seq="
+                f"{record['release_seq']} anchor_end_seq="
+                f"{record['anchor_end_seq']} checkpoint_seq="
+                f"{record['checkpoint_seq']}"
+            )
+            print(
+                "Offline launches now read only this cache; no network call "
+                "is made at launch time."
+            )
         elif args.command == "proof-bundle-create":
             try:
                 summary = create_bundle(

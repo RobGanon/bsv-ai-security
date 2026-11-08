@@ -107,7 +107,7 @@ An open descriptor pins the *inode*, not its contents. Without `--seal`,
 a writer with access to the verified inode can still mutate the file
 after it was hashed, and the child would read the new bytes.
 
-`--seal` closes that residual window: each verified artifact is copied
+`--seal` prevents that residual window: each verified artifact is copied
 into a sealed `memfd` (`F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW |
 F_SEAL_SEAL`) before exec. The child reads a frozen snapshot that rejects
 `write`, `ftruncate`, and further sealing, regardless of what happens to
@@ -115,8 +115,10 @@ the original file. Sealing copies every artifact into RAM, so it is
 opt-in; for large models the copy cost is real.
 
 `--seal` needs Linux (and a kernel with `memfd_create` sealing). Without
-it the launcher falls back to passing the verified descriptor directly,
-which is still immune to path swaps but not to in-place mutation.
+it the launcher refuses to launch, as sealing is required for the
+executable binding mode. When not using `--executable-binding verified`,
+the launcher passes the verified descriptor directly, which is still
+immune to path swaps but not to in-place mutation.
 
 ## The privilege model
 
@@ -189,6 +191,10 @@ compact the journal (or start a new one) before then. A v2 launch also
 refuses when fewer than two slots remain at the hard cap, so the launch
 and its finish event cannot straddle the cliff and turn a completed run
 into a permanently "incomplete" one.
+
+## Security clarifications
+
+A successful launch verification does NOT prove everything the AI subsequently did. Handing verified descriptors to a process does NOT prove the process consumed them. A locally valid journal is NOT by itself proof of current state. A launch+finish journal record is NOT by itself proof that a run completed — it is proof only when (a) the terminal event is inside an authenticated prefix (pin/anchor covering that sequence, §6.5), AND (b) the journal's writer is the trusted launcher alone, enforced by journal-writer isolation (§5.7) — because a pin/anchor authenticates a prefix hash, not the truth or authorship of later events, and a forged finish after the latest pin passes pin comparison while a forged finish before the next pin is faithfully committed by an honest publisher. Chain integrity and freshness are NOT event authenticity.
 
 ## Bootstrapping the anchored checkpoint (online, deployment time)
 

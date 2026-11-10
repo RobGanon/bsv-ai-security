@@ -1,0 +1,624 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="light dark" />
+<meta name="description" content="SealRun verifies an AI session before it runs, then seals a tamper-evident record of what happened — so you can prove it later." />
+<link rel="icon" href="data:," />
+<title>SealRun — Verify before it runs. Prove it after.</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,600;6..72,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#fbfbfa;
+    --bg-2:#f2f3f0;
+    --surface:#ffffff;
+    --surface-2:#f6f7f5;
+    --ink:#12161c;
+    --ink-2:#3d4754;
+    --muted:#66707e;
+    --line:#dde2dc;
+    --line-strong:#c8d0c6;
+    --teal:#0b6b5e;
+    --teal-bright:#0f766e;
+    --teal-soft:#e6f2ef;
+    --seal:#b42318;
+    --seal-soft:#fdefec;
+    --amber:#92400e;
+    --amber-soft:#fef3c7;
+    --amber-line:#f5d48e;
+    --term-bg:#10151d;
+    --term-ink:#dbe7dd;
+    --term-dim:#8a9a90;
+    --term-green:#4ade80;
+    --term-red:#f87171;
+    --term-amber:#fbbf24;
+    --radius:14px;
+    --shadow:0 1px 2px rgba(18,22,28,.05), 0 12px 32px rgba(18,22,28,.06);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0d1117;
+      --bg-2:#11161e;
+      --surface:#151b24;
+      --surface-2:#1a222e;
+      --ink:#eef2f0;
+      --ink-2:#c3ccd4;
+      --muted:#98a3ae;
+      --line:#26303d;
+      --line-strong:#354252;
+      --teal:#2dd4bf;
+      --teal-bright:#2dd4bf;
+      --teal-soft:#12312c;
+      --seal:#f08a80;
+      --seal-soft:#3a1f1c;
+      --amber:#fbbf24;
+      --amber-soft:#2f2712;
+      --amber-line:#5c4a16;
+      --shadow:0 1px 2px rgba(0,0,0,.3), 0 12px 32px rgba(0,0,0,.25);
+    }
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  @media (prefers-reduced-motion: reduce){ html{scroll-behavior:auto} *{animation:none!important; transition:none!important} }
+  body{margin:0; background:var(--bg); color:var(--ink); font-family:"IBM Plex Sans", system-ui, -apple-system, Segoe UI, sans-serif; font-size:17px; line-height:1.6; -webkit-font-smoothing:antialiased}
+  a{color:var(--teal-bright); text-underline-offset:3px}
+  a:hover{text-decoration-thickness:2px}
+  .wrap{max-width:1120px; margin:0 auto; padding:0 20px}
+  .mono{font-family:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace}
+
+  /* Nav */
+  header.nav{position:sticky; top:0; z-index:20; background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(10px); border-bottom:1px solid var(--line)}
+  .nav-in{display:flex; align-items:center; gap:18px; padding:13px 0}
+  .brand{display:flex; align-items:center; gap:10px; font-weight:700; letter-spacing:-.01em; color:var(--ink); text-decoration:none; font-size:19px}
+  .brand-mark{width:30px; height:30px; flex:0 0 30px}
+  .nav-links{margin-left:auto; display:flex; gap:4px; align-items:center; flex-wrap:wrap}
+  .nav-links a{color:var(--ink-2); text-decoration:none; font-size:14.5px; font-weight:500; padding:7px 10px; border-radius:8px}
+  .nav-links a:hover{background:var(--surface-2); color:var(--ink)}
+  .nav-links a.btn-nav{background:var(--ink); color:var(--bg); padding:8px 14px; margin-left:6px}
+  .nav-links a.btn-nav:hover{background:var(--teal); color:#fff}
+  @media (max-width:640px){ .nav-links a.hide-sm{display:none} }
+
+  /* Hero */
+  .hero{padding:56px 0 8px}
+  .status-row{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:22px}
+  .pill{display:inline-flex; align-items:center; gap:7px; font-size:13px; font-weight:600; padding:5px 11px; border-radius:999px; border:1px solid var(--line-strong); background:var(--surface); color:var(--ink-2)}
+  .pill .dot{width:7px; height:7px; border-radius:50%; background:var(--teal-bright); flex:0 0 7px}
+  .pill.warn{border-color:var(--amber-line); background:var(--amber-soft); color:var(--amber)}
+  .pill.warn .dot{background:var(--amber)}
+  h1{font-family:"Newsreader", Georgia, serif; font-weight:700; font-size:clamp(38px, 6.2vw, 62px); line-height:1.04; letter-spacing:-.015em; margin:0 0 18px; max-width:15em}
+  h1 em{font-style:normal; color:var(--teal)}
+  .lede{font-size:clamp(18px, 2.4vw, 21px); line-height:1.55; color:var(--ink-2); max-width:38em; margin:0 0 14px}
+  .lede strong{color:var(--ink)}
+  .name-split{display:flex; flex-wrap:wrap; gap:10px 26px; margin:20px 0 28px; font-size:15px; color:var(--muted)}
+  .name-split b{color:var(--ink); font-family:"IBM Plex Mono", monospace; font-weight:600; font-size:14px; letter-spacing:.02em}
+  .cta-row{display:flex; flex-wrap:wrap; gap:12px; align-items:center}
+  .btn{display:inline-flex; align-items:center; gap:9px; font-weight:600; font-size:16px; text-decoration:none; padding:13px 20px; border-radius:10px; border:1px solid transparent; cursor:pointer; font-family:inherit}
+  .btn-primary{background:var(--teal); color:#fff}
+  .btn-primary:hover{background:#095a4f; text-decoration:none}
+  @media (prefers-color-scheme: dark){ .btn-primary{color:#06231e} .btn-primary:hover{background:#5eead4} }
+  .btn-ghost{background:var(--surface); color:var(--ink); border-color:var(--line-strong)}
+  .btn-ghost:hover{border-color:var(--ink-2); text-decoration:none}
+  .cta-note{font-size:14px; color:var(--muted)}
+
+  /* Terminal / demo */
+  .demo{margin:40px 0 8px; background:var(--term-bg); border-radius:16px; overflow:hidden; box-shadow:var(--shadow); border:1px solid #232c3a}
+  .demo-head{display:flex; align-items:center; gap:10px; padding:13px 16px; border-bottom:1px solid #232c3a; flex-wrap:wrap}
+  .tdots{display:flex; gap:7px}
+  .tdots span{width:11px; height:11px; border-radius:50%; background:#2c3646}
+  .tdots span:first-child{background:#3f4c61}
+  .demo-title{color:#aebbb2; font-family:"IBM Plex Mono", monospace; font-size:13px}
+  .demo-actions{margin-left:auto; display:flex; gap:8px; flex-wrap:wrap}
+  .dbtn{font-family:"IBM Plex Mono", monospace; font-size:13px; font-weight:600; padding:8px 13px; border-radius:8px; border:1px solid #334155; background:#182030; color:#e2e8f0; cursor:pointer}
+  .dbtn:hover{border-color:#64748b}
+  .dbtn.primary{background:#0b6b5e; border-color:#0b6b5e; color:#fff}
+  .dbtn.danger{background:transparent; border-color:#7f2d26; color:#fca5a5}
+  .dbtn:disabled{opacity:.45; cursor:default}
+  .demo-body{padding:18px 16px 20px; font-family:"IBM Plex Mono", monospace; font-size:13.5px; line-height:1.65; color:var(--term-ink); min-height:252px}
+  .demo-body .dim{color:var(--term-dim)}
+  .demo-body .ok{color:var(--term-green)}
+  .demo-body .bad{color:var(--term-red)}
+  .demo-body .warn-t{color:var(--term-amber)}
+  .entry{display:flex; gap:10px; padding:7px 9px; border-radius:8px; margin:2px 0; border:1px solid transparent; word-break:break-word}
+  .entry .seq{color:var(--term-dim); flex:0 0 auto}
+  .entry.broken{border-color:#7f2d26; background:rgba(127,29,29,.18)}
+  .entry .hash{color:#7dd3a8}
+  .entry.broken .hash{color:var(--term-red)}
+  .demo-foot{padding:12px 16px; border-top:1px solid #232c3a; display:flex; gap:10px; align-items:flex-start; flex-wrap:wrap}
+  .verdict{font-family:"IBM Plex Mono", monospace; font-size:13.5px; font-weight:600}
+  .verdict.ok{color:var(--term-green)} .verdict.bad{color:var(--term-red)} .verdict.idle{color:#aebbb2}
+  .demo-caption{font-size:13px; color:#8a9a90; margin-left:auto; max-width:34em}
+  @media (max-width:640px){ .demo-caption{margin-left:0} }
+
+  /* Sections */
+  section{padding:64px 0 0}
+  .sec-head{max-width:44em}
+  .sec-head h2{font-family:"Newsreader", Georgia, serif; font-size:clamp(28px, 4vw, 38px); line-height:1.12; letter-spacing:-.01em; margin:0 0 12px}
+  .sec-head p{color:var(--ink-2); margin:0; font-size:18px}
+  .sec-label{font-family:"IBM Plex Mono", monospace; font-size:12.5px; font-weight:600; letter-spacing:.14em; text-transform:uppercase; color:var(--teal); margin:0 0 12px}
+
+  .benefits{margin-top:34px; border-top:1px solid var(--line)}
+  .benefit{display:grid; grid-template-columns:64px 1fr; gap:8px 20px; padding:26px 0; border-bottom:1px solid var(--line)}
+  .benefit .num{font-family:"Newsreader", Georgia, serif; font-size:34px; font-weight:700; color:var(--teal); line-height:1}
+  .benefit h3{margin:2px 0 8px; font-size:20px; letter-spacing:-.01em}
+  .benefit p{margin:0; color:var(--ink-2); max-width:46em}
+  @media (max-width:560px){ .benefit{grid-template-columns:44px 1fr} .benefit .num{font-size:26px} }
+
+  .steps{display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; margin-top:34px}
+  @media (max-width:900px){ .steps{grid-template-columns:repeat(2,1fr)} }
+  @media (max-width:520px){ .steps{grid-template-columns:1fr} }
+  .step{background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:20px}
+  .step .step-no{font-family:"IBM Plex Mono", monospace; font-size:12px; font-weight:600; letter-spacing:.12em; color:var(--teal); text-transform:uppercase}
+  .step h3{margin:8px 0 8px; font-size:18px}
+  .step p{margin:0; font-size:15px; color:var(--ink-2); line-height:1.55}
+  .step code{font-family:"IBM Plex Mono", monospace; font-size:.88em; background:var(--surface-2); border:1px solid var(--line); padding:1px 5px; border-radius:5px}
+
+  .two-col{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:34px}
+  @media (max-width:760px){ .two-col{grid-template-columns:1fr} }
+  .panel{background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:24px}
+  .panel h3{margin:0 0 14px; font-size:18px; display:flex; align-items:center; gap:9px}
+  .panel ul{margin:0; padding:0; list-style:none}
+  .panel li{padding:9px 0 9px 28px; position:relative; color:var(--ink-2); font-size:15.5px; border-top:1px solid var(--line)}
+  .panel li:first-child{border-top:none; padding-top:2px}
+  .panel li::before{position:absolute; left:2px; top:9px; font-family:"IBM Plex Mono", monospace; font-weight:600; font-size:14px}
+  .panel.yes li::before{content:"✓"; color:var(--teal)}
+  .panel.no li::before{content:"✕"; color:var(--seal)}
+  .panel li b{color:var(--ink)}
+
+  .install-box{margin-top:34px; background:var(--term-bg); border-radius:16px; border:1px solid #232c3a; overflow:hidden}
+  .install-row{display:flex; align-items:center; gap:12px; padding:18px 18px 6px; flex-wrap:wrap}
+  .install-row code{font-family:"IBM Plex Mono", monospace; font-size:15px; color:#e7f0e9; word-break:break-all}
+  .install-row code .prompt{color:#5f7268}
+  .copy-btn{margin-left:auto; font-family:"IBM Plex Mono", monospace; font-size:13px; font-weight:600; padding:8px 14px; border-radius:8px; border:1px solid #334155; background:#182030; color:#e2e8f0; cursor:pointer}
+  .copy-btn:hover{border-color:#64748b}
+  .install-note{padding:8px 18px 18px; color:#8a9a90; font-size:14px; line-height:1.6}
+  .install-note a{color:#7dd3a8}
+  .flow-line{padding:14px 18px 4px; font-family:"IBM Plex Mono", monospace; font-size:13.5px; color:#aebbb2; line-height:2; word-break:break-word}
+  .flow-line .arr{color:#5f7268}
+
+  .status-panel{margin-top:34px; border:1px solid var(--amber-line); background:var(--amber-soft); border-radius:var(--radius); padding:26px}
+  .status-panel h3{margin:0 0 10px; font-size:20px}
+  .status-panel p{margin:0 0 12px; color:var(--ink-2); max-width:52em}
+  .status-panel p:last-child{margin-bottom:0}
+  @media (prefers-color-scheme: dark){ .status-panel p{color:var(--ink-2)} }
+
+  details.faq{border-bottom:1px solid var(--line)}
+  details.faq:first-of-type{border-top:1px solid var(--line); margin-top:30px}
+  details.faq summary{cursor:pointer; font-weight:600; font-size:17px; padding:18px 4px; list-style:none; display:flex; justify-content:space-between; gap:14px; align-items:baseline}
+  details.faq summary::-webkit-details-marker{display:none}
+  details.faq summary::after{content:"+"; font-family:"IBM Plex Mono", monospace; color:var(--teal); font-size:20px; flex:0 0 auto}
+  details.faq[open ] summary::after{content:"–"}
+  details.faq .faq-body{padding:0 4px 20px; color:var(--ink-2); max-width:48em}
+  details.faq .faq-body p{margin:0 0 10px}
+
+  footer{margin-top:80px; border-top:1px solid var(--line); background:var(--bg-2)}
+  .foot-in{padding:34px 0 42px; display:flex; flex-wrap:wrap; gap:18px 40px; align-items:flex-start}
+  .foot-in .fbrand{font-weight:700; font-size:18px}
+  .foot-in p{margin:6px 0 0; color:var(--muted); font-size:14px; max-width:36em}
+  .foot-links{display:flex; flex-direction:column; gap:7px; margin-left:auto}
+  .foot-links a{font-size:14.5px; font-weight:500}
+  @media (max-width:640px){ .foot-links{margin-left:0} }
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="#top" aria-label="SealRun home">
+      <svg class="brand-mark" viewBox="0 0 32 32" fill="none" aria-hidden="true"><circle cx="16" cy="16" r="13.5" style="stroke:var(--seal)" stroke-width="2.4"/><path d="M10.5 16.5l3.8 3.8L21.8 12" style="stroke:var(--teal)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      SealRun
+    </a>
+    <nav class="nav-links" aria-label="Page">
+      <a href="#how" class="hide-sm">How it works</a>
+      <a href="#proves" class="hide-sm">What it proves</a>
+      <a href="#try">Try it</a>
+      <a href="#review">Review</a>
+      <a class="btn-nav" href="https://github.com/RobGanon/bsv-ai-security" target="_blank" rel="noopener">GitHub ↗</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+  <div class="wrap">
+
+    <!-- HERO -->
+    <div class="hero">
+      <div class="status-row" aria-label="Project status">
+        <span class="pill warn"><span class="dot"></span>Research preview</span>
+        <span class="pill warn"><span class="dot"></span>Not yet independently reviewed</span>
+        <span class="pill"><span class="dot"></span>Free to test</span>
+        <span class="pill"><span class="dot"></span>Testnet by default — mainnet gated</span>
+      </div>
+
+      <h1>Know your AI ran <em>exactly what you approved</em> — and prove it later.</h1>
+
+      <p class="lede">AI tools can now write code, move files, and run commands on your machine. That power needs a receipt. <strong>SealRun checks an AI session before it starts</strong> — if the plan doesn't match what you signed off on, it doesn't run — <strong>and seals a tamper-evident record of everything that happened</strong>, so anyone can check it afterwards.</p>
+
+      <div class="name-split" aria-label="What the name means">
+        <span><b>SEAL</b> — a tamper-evident cryptographic seal on the session</span>
+        <span><b>RUN</b> — the AI execution that seal covers</span>
+      </div>
+
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/RobGanon/bsv-ai-security" target="_blank" rel="noopener">View the code on GitHub</a>
+        <a class="btn btn-ghost" href="#how">See how it works ↓</a>
+        <span class="cta-note">Open source · Runs locally · No account, no cloud</span>
+      </div>
+
+      <!-- INTERACTIVE DEMO -->
+      <div class="demo" id="demo" aria-label="Interactive demo of a sealed session record">
+        <div class="demo-head">
+          <div class="tdots" aria-hidden="true"><span></span><span></span><span></span></div>
+          <span class="demo-title">sealed session — try breaking it</span>
+          <div class="demo-actions">
+            <button class="dbtn primary" id="btnRun" type="button">▶ Run a sealed session</button>
+            <button class="dbtn danger" id="btnTamper" type="button" disabled>Tamper with entry 3</button>
+            <button class="dbtn" id="btnVerify" type="button" disabled>Verify the record</button>
+            <button class="dbtn" id="btnReset" type="button">Reset</button>
+          </div>
+        </div>
+        <div class="demo-body" id="demoBody">
+          <div><span class="dim">$</span> sealrun <span class="dim">— press “Run a sealed session” to watch a record get built, entry by entry, each one locked to the one before it.</span></div>
+          <div class="dim" style="margin-top:10px">Then try the red button: quietly change one entry, the way someone covering their tracks would — and verify.</div>
+        </div>
+        <div class="demo-foot">
+          <span class="verdict idle" id="verdict">No session yet.</span>
+          <span class="demo-caption">Simplified demo in your browser (shortened hashes). The real tool does the same thing with full cryptographic hashes, a signed manifest, and an optional on-chain anchor.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- BENEFITS -->
+    <section aria-labelledby="benefits-h">
+      <div class="sec-head">
+        <p class="sec-label">Why SealRun</p>
+        <h2 id="benefits-h">Trust, but verify — before <em>and</em> after</h2>
+        <p>Most AI safety tools only watch, or only keep a log you have to take someone's word for. SealRun does the two halves together.</p>
+      </div>
+      <div class="benefits">
+        <div class="benefit">
+          <div class="num">1</div>
+          <div>
+            <h3>Nothing runs unverified</h3>
+            <p>Before a session starts, SealRun checks its signed manifest — what is about to run, under whose approval. If anything has been swapped, edited, or rolled back to an older version, the launch is refused. The check happens <em>before</em>, not as an apology after.</p>
+          </div>
+        </div>
+        <div class="benefit">
+          <div class="num">2</div>
+          <div>
+            <h3>A record that shows its own tampering</h3>
+            <p>Everything the session does is written to a journal where each entry is locked to the entry before it — a hash chain. Change one line in the middle and every lock after it breaks. Quietly rewriting history stops being quiet.</p>
+          </div>
+        </div>
+        <div class="benefit">
+          <div class="num">3</div>
+          <div>
+            <h3>Proof that doesn't depend on trusting you</h3>
+            <p>Optionally, the head of that journal is anchored into the BSV blockchain in a single small transaction. After that, the record's existence and integrity can be checked by anyone, against a public ledger — not against your copy of the file. A human, not the AI, reviews and signs that anchor transaction.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- HOW IT WORKS -->
+    <section id="how" aria-labelledby="how-h">
+      <div class="sec-head">
+        <p class="sec-label">How it works</p>
+        <h2 id="how-h">Four steps, in plain language</h2>
+        <p>No blockchain knowledge needed for steps 1–3. They run entirely on your own machine, with no third-party dependencies to install or trust.</p>
+      </div>
+      <div class="steps">
+        <div class="step">
+          <div class="step-no">Step 1 · Describe</div>
+          <h3>The manifest</h3>
+          <p>A small signed file — the <code>sealrun-manifest-v1</code> — states what a session is allowed to be: the program, its files, and who approved them. Think of it as the sealed envelope's label.</p>
+        </div>
+        <div class="step">
+          <div class="step-no">Step 2 · Check</div>
+          <h3>Verify, then launch</h3>
+          <p>At launch, SealRun re-checks every file against the manifest and confirms the signature. Match: the session runs. Anything off — a changed file, a forged manifest, an old version replayed — and it refuses to start.</p>
+        </div>
+        <div class="step">
+          <div class="step-no">Step 3 · Record</div>
+          <h3>The chained journal</h3>
+          <p>As the session runs, each event is appended to a journal and chained to the previous entry by its hash. The journal can be re-verified at any time, by anyone with the file.</p>
+        </div>
+        <div class="step">
+          <div class="step-no">Step 4 · Anchor <span style="color:var(--muted); font-weight:500">(optional)</span></div>
+          <h3>Pin it in public</h3>
+          <p>The journal's head hash is written into a BSV transaction (an 84-byte OP_RETURN payload). The AI prepares the transaction; a human reviews exactly what will be signed and approves it — the key stays behind that human gate, out of the AI's reach.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- WHAT IT PROVES -->
+    <section id="proves" aria-labelledby="proves-h">
+      <div class="sec-head">
+        <p class="sec-label">Honest limits</p>
+        <h2 id="proves-h">What it proves — and what it doesn't</h2>
+        <p>A seal is only worth something if its limits are printed on the box. These are SealRun's.</p>
+      </div>
+      <div class="two-col">
+        <div class="panel yes">
+          <h3>SealRun proves</h3>
+          <ul>
+            <li><b>Integrity</b> — the files and journal you check today are bit-for-bit the ones that were sealed.</li>
+            <li><b>Order &amp; completeness*</b> — journal entries happened in this sequence, chained one to the next.</li>
+            <li><b>Existence by a point in time</b> — once anchored, that exact journal head existed no later than that block.</li>
+            <li><b>Approval</b> — the manifest and the anchor carry signatures from the keys that approved them.</li>
+          </ul>
+        </div>
+        <div class="panel no">
+          <h3>SealRun does not prove</h3>
+          <ul>
+            <li><b>Truthfulness</b> — a sealed journal faithfully proves what was <em>recorded</em>, not that the recorded claims were true.</li>
+            <li><b>That the AI behaved well</b> — it proves what ran and what was logged; judging the work is still on you.</li>
+            <li><b>Safety on its own</b> — verification is one layer. Sandboxing, permissions, and review still matter.</li>
+            <li><b>Mainnet readiness</b> — real-money anchoring stays gated until independent review is done.</li>
+          </ul>
+        </div>
+      </div>
+      <p style="color:var(--muted); font-size:14px; margin:14px 2px 0">* One known residual, documented in the repo: without an external checkpoint or anchor, a journal cache cut back to an older, internally-valid prefix can't be detected locally. Anchoring — or comparing against a checkpoint you trust — is what closes that gap.</p>
+    </section>
+
+    <!-- TRY IT -->
+    <section id="try" aria-labelledby="try-h">
+      <div class="sec-head">
+        <p class="sec-label">Try it</p>
+        <h2 id="try-h">Free, open source, runs on your machine</h2>
+        <p>SealRun is free while it's in research preview — the goal right now is independent testing, not sales. It runs locally with zero third-party dependencies; the only network step is the optional anchor.</p>
+      </div>
+      <div class="install-box">
+        <div class="install-row">
+          <code><span class="prompt">$</span> <span id="installCmd">git clone https://github.com/RobGanon/bsv-ai-security.git</span></code>
+          <button class="copy-btn" id="copyBtn" type="button">Copy</button>
+        </div>
+        <div class="flow-line" aria-label="Typical SealRun flow">
+          manifest <span class="arr">→</span> sign <span class="arr">→</span> verify <span class="arr">→</span> launch <span class="arr">→</span> journal <span class="arr">→</span> verify journal <span class="arr">→</span> anchor <span style="color:#5f7268">(optional)</span>
+        </div>
+        <p class="install-note">Then follow the README in the repo for the step-by-step walkthrough — including the full anchor signing ceremony, written so independent testers can run it themselves and check every step. Launch flow v2 is merged and covered by the project's own functional and adversarial test suite; your own testing on a real machine is exactly what's wanted next.</p>
+      </div>
+    </section>
+
+    <!-- REVIEW / STATUS -->
+    <section id="review" aria-labelledby="review-h">
+      <div class="sec-head">
+        <p class="sec-label">Status &amp; review</p>
+        <h2 id="review-h">Read this before you rely on it</h2>
+      </div>
+      <div class="status-panel" role="note">
+        <h3>Research preview — not yet independently reviewed</h3>
+        <p>SealRun works today and has been dogfooded end-to-end on real sessions — sealed, verified, and anchored on testnet — but <strong>no independent human review has been completed yet</strong>, and mainnet (real-money) anchoring is deliberately gated until that review happens, or the maintainer consciously decides otherwise.</p>
+        <p>Use it now for testing, self-attestation, and low-stakes records. Don't treat it as strong evidence for anything that matters until the review lands.</p>
+        <p><strong>Want to help close that gap?</strong> Independent reviewers and testers are actively wanted. The review request, scope, and step-by-step tester instructions live in <a href="https://github.com/RobGanon/bsv-ai-security/issues/4" target="_blank" rel="noopener">Issue #4 on GitHub</a> — helpers who approve are credited in the repo, under the name or handle they choose.</p>
+        <div class="cta-row" style="margin-top:16px">
+          <a class="btn btn-primary" href="https://github.com/RobGanon/bsv-ai-security/issues/4" target="_blank" rel="noopener">Read the review request</a>
+          <a class="btn btn-ghost" href="https://github.com/RobGanon/bsv-ai-security" target="_blank" rel="noopener">Browse the repository</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- FAQ -->
+    <section aria-labelledby="faq-h">
+      <div class="sec-head">
+        <p class="sec-label">Questions</p>
+        <h2 id="faq-h">The short answers</h2>
+      </div>
+
+      <details class="faq">
+        <summary>Do I need Bitcoin or BSV to use SealRun?</summary>
+        <div class="faq-body">
+          <p>No. Verification, launching, and journaling are entirely local and need no cryptocurrency at all. BSV only enters at the optional anchoring step — and by default that's testnet, which uses free test coins, not real money.</p>
+        </div>
+      </details>
+      <details class="faq">
+        <summary>How is this different from a normal log file?</summary>
+        <div class="faq-body">
+          <p>A normal log can be edited after the fact and the edit is invisible. SealRun's journal chains every entry to the one before it with a cryptographic hash, so an edit breaks the chain and shows up the moment anyone verifies it. And unlike a plain log, SealRun also checks the session <em>before</em> it runs — a log only tells you what already happened.</p>
+        </div>
+      </details>
+      <details class="faq">
+        <summary>Can the AI forge its own approval or anchor?</summary>
+        <div class="faq-body">
+          <p>That's exactly what the signing ceremony is designed to prevent. The AI prepares an unsigned anchor transaction; a human reviews the decoded transaction — payload, destination, fee, chain position — and approves it outside the AI's reach. The key lives behind that human gate, and a tampered transaction is refused before signing. Tamper tests of that flow have been run and passed on testnet.</p>
+        </div>
+      </details>
+      <details class="faq">
+        <summary>Is SealRun part of something bigger?</summary>
+        <div class="faq-body">
+          <p>It's the security module of a planned three-part platform built on one verification foundation: AI Identity, AI Security (SealRun), and AI Power Management (<span class="mono">aispm</span> — a kill switch for AI that goes bad). The build order is deliberate: finish and independently review the verification foundation first, then identity, then power management. SealRun is the piece that exists today.</p>
+        </div>
+      </details>
+      <details class="faq">
+        <summary>What does it cost?</summary>
+        <div class="faq-body">
+          <p>Nothing, for now. It's kept free to encourage independent testing and use. If it later earns money, the plan is to keep the end-user BSV cost of anchoring as low as possible — but that's a decision for after it works and has been reviewed, not before.</p>
+        </div>
+      </details>
+    </section>
+
+  </div>
+</main>
+
+<footer>
+  <div class="wrap foot-in">
+    <div>
+      <div class="fbrand">SealRun</div>
+      <p>Verify before it runs. Prove it after. An open-source research preview from the bsv-ai-security project — benefit first, caveats printed on the box.</p>
+      <p class="mono" style="font-size:12.5px">sealrun · sealrun-manifest-v1 · testnet by default</p>
+    </div>
+    <nav class="foot-links" aria-label="Footer">
+      <a href="https://github.com/RobGanon/bsv-ai-security" target="_blank" rel="noopener">GitHub repository ↗</a>
+      <a href="https://github.com/RobGanon/bsv-ai-security/issues/4" target="_blank" rel="noopener">Review request — Issue #4 ↗</a>
+      <a href="#how">How it works</a>
+      <a href="#try">Try it</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+(function(){
+  "use strict";
+
+  /* ---------- Copy install command ---------- */
+  var copyBtn = document.getElementById('copyBtn');
+  var installCmd = document.getElementById('installCmd');
+  copyBtn.addEventListener('click', function(){
+    var text = installCmd.textContent.trim();
+    function done(){
+      copyBtn.textContent = 'Copied ✓';
+      setTimeout(function(){ copyBtn.textContent = 'Copy'; }, 2000);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function(){ fallback(); });
+    } else { fallback(); }
+    function fallback(){
+      var ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } catch(e){ copyBtn.textContent = 'Select & copy'; }
+      document.body.removeChild(ta);
+    }
+  });
+
+  /* ---------- Interactive sealed-journal demo ---------- */
+  var body = document.getElementById('demoBody');
+  var verdict = document.getElementById('verdict');
+  var btnRun = document.getElementById('btnRun');
+  var btnTamper = document.getElementById('btnTamper');
+  var btnVerify = document.getElementById('btnVerify');
+  var btnReset = document.getElementById('btnReset');
+
+  var EVENTS = [
+    'manifest verified — signature OK, files match',
+    'session launched — approved program started',
+    'tool call — read src/journal.py',
+    'file written — notes/session-summary.md',
+    'session finished — exit code 0'
+  ];
+  var TAMPERED_TEXT = 'tool call — read src/journal.py  …and quietly deleted the audit log';
+
+  var entries = [];   // {seq, text, hash, prev}
+  var tampered = false;
+  var running = false;
+
+  function sha(str){
+    if (window.crypto && crypto.subtle && crypto.subtle.digest) {
+      return crypto.subtle.digest('SHA-256', new TextEncoder().encode(str)).then(function(buf){
+        var hex = Array.prototype.map.call(new Uint8Array(buf), function(b){
+          return ('0' + b.toString(16)).slice(-2);
+        }).join('');
+        return hex.slice(0, 12);
+      }).catch(function(){ return Promise.resolve(fallbackHash(str)); });
+    }
+    return Promise.resolve(fallbackHash(str));
+  }
+  function fallbackHash(str){
+    var h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (var i = 0; i < str.length; i++){
+      var ch = str.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (h2 >>> 0).toString(16).padStart(8,'0') + (h1 >>> 0).toString(16).padStart(4,'0');
+  }
+
+  function render(brokenFrom){
+    body.innerHTML = '';
+    entries.forEach(function(e, i){
+      var row = document.createElement('div');
+      row.className = 'entry' + (brokenFrom !== null && i >= brokenFrom ? ' broken' : '');
+      var seq = document.createElement('span'); seq.className = 'seq'; seq.textContent = '#' + e.seq;
+      var txt = document.createElement('span'); txt.textContent = e.text;
+      var hash = document.createElement('span'); hash.className = 'hash'; hash.textContent = 'hash ' + e.hash;
+      row.appendChild(seq); row.appendChild(txt); row.appendChild(hash);
+      body.appendChild(row);
+    });
+    if (entries.length){
+      var head = document.createElement('div');
+      head.style.marginTop = '10px';
+      head.innerHTML = '<span class="dim">journal head →</span> <span class="hash" style="color:#7dd3a8;font-family:inherit">' + entries[entries.length-1].hash + '</span> <span class="dim">— this is the value that gets anchored on-chain.</span>';
+      body.appendChild(head);
+    }
+  }
+
+  function setVerdict(text, cls){
+    verdict.textContent = text;
+    verdict.className = 'verdict ' + cls;
+  }
+
+  btnRun.addEventListener('click', function(){
+    if (running) return;
+    running = true; tampered = false; entries = [];
+    btnRun.disabled = true; btnTamper.disabled = true; btnVerify.disabled = true;
+    body.innerHTML = '<div><span class="dim">$</span> sealrun launch <span class="dim">— verifying manifest…</span> <span class="ok">OK</span></div>';
+    setVerdict('Running — building the chained journal…', 'idle');
+    var prev = 'GENESIS';
+    var chain = Promise.resolve();
+    EVENTS.forEach(function(text, i){
+      chain = chain.then(function(){
+        return sha(prev + '|' + text).then(function(h){
+          entries.push({ seq: i + 1, text: text, hash: h, prev: prev });
+          prev = h;
+          render(null);
+          return new Promise(function(r){ setTimeout(r, 420); });
+        });
+      });
+    });
+    chain.then(function(){
+      running = false;
+      btnTamper.disabled = false; btnVerify.disabled = false;
+      setVerdict('Session sealed — 5 entries chained. Now verify it, or tamper first.', 'ok');
+    });
+  });
+
+  btnTamper.addEventListener('click', function(){
+    if (!entries.length || tampered) return;
+    tampered = true;
+    entries[2].text = TAMPERED_TEXT;
+    render(null);
+    setVerdict('Entry 3 quietly edited. The hashes above still show the old locks — verify to catch it.', 'idle');
+  });
+
+  btnVerify.addEventListener('click', function(){
+    if (!entries.length) return;
+    setVerdict('Verifying chain…', 'idle');
+    var prev = 'GENESIS';
+    var chain = Promise.resolve(true);
+    var brokenAt = -1;
+    entries.forEach(function(e, i){
+      chain = chain.then(function(okSoFar){
+        if (!okSoFar) return false;
+        return sha(e.prev + '|' + e.text).then(function(h){
+          var good = (e.prev === prev) && (h === e.hash);
+          if (!good && brokenAt === -1) brokenAt = i;
+          prev = e.hash;
+          return good;
+        });
+      });
+    });
+    chain.then(function(allGood){
+      if (allGood){
+        render(null);
+        setVerdict('✓ VERIFIED — every entry matches its lock. This record is exactly what was sealed.', 'ok');
+      } else {
+        render(brokenAt === -1 ? 0 : brokenAt);
+        setVerdict('✕ FAILED at entry #' + ((brokenAt === -1 ? 0 : brokenAt) + 1) + ' — its content no longer matches its lock. Tampering detected.', 'bad');
+      }
+    });
+  });
+
+  btnReset.addEventListener('click', function(){
+    entries = []; tampered = false; running = false;
+    btnRun.disabled = false; btnTamper.disabled = true; btnVerify.disabled = true;
+    body.innerHTML = '<div><span class="dim">$</span> sealrun <span class="dim">— press “Run a sealed session” to watch a record get built, entry by entry, each one locked to the one before it.</span></div><div class="dim" style="margin-top:10px">Then try the red button: quietly change one entry, the way someone covering their tracks would — and verify.</div>';
+    setVerdict('No session yet.', 'idle');
+  });
+})();
+</script>
+</body>
+</html>

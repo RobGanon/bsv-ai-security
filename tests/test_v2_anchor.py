@@ -277,7 +277,7 @@ def test_journal_without_a_v2_nonce_has_no_v2_identity(tmp_path):
 
     no_nonce = tmp_path / "no-nonce.jsonl"
     append_v2_event(no_nonce, V2_FINISH_EVENT_TYPE, finish_detail())
-    with pytest.raises(VerificationError, match="no journal_nonce"):
+    with pytest.raises(VerificationError, match="no v2 event"):
         journal_genesis_identity_for_path(no_nonce)
 
 

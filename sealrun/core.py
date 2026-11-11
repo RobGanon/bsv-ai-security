@@ -1398,6 +1398,24 @@ def verify_audit_prefix(journal: Path) -> dict:
     }
 
 
+def journal_has_genesis_nonce(events: Sequence[dict]) -> bool:
+    """Return whether any v2 event in ``events`` carries a journal nonce.
+
+    This is the shared "does this journal have a v2 identity seed?" scan.
+    The launcher's first-launch exception and
+    :func:`journal_genesis_identity` both use it, so they agree on which
+    events seed a v2 identity. A ``v2_launch_failed`` event carries no
+    ``journal_nonce``, so failed launches never seed an identity.
+    """
+    for event in events:
+        if event.get("event_type") not in V2_EVENT_TYPES:
+            continue
+        detail = _run_event_detail(event)
+        if detail.get("journal_nonce") is not None:
+            return True
+    return False
+
+
 def journal_genesis_identity(events: Sequence[dict]) -> dict:
     """Return the v2 journal identity: genesis hash plus its genesis nonce.
 
@@ -1414,6 +1432,11 @@ def journal_genesis_identity(events: Sequence[dict]) -> dict:
             "cannot derive a v2 journal identity from an empty journal"
         )
     genesis_hash = str(events[0]["event_hash"]).lower()
+    if not journal_has_genesis_nonce(events):
+        raise VerificationError(
+            "journal has no v2 event with a genesis nonce; a bare genesis "
+            "hash is not a v2 journal identity"
+        )
     for event in events:
         if event.get("event_type") not in V2_EVENT_TYPES:
             continue

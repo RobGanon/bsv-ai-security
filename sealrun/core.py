@@ -1404,8 +1404,10 @@ def journal_has_genesis_nonce(events: Sequence[dict]) -> bool:
     This is the shared "does this journal have a v2 identity seed?" scan.
     The launcher's first-launch exception and
     :func:`journal_genesis_identity` both use it, so they agree on which
-    events seed a v2 identity. A ``v2_launch_failed`` event carries no
-    ``journal_nonce``, so failed launches never seed an identity.
+    events seed a v2 identity: any v2 event carrying a ``journal_nonce``,
+    regardless of position. A ``v2_launch_failed`` event carries no
+    ``journal_nonce``, so failed launches never seed an identity, and a
+    failed launch followed by a successful one still seeds one.
     """
     for event in events:
         if event.get("event_type") not in V2_EVENT_TYPES:
@@ -1421,10 +1423,12 @@ def journal_genesis_identity(events: Sequence[dict]) -> dict:
 
     A bare genesis hash is not an identity (frozen design §6.5): journal
     events carry no timestamp, so two journals can share a repeatable first
-    event. V2 therefore requires the first v2 event to carry a unique
-    ``journal_nonce``; the identity hashes the genesis event hash together
-    with that nonce, never the bare hash. The first event may be a legacy
-    event, so the nonce is taken from the first v2 event in the journal.
+    event. V2 therefore requires a unique ``journal_nonce``; the identity
+    hashes the genesis event hash together with that nonce, never the bare
+    hash. The first event may be a legacy event, and the first *v2* event
+    may carry no nonce — a refused launch records ``v2_launch_failed``,
+    which has no ``journal_nonce`` — so the nonce is taken from the first
+    nonce-bearing v2 event in the journal, skipping nonce-less v2 events.
     """
     _verify_audit_events(list(events))
     if not events:
@@ -1443,10 +1447,12 @@ def journal_genesis_identity(events: Sequence[dict]) -> dict:
         detail = _run_event_detail(event)
         nonce = detail.get("journal_nonce")
         if nonce is None:
-            raise VerificationError(
-                "the first v2 event has no journal_nonce; a v2 journal "
-                "identity requires a unique genesis nonce"
-            )
+            # Not the genesis nonce bearer: a v2_launch_failed event (or
+            # any nonce-less v2 event) precedes the first successful
+            # launch. Skip it rather than refusing; the identity comes
+            # from the first nonce-bearing v2 event, matching
+            # :func:`journal_has_genesis_nonce`.
+            continue
         nonce = _v2_nonce(nonce)
         identity = hashlib.sha256(
             canonical_json_bytes(

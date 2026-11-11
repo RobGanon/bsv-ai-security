@@ -57,6 +57,7 @@ import sys
 import sealrun.launcher as launcher
 
 launcher.assert_journal_writer_isolation = lambda *args, **kwargs: None
+launcher.assert_checkpoint_cache_isolation = lambda *args, **kwargs: None
 launcher.V2_SIGNAL_FORWARD_TIMEOUT = float(os.environ["TEST_FORWARD_TIMEOUT"])
 signal.signal(signal.SIGINT, signal.default_int_handler)
 for name in ("SIGHUP", "SIGTERM", "SIGCHLD"):
@@ -371,6 +372,11 @@ def in_process(tmp_path, child_ids, monkeypatch):
     """A real in-process v2 launch (no signals involved)."""
     monkeypatch.setattr(
         launcher, "assert_journal_writer_isolation", lambda *args, **kwargs: None
+    )
+    # The cache is a second trust store checked under the same §5.7 rules;
+    # those also need a privileged launcher, so bypass them together.
+    monkeypatch.setattr(
+        launcher, "assert_checkpoint_cache_isolation", lambda *args, **kwargs: None
     )
     harness = V2Harness(tmp_path, child_ids)
 

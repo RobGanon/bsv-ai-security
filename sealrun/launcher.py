@@ -85,6 +85,7 @@ from subprocess import SubprocessError
 from typing import Callable, Mapping, NamedTuple, NoReturn, Sequence
 
 from .checkpoint_cache import (
+    assert_checkpoint_cache_isolation,
     read_checkpoint_cache,
     verify_checkpoint_against_journal,
 )
@@ -709,6 +710,7 @@ def _enforce_v2_rollback(
     checkpoint_cache: Path | None,
     *,
     journal_identity: JournalIdentity | None,
+    uid: int | None,
 ) -> int:
     """Apply the v2 anchored-checkpoint rollback rule (§8).
 
@@ -716,6 +718,13 @@ def _enforce_v2_rollback(
     refusal is recorded as ``v2_launch_failed`` (stage ``launch``) before
     the exception escapes, so a refused launch never runs the child and
     leaves a durable explanation.
+
+    The cache is a second trust store, so when a cache file is present
+    its §5.7 placement rules are re-checked here, before its contents are
+    trusted: bootstrap enforced them when the cache was written, but
+    nothing stopped the file from moving or loosening afterwards. A
+    missing cache file skips the check and takes the first-launch path
+    below.
 
     First-launch exception: bootstrap derives the journal identity from the
     journal's nonce-bearing v2 events, so a journal with no such event
@@ -786,6 +795,20 @@ def _enforce_v2_rollback(
         cache_present = (
             checkpoint_cache.is_symlink() or checkpoint_cache.exists()
         )
+        if cache_present:
+            # A present cache is trusted only if the dropped child could
+            # not have written it (§5.7): ownership, mode bits, ACLs, and
+            # filesystem, re-checked at launch time against the placement
+            # bootstrap enforced. A cache path that names no file takes
+            # the first-launch exception instead and is not checked.
+            try:
+                assert_checkpoint_cache_isolation(checkpoint_cache, uid)
+            except VerificationError as exc:
+                refuse(
+                    "checkpoint cache isolation refused the launch: "
+                    f"{exc}",
+                    exc,
+                )
         try:
             record = read_checkpoint_cache(checkpoint_cache)
             checkpoint = verify_checkpoint_against_journal(record, journal)
@@ -1394,6 +1417,7 @@ def launch(
             min_release_seq,
             checkpoint_cache,
             journal_identity=journal_identity,
+            uid=uid,
         )
 
     reraise_signal = 0

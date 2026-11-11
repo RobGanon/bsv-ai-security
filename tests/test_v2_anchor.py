@@ -21,6 +21,7 @@ from sealrun.cli import main
 from sealrun.core import (
     V2_FINISH_EVENT_TYPE,
     V2_LAUNCH_EVENT_TYPE,
+    V2_LAUNCH_FAILED_EVENT_TYPE,
     VerificationError,
     _read_jsonl,
     append_audit_event,
@@ -279,6 +280,40 @@ def test_journal_without_a_v2_nonce_has_no_v2_identity(tmp_path):
     append_v2_event(no_nonce, V2_FINISH_EVENT_TYPE, finish_detail())
     with pytest.raises(VerificationError, match="no v2 event"):
         journal_genesis_identity_for_path(no_nonce)
+
+
+def test_identity_uses_the_first_nonce_bearing_v2_event(tmp_path):
+    """A refused launch records ``v2_launch_failed`` first, which carries
+    no ``journal_nonce``. The identity must come from the first
+    nonce-bearing v2 event — the later successful ``v2_launch`` — not
+    refuse because the first v2 event lacks a nonce, and it must agree
+    with :func:`sealrun.core.journal_has_genesis_nonce`, which counts any
+    nonce-bearing v2 event.
+    """
+    journal = tmp_path / "failed-first.jsonl"
+    append_audit_event(journal, "test", "first")
+    append_v2_event(
+        journal,
+        V2_LAUNCH_FAILED_EVENT_TYPE,
+        {
+            "launch_mode": "v2",
+            "run_id": str(uuid.uuid4()),
+            "stage": "launch",
+            "reason": "v2 launch requires --min-release-seq",
+        },
+    )
+    append_v2_event(journal, V2_LAUNCH_EVENT_TYPE, launch_detail(nonce="e" * 32))
+
+    identity = journal_genesis_identity_for_path(journal)
+    events, _fragment = read_journal_prefix(journal)
+    assert identity["genesis_hash"] == events[0]["event_hash"]
+    assert identity["identity"] != identity["genesis_hash"]
+    assert identity["genesis_nonce"] == "e" * 32
+    assert identity["genesis_nonce_seq"] == 3
+    assert identity["journal_events"] == 3
+
+    # The in-memory helper returns the same identity for the same journal.
+    assert journal_genesis_identity(events) == identity
 
 
 def test_identity_empty_and_missing_journal_fail_closed(tmp_path):

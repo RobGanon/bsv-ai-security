@@ -5,8 +5,17 @@ release checkpoint cache. The launcher binds the cache to the journal,
 requires the manifest sequence to be at least the anchored checkpoint,
 and refuses (recording ``v2_launch_failed``) before any child runs when
 either is missing, when the operator minimum is below the checkpoint, or
-when the cache is missing, tampered, older, or no longer bound to the
-journal.
+when the cache is tampered, older, or no longer bound to the journal.
+
+The one exception is the *first* v2 launch for a journal: bootstrap
+derives the journal identity from the journal's nonce-bearing v2 events,
+so a journal without one cannot have a cache yet, and requiring the
+cache first would close the loop with no entry point. When the cache is
+missing and the journal has no nonce-bearing v2 event, the launch
+proceeds with effective checkpoint 0, prints the first-launch notice,
+and its ``v2_launch`` event seeds the identity. Once any nonce-bearing
+v2 event exists, a missing cache refuses exactly as before. Only the
+cache requirement is excepted: ``--min-release-seq`` stays mandatory.
 
 The cache itself is append-only with a monotonic ``checkpoint_seq`` and a
 non-decreasing ``release_seq`` / ``anchor_end_seq``. That detects an
@@ -19,6 +28,7 @@ hidden here.
 import json
 import subprocess
 import types
+import uuid
 from pathlib import Path
 
 import pytest
@@ -39,13 +49,14 @@ from sealrun.core import (
     append_v2_event,
     canonical_json_bytes,
     create_manifest,
+    journal_genesis_identity,
     manifest_hash,
     read_journal_prefix,
     record_manifest_acceptance,
     sign_manifest,
     verify_audit_journal,
 )
-from sealrun.launcher import launch
+from sealrun.launcher import V2_FIRST_LAUNCH_NOTICE, launch
 
 
 # --------------------------------------------------------------------------
@@ -123,6 +134,42 @@ def write_cache(
 def accept(journal: Path, envelope: dict, seq: int) -> None:
     record_manifest_acceptance(
         journal, seq, f"release-{seq}", manifest_hash(envelope)
+    )
+
+
+def seed_launch_event(journal: Path, *, nonce: str = "a" * 32) -> dict:
+    """Append a minimal valid v2_launch event, as a completed launch would."""
+    return append_v2_event(
+        journal,
+        V2_LAUNCH_EVENT_TYPE,
+        {
+            "launch_mode": "v2",
+            "run_id": "00000000-0000-4000-8000-000000000000",
+            "journal_nonce": nonce,
+            "manifest_hash": "b" * 64,
+            "artifact_count": 0,
+            "argv_fingerprint": "c" * 64,
+            "env_fingerprint": "d" * 64,
+            "executable": "true",
+            "cwd": "/tmp",
+            "seal": False,
+            "uid": 12345,
+            "gid": 12345,
+        },
+    )
+
+
+def seed_launch_failed_event(journal: Path) -> None:
+    """Append a v2_launch_failed event: it carries no journal_nonce."""
+    append_v2_event(
+        journal,
+        V2_LAUNCH_FAILED_EVENT_TYPE,
+        {
+            "launch_mode": "v2",
+            "run_id": str(uuid.uuid4()),
+            "stage": "launch",
+            "reason": "an earlier launch attempt failed",
+        },
     )
 
 
@@ -217,17 +264,25 @@ def test_omitting_min_release_seq_refuses_before_running_the_child(v2_launch):
     assert_launch_failed(journal, "requires --min-release-seq")
 
 
-def test_omitting_the_checkpoint_cache_refuses(v2_launch):
+def test_seeded_journal_refuses_a_missing_cache(v2_launch):
+    """Case A5 preserved: once the journal has a nonce-bearing v2 event, a
+    missing cache refuses exactly as before — whether the cache path is
+    omitted entirely or names a file that does not exist."""
     tmp_path, spy = v2_launch
     bundle = make_bundle(tmp_path, manifest_seq=10)
-    journal = tmp_path / "audit.jsonl"
-    accept(journal, bundle[1], 10)
+    seeded = tmp_path / "seeded.jsonl"
+    seed_launch_event(seeded)
 
     with pytest.raises(VerificationError, match="requires --checkpoint-cache"):
-        do_launch(bundle, journal, min_release_seq=10, checkpoint_cache=None)
-
+        do_launch(bundle, seeded, min_release_seq=10, checkpoint_cache=None)
     assert spy.calls == []
-    assert_launch_failed(journal, "requires --checkpoint-cache")
+    assert_launch_failed(seeded, "requires --checkpoint-cache")
+
+    missing = tmp_path / "checkpoint.jsonl"
+    with pytest.raises(VerificationError, match="cache is missing"):
+        do_launch(bundle, seeded, min_release_seq=10, checkpoint_cache=missing)
+    assert spy.calls == []
+    assert_launch_failed(seeded, "cache is missing")
 
 
 def test_sequence_at_the_checkpoint_launches(v2_launch):
@@ -275,19 +330,53 @@ def test_zero_checkpoint_is_valid_when_no_acceptance_is_anchored(v2_launch):
     assert len(spy.calls) == 1
 
 
-def test_missing_cache_refuses_and_is_not_checkpoint_zero(v2_launch):
+def test_first_launch_without_a_cache_seeds_the_identity(v2_launch, capsys):
+    """The first-launch exception. Bootstrap derives the journal identity
+    from the journal's nonce-bearing v2 events, so a journal without one
+    cannot have a checkpoint cache yet, and requiring the cache first
+    would close the loop with no entry point. A journal with no
+    nonce-bearing v2 event — a fresh journal, or one whose only v2 events
+    are ``v2_launch_failed`` (they carry no ``journal_nonce``) — launches
+    with effective checkpoint 0, and its ``v2_launch`` event seeds the
+    identity. ``--min-release-seq`` is still required and still enforced.
+    """
     tmp_path, spy = v2_launch
-    bundle = make_bundle(tmp_path, manifest_seq=0)
-    journal = tmp_path / "audit.jsonl"
     missing = tmp_path / "checkpoint.jsonl"
 
-    with pytest.raises(VerificationError, match="cache is missing"):
-        do_launch(
-            bundle, journal, min_release_seq=0, checkpoint_cache=missing
-        )
+    # A fresh journal: the very first v2 launch for this deployment.
+    bundle = make_bundle(tmp_path, manifest_seq=0)
+    journal = tmp_path / "audit.jsonl"
+    assert do_launch(
+        bundle, journal, min_release_seq=0, checkpoint_cache=missing
+    ) == 0
+    assert len(spy.calls) == 1
+    assert V2_FIRST_LAUNCH_NOTICE in capsys.readouterr().out
+    events = read_events(journal)
+    assert [event["event_type"] for event in events] == [
+        V2_LAUNCH_EVENT_TYPE, V2_FINISH_EVENT_TYPE
+    ]
+    nonce = json.loads(events[0]["detail"])["journal_nonce"]
+    identity = journal_genesis_identity(read_journal_prefix(journal)[0])
+    assert identity["genesis_nonce"] == nonce
 
-    assert spy.calls == []
-    assert_launch_failed(journal, "cache is missing")
+    # v2_launch_failed events carry no journal_nonce, so they do not seed
+    # an identity: a journal holding only those still takes the exception.
+    failed_journal = tmp_path / "failed-first.jsonl"
+    seed_launch_failed_event(failed_journal)
+    seed_launch_failed_event(failed_journal)
+    assert do_launch(
+        bundle, failed_journal, min_release_seq=0, checkpoint_cache=missing
+    ) == 0
+    assert len(spy.calls) == 2
+    assert V2_FIRST_LAUNCH_NOTICE in capsys.readouterr().out
+    assert [
+        event["event_type"] for event in read_events(failed_journal)
+    ] == [
+        V2_LAUNCH_FAILED_EVENT_TYPE,
+        V2_LAUNCH_FAILED_EVENT_TYPE,
+        V2_LAUNCH_EVENT_TYPE,
+        V2_FINISH_EVENT_TYPE,
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -402,7 +491,9 @@ def test_append_writer_refuses_an_older_checkpoint(tmp_path):
 # only anchored manifest_accepted events advance the checkpoint
 # --------------------------------------------------------------------------
 
-def test_launch_and_finish_events_do_not_advance_the_checkpoint(v2_launch):
+def test_launch_and_finish_events_do_not_advance_the_checkpoint(
+    v2_launch, capsys
+):
     tmp_path, spy = v2_launch
     bundle = make_bundle(tmp_path, manifest_seq=0)
     journal = tmp_path / "audit.jsonl"
@@ -426,6 +517,11 @@ def test_launch_and_finish_events_do_not_advance_the_checkpoint(v2_launch):
         bundle, journal, min_release_seq=0, checkpoint_cache=cache
     ) == 0
     assert len(spy.calls) == 2
+
+    # The second launch ran on a journal that already has v2 events and a
+    # cache present: behaviour is exactly as before the first-launch
+    # exception, and no seeding notice is printed.
+    assert V2_FIRST_LAUNCH_NOTICE not in capsys.readouterr().out
 
 
 def test_anchored_release_seq_ignores_events_after_the_prefix(tmp_path):

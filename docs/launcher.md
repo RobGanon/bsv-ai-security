@@ -239,6 +239,30 @@ sudo sealrun bootstrap \
   --uid model
 ```
 
+**The first launch has no cache to read.** Bootstrap derives the journal
+identity from the journal's nonce-bearing v2 events, so a fresh journal
+cannot have a checkpoint cache yet, and requiring the cache before any
+launch would close the loop with no entry point: no nonce without a
+launch, no launch without a cache, no cache without bootstrap. The
+launcher therefore makes one exception: when the checkpoint cache is
+missing **and** the journal contains no v2 event carrying a
+`journal_nonce`, the launch proceeds with effective checkpoint 0 and
+prints
+
+```
+NOTICE: first v2 launch for this journal: no checkpoint cache and no v2 identity yet; seeding the journal identity with checkpoint 0
+```
+
+The written `v2_launch` event carries that nonce, which seeds the
+journal identity; bootstrap can then run and create the cache, and
+every later launch is bound to it. A `v2_launch_failed` event carries no
+`journal_nonce`, so failed launches do not seed an identity. Once any
+nonce-bearing v2 event exists, a missing cache refuses exactly as
+before — the exception never reads a missing cache as checkpoint 0 for
+a journal that already has a v2 identity. `--min-release-seq` stays
+mandatory in v2 and is still enforced; the exception covers only the
+missing cache.
+
 **Rollback limits.** The append-only cache with its monotonic sequence
 detects an *appended* older checkpoint and refuses it. Truncating the
 cache back to an older, internally valid prefix is **not detectable**
@@ -250,6 +274,17 @@ stated residual, not a property the local cache can provide. Keep the
 cache on storage the child and its uid cannot write, and treat an
 external record of the latest anchored checkpoint as the high-water
 mark when that threat is in scope.
+
+**Residual of the first-launch exception.** Deleting the cache **and**
+truncating the journal together could reset a started deployment to
+checkpoint 0: with no cache and no nonce-bearing v2 event left, the
+next launch takes the first-launch exception. Either act alone still
+refuses — a deleted cache alone refuses because the journal still has
+its identity, and a truncated journal alone refuses because the cache's
+anchored prefix no longer matches. Recovery from the combined case is
+re-bootstrapping from the anchor chain: re-derive the release checkpoint
+from the anchored history (with the network available and the anchor-only
+predicate) rather than trusting the reset local state.
 
 ## What this does not fix
 

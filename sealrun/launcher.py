@@ -97,13 +97,16 @@ from .core import (
     JournalIdentity,
     VerificationError,
     VerifiedArtifact,
+    _verify_audit_events,
     append_v2_event,
     assert_journal_writer_isolation,
     canonical_json_bytes,
     fingerprint_argv,
     fingerprint_environment,
+    journal_has_genesis_nonce,
     manifest_hash,
     pin_journal_identity,
+    read_journal_prefix,
     verified_artifacts,
     write_detached_channel_list,
 )
@@ -120,6 +123,15 @@ _NON_ALNUM = re.compile(r"[^A-Za-z0-9]+")
 #: termination signal to it, before the launcher sends the group SIGKILL
 #: (§5.4: forward first, escalate after a stated timeout).
 V2_SIGNAL_FORWARD_TIMEOUT = 5.0
+
+#: Printed exactly when a v2 launch takes the first-launch exception (§8):
+#: no checkpoint cache and no nonce-bearing v2 event in the journal. The
+#: launch proceeds with effective checkpoint 0 and the written v2_launch
+#: event seeds the journal identity.
+V2_FIRST_LAUNCH_NOTICE = (
+    "NOTICE: first v2 launch for this journal: no checkpoint cache and no "
+    "v2 identity yet; seeding the journal identity with checkpoint 0"
+)
 
 #: Termination signals a v2 launcher records and forwards instead of dying
 #: on. A signal that was ignored when the launcher started stays ignored.
@@ -703,7 +715,19 @@ def _enforce_v2_rollback(
     Returns the effective minimum sequence handed to verification. Every
     refusal is recorded as ``v2_launch_failed`` (stage ``launch``) before
     the exception escapes, so a refused launch never runs the child and
-    leaves a durable explanation. A missing cache is never read as 0.
+    leaves a durable explanation.
+
+    First-launch exception: bootstrap derives the journal identity from the
+    journal's nonce-bearing v2 events, so a journal with no such event
+    cannot have a checkpoint cache yet, and requiring the cache before any
+    launch would close the loop with no entry point (no nonce without a
+    launch, no launch without a cache, no cache without bootstrap). When
+    the cache is missing and the journal has no nonce-bearing v2 event,
+    the launch proceeds with effective checkpoint 0 and prints
+    :data:`V2_FIRST_LAUNCH_NOTICE`; the written ``v2_launch`` event seeds
+    the identity. Once any nonce-bearing v2 event exists, a missing cache
+    still refuses exactly as before — a missing cache is never read as 0
+    for a journal that already has a v2 identity.
     """
 
     def refuse(reason: str, original: BaseException | None = None) -> NoReturn:
@@ -717,6 +741,25 @@ def _enforce_v2_rollback(
         )
         raise VerificationError(reason) from (original or None)
 
+    def journal_is_seeded() -> bool:
+        """Whether the journal already has a nonce-bearing v2 event.
+
+        The journal is verified first, so an unreadable or tampered
+        journal refuses rather than silently counting as unseeded. The
+        scan itself is the shared :func:`core.journal_has_genesis_nonce`
+        helper, the same one ``journal_genesis_identity`` uses.
+        """
+        try:
+            events, _fragment = read_journal_prefix(journal)
+            _verify_audit_events(events)
+        except VerificationError as exc:
+            refuse(
+                "cannot verify the audit journal for the rollback check: "
+                f"{exc}",
+                exc,
+            )
+        return journal_has_genesis_nonce(events)
+
     if min_release_seq is None:
         refuse(
             "v2 launch requires --min-release-seq: an explicit pinned "
@@ -728,15 +771,29 @@ def _enforce_v2_rollback(
         refuse(f"invalid --min-release-seq: {exc}", exc)
 
     if checkpoint_cache is None:
-        refuse(
-            "v2 launch requires --checkpoint-cache: the anchored release "
-            "checkpoint is mandatory, and a missing cache is not checkpoint 0"
+        if journal_is_seeded():
+            refuse(
+                "v2 launch requires --checkpoint-cache: the anchored release "
+                "checkpoint is mandatory, and a missing cache is not "
+                "checkpoint 0"
+            )
+        print(V2_FIRST_LAUNCH_NOTICE)
+        checkpoint = 0
+    else:
+        # A present-but-unusable cache (symlink, directory, torn, empty,
+        # mismatched) is never read as checkpoint 0; only a cache path
+        # that names no file at all can take the first-launch exception.
+        cache_present = (
+            checkpoint_cache.is_symlink() or checkpoint_cache.exists()
         )
-    try:
-        record = read_checkpoint_cache(checkpoint_cache)
-        checkpoint = verify_checkpoint_against_journal(record, journal)
-    except VerificationError as exc:
-        refuse(f"rollback check refused the launch: {exc}", exc)
+        try:
+            record = read_checkpoint_cache(checkpoint_cache)
+            checkpoint = verify_checkpoint_against_journal(record, journal)
+        except VerificationError as exc:
+            if cache_present or journal_is_seeded():
+                refuse(f"rollback check refused the launch: {exc}", exc)
+            print(V2_FIRST_LAUNCH_NOTICE)
+            checkpoint = 0
 
     if minimum < checkpoint:
         refuse(

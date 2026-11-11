@@ -283,6 +283,16 @@ def install_spy(monkeypatch, spy):
     monkeypatch.setattr(
         launcher, "assert_journal_writer_isolation", lambda *args, **kwargs: None
     )
+    # The launch path re-checks the cache's §5.7 placement; the predicate
+    # needs a privileged launcher, so inject the euid (the isolated_cache
+    # fixture guarantees the placement passes it).
+    monkeypatch.setattr(
+        launcher,
+        "assert_checkpoint_cache_isolation",
+        lambda path, child_uid: assert_checkpoint_cache_isolation(
+            path, child_uid, launcher_euid=0
+        ),
+    )
 
 
 # --------------------------------------------------------------------------

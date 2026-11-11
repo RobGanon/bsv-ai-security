@@ -151,6 +151,11 @@ def make_bundle(tmp_path, monkeypatch):
     monkeypatch.setattr(
         launcher, "assert_journal_writer_isolation", lambda *args, **kwargs: None
     )
+    # The cache is a second trust store checked under the same §5.7 rules;
+    # those also need a privileged launcher, so bypass them together.
+    monkeypatch.setattr(
+        launcher, "assert_checkpoint_cache_isolation", lambda *args, **kwargs: None
+    )
     spy = _RunSpy()
     monkeypatch.setattr(launcher, "_run_v2_child", spy)
     counter = 0

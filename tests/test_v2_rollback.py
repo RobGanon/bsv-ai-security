@@ -34,6 +34,8 @@ from pathlib import Path
 import pytest
 from sealrun.bsv import PrivKey
 
+import sealrun.checkpoint_cache as checkpoint_cache
+import sealrun.core as core
 import sealrun.launcher as launcher
 from sealrun.checkpoint_cache import (
     anchored_release_seq,
@@ -106,6 +108,11 @@ def install_spy(monkeypatch, spy: Spy) -> None:
 def bypass_isolation(monkeypatch) -> None:
     monkeypatch.setattr(
         launcher, "assert_journal_writer_isolation", lambda *args, **kwargs: None
+    )
+    # The cache is a second trust store checked under the same §5.7 rules;
+    # those also need a privileged launcher, so bypass them together.
+    monkeypatch.setattr(
+        launcher, "assert_checkpoint_cache_isolation", lambda *args, **kwargs: None
     )
 
 
@@ -382,6 +389,71 @@ def test_first_launch_without_a_cache_seeds_the_identity(v2_launch, capsys):
 # --------------------------------------------------------------------------
 # tampering / stale / truncated cache
 # --------------------------------------------------------------------------
+
+def test_launch_refuses_a_cache_that_fails_isolation(v2_launch, monkeypatch):
+    """§5.7 at launch time: the cache is a second trust store, so a cache
+    file present at launch must satisfy the same placement rules
+    bootstrap enforced, checked before its contents are trusted. A
+    group-writable cache file is refused (and recorded as
+    ``v2_launch_failed``) even though its contents would verify.
+    """
+    tmp_path, spy = v2_launch
+    bundle = make_bundle(tmp_path, manifest_seq=5)
+    journal = tmp_path / "audit.jsonl"
+    accept(journal, bundle[1], 5)
+    store = tmp_path / "store"
+    store.mkdir(mode=0o700)
+    cache = write_cache(store / "checkpoint.jsonl", journal, 5)
+    cache.chmod(0o666)
+
+    # The §5.7 predicate needs a privileged launcher; tests run
+    # unprivileged, so inject the euid the production call site already
+    # has (the same injection the bootstrap isolation tests use). The
+    # /tmp ancestor chain is group-writable, so scope the predicate to
+    # the store directory like make_safe_cache does in the bootstrap
+    # isolation tests.
+    real_isolation = checkpoint_cache.assert_checkpoint_cache_isolation
+    monkeypatch.setattr(
+        launcher,
+        "assert_checkpoint_cache_isolation",
+        lambda path, child_uid: real_isolation(path, child_uid, launcher_euid=0),
+    )
+    monkeypatch.setattr(core, "_ancestor_directories", lambda path: [])
+    monkeypatch.setattr(core, "_filesystem_type", lambda path: "btrfs")
+
+    with pytest.raises(VerificationError, match="group- or world-writable"):
+        do_launch(bundle, journal, min_release_seq=5, checkpoint_cache=cache)
+    assert len(spy.calls) == 0
+    assert_launch_failed(journal, "checkpoint cache isolation")
+
+
+def test_launch_does_not_isolation_check_a_missing_cache(v2_launch, monkeypatch):
+    """Only a present cache file is isolation-checked: a missing cache
+    follows the first-launch path and must not newly fail on the cache
+    path's placement — here a parent directory that would refuse §5.7 if
+    the predicate ran on the missing cache.
+    """
+    tmp_path, spy = v2_launch
+    bundle = make_bundle(tmp_path, manifest_seq=0)
+    journal = tmp_path / "audit.jsonl"
+
+    real_isolation = checkpoint_cache.assert_checkpoint_cache_isolation
+    monkeypatch.setattr(
+        launcher,
+        "assert_checkpoint_cache_isolation",
+        lambda path, child_uid: real_isolation(path, child_uid, launcher_euid=0),
+    )
+    monkeypatch.setattr(core, "_ancestor_directories", lambda path: [])
+    monkeypatch.setattr(core, "_filesystem_type", lambda path: "btrfs")
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    loose.chmod(0o777)
+
+    assert do_launch(
+        bundle, journal, min_release_seq=0, checkpoint_cache=loose / "checkpoint.jsonl"
+    ) == 0
+    assert len(spy.calls) == 1
+
 
 def test_tampered_head_hash_refuses(v2_launch):
     tmp_path, spy = v2_launch

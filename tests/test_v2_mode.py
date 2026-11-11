@@ -112,6 +112,11 @@ def bypass_isolation(monkeypatch) -> None:
     monkeypatch.setattr(
         launcher, "assert_journal_writer_isolation", lambda *args, **kwargs: None
     )
+    # The cache is a second trust store checked under the same §5.7 rules;
+    # those also need a privileged launcher, so bypass them together.
+    monkeypatch.setattr(
+        launcher, "assert_checkpoint_cache_isolation", lambda *args, **kwargs: None
+    )
 
 
 def write_checkpoint(tmp_path: Path, journal: Path, release_seq: int = 0) -> Path:

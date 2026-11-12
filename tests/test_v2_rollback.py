@@ -41,13 +41,16 @@ from sealrun.checkpoint_cache import (
     anchored_release_seq,
     append_checkpoint_cache,
     read_checkpoint_cache,
+    verify_checkpoint_against_journal,
 )
 from sealrun.cli import main
 from sealrun.core import (
+    MANIFEST_ACCEPTED_EVENT_TYPE,
     V2_FINISH_EVENT_TYPE,
     V2_LAUNCH_EVENT_TYPE,
     V2_LAUNCH_FAILED_EVENT_TYPE,
     VerificationError,
+    append_audit_event,
     append_v2_event,
     canonical_json_bytes,
     create_manifest,
@@ -641,6 +644,171 @@ def test_run_events_alone_derive_checkpoint_zero(tmp_path):
     )
     events, _fragment = read_journal_prefix(journal)
     assert anchored_release_seq(events, len(events)) == 0
+
+
+# --------------------------------------------------------------------------
+# fail-closed acceptance parsing (agrees with the anchor derivation)
+# --------------------------------------------------------------------------
+
+def test_unbound_acceptance_fails_closed_instead_of_counting(tmp_path):
+    """An acceptance whose detail lacks the manifest binding must not
+    advance the checkpoint. The launch-time derivation agrees with the
+    anchor derivation's fail-closed parsing: it raises, it neither
+    counts the acceptance nor silently skips it (a silent skip would let
+    a hand-written cache claim a checkpoint a bound journal refutes, and
+    would hide the malformed acceptance from the operator).
+    """
+    journal = tmp_path / "audit.jsonl"
+    append_audit_event(journal, "test", "first")
+    append_audit_event(
+        journal,
+        MANIFEST_ACCEPTED_EVENT_TYPE,
+        json.dumps({"release_seq": 5}),
+    )
+    events, _fragment = read_journal_prefix(journal)
+
+    with pytest.raises(
+        VerificationError, match="legacy unbound manifest_accepted"
+    ):
+        anchored_release_seq(events, len(events))
+
+
+def test_malformed_acceptance_details_fail_closed(tmp_path):
+    """Every structural defect the anchor derivation refuses also refuses
+    the launch-time derivation, with the same wording family."""
+    cases = [
+        ("detail must be a JSON string", None),
+        ("not valid JSON or has duplicate keys", "{bad"),
+        (
+            "detail must be a JSON object",
+            json.dumps(["not", "an", "object"]),
+        ),
+        ("detail has no manifest_hash", json.dumps({"release_seq": 5})),
+        (
+            "release_seq is invalid",
+            json.dumps(
+                {
+                    "release_seq": -1,
+                    "release_id": "release-5",
+                    "manifest_hash": "a" * 64,
+                }
+            ),
+        ),
+        (
+            "release_seq is invalid",
+            json.dumps(
+                {
+                    "release_seq": "5",
+                    "release_id": "release-5",
+                    "manifest_hash": "a" * 64,
+                }
+            ),
+        ),
+        (
+            "release_id must be a non-empty string",
+            json.dumps(
+                {
+                    "release_seq": 5,
+                    "release_id": "",
+                    "manifest_hash": "a" * 64,
+                }
+            ),
+        ),
+        (
+            "must be 64 hexadecimal characters",
+            json.dumps(
+                {
+                    "release_seq": 5,
+                    "release_id": "release-5",
+                    "manifest_hash": "not-a-hash",
+                }
+            ),
+        ),
+    ]
+    for case_index, (expected, detail) in enumerate(cases):
+        journal = tmp_path / f"audit-{case_index}.jsonl"
+        append_audit_event(journal, "test", "first")
+        if detail is None:
+            # The append API refuses a non-string detail, so this case
+            # writes the tampered journal line directly — exactly the
+            # hand-written-journal situation the check defends against.
+            with journal.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "seq": 2,
+                            "event_type": MANIFEST_ACCEPTED_EVENT_TYPE,
+                            "detail": None,
+                        }
+                    )
+                    + "\n"
+                )
+        else:
+            append_audit_event(journal, MANIFEST_ACCEPTED_EVENT_TYPE, detail)
+        events, _fragment = read_journal_prefix(journal)
+        with pytest.raises(VerificationError, match=expected):
+            anchored_release_seq(events, len(events))
+
+
+def test_duplicate_detail_keys_fail_closed(tmp_path):
+    """Duplicate JSON keys parse ambiguously; the anchor derivation
+    rejects them, so the launch-time derivation refuses them too rather
+    than counting whichever value a lenient parser would keep."""
+    journal = tmp_path / "audit.jsonl"
+    append_audit_event(journal, "test", "first")
+    append_audit_event(
+        journal,
+        MANIFEST_ACCEPTED_EVENT_TYPE,
+        '{"release_seq": 5, "release_seq": 6, "release_id": "release-5", '
+        '"manifest_hash": "' + "a" * 64 + '"}',
+    )
+    events, _fragment = read_journal_prefix(journal)
+
+    with pytest.raises(
+        VerificationError, match="not valid JSON or has duplicate keys"
+    ):
+        anchored_release_seq(events, len(events))
+
+
+def test_bound_acceptance_still_counts_after_fail_closed_parsing(tmp_path):
+    """The fail-closed rules must not reject a genuinely bound
+    acceptance: the same event that raises when unbound counts when it
+    carries release_id and manifest_hash (the structural fields this
+    derivation can check without the manifests themselves)."""
+    bundle = make_bundle(tmp_path, manifest_seq=5)
+    journal = tmp_path / "audit.jsonl"
+    append_audit_event(journal, "test", "first")
+    accept(journal, bundle[1], 5)
+    events, _fragment = read_journal_prefix(journal)
+
+    assert anchored_release_seq(events, len(events)) == 5
+
+
+def test_cache_over_an_unbound_acceptance_refuses(tmp_path):
+    """A cache record claiming release_seq 5 over a journal whose only
+    acceptance is unbound must be refused at launch: the checkpoint the
+    cache pins cannot be derived from bound acceptances, so the
+    prefix-consistency check fails closed instead of trusting the cache's
+    own claim."""
+    journal = tmp_path / "audit.jsonl"
+    append_audit_event(journal, "test", "first")
+    append_audit_event(
+        journal,
+        MANIFEST_ACCEPTED_EVENT_TYPE,
+        json.dumps({"release_seq": 5}),
+    )
+    events, _fragment = read_journal_prefix(journal)
+    record = {
+        "checkpoint_seq": 1,
+        "release_seq": 5,
+        "anchor_end_seq": len(events),
+        "head_hash": events[-1]["event_hash"],
+    }
+
+    with pytest.raises(
+        VerificationError, match="legacy unbound manifest_accepted"
+    ):
+        verify_checkpoint_against_journal(record, journal)
 
 
 # --------------------------------------------------------------------------

@@ -47,6 +47,8 @@ from .checkpoint_seq import validate_checkpoint_seq
 from .core import (
     MANIFEST_ACCEPTED_EVENT_TYPE,
     VerificationError,
+    _check_manifest_hash,
+    _no_duplicate_object,
     _parse_jsonl_bytes,
     _verify_audit_events,
     canonical_json_bytes,
@@ -196,8 +198,21 @@ def anchored_release_seq(events: Sequence[dict], end_seq: int) -> int:
     Only ``manifest_accepted`` events advance the checkpoint. Launch and
     finish events (and every other event type) are ignored, so a journal
     full of v2 run-state events does not move the release checkpoint.
-    Malformed or out-of-range acceptance details are skipped, matching
-    the anchor derivation's fail-soft filter.
+
+    Acceptance parsing is fail-closed and agrees with the anchor
+    derivation (:func:`sealrun.anchor._derive_release_seq`): a detail
+    that is not a JSON string, is not valid JSON or has duplicate keys,
+    is not a JSON object, lacks ``manifest_hash``, has a malformed
+    ``manifest_hash`` or ``release_id``, or has an invalid ``release_seq``
+    raises :class:`VerificationError` rather than being skipped or
+    counted. An unbound acceptance is structurally identical to the
+    forgery the manifest binding closes, so it fails closed here too.
+
+    What this function still cannot do is verify the ``manifest_hash``
+    against a signed manifest: it takes no manifests or public key. That
+    full verification stays with the anchor derivation and
+    :func:`bootstrap_checkpoint`; this fix closes the structural
+    divergence only.
     """
     end_seq = _seq(end_seq, "anchor_end_seq")
     if end_seq > len(events):
@@ -207,22 +222,50 @@ def anchored_release_seq(events: Sequence[dict], end_seq: int) -> int:
             "below the anchored checkpoint"
         )
     maximum = 0
-    for event in events[:end_seq]:
+    for index, event in enumerate(events[:end_seq], 1):
         if event.get("event_type") != MANIFEST_ACCEPTED_EVENT_TYPE:
             continue
+        seq = event.get("seq")
+        if not isinstance(seq, int) or isinstance(seq, bool):
+            seq = index
         detail = event.get("detail")
         if not isinstance(detail, str):
-            continue
+            raise VerificationError(
+                f"malformed manifest_accepted detail at sequence {seq}: "
+                "detail must be a JSON string"
+            )
         try:
-            parsed = json.loads(detail)
-        except ValueError:
-            continue
+            parsed = json.loads(detail, object_pairs_hook=_no_duplicate_object)
+        except ValueError as exc:
+            raise VerificationError(
+                f"malformed manifest_accepted detail at sequence {seq}: "
+                "detail is not valid JSON or has duplicate keys"
+            ) from exc
         if not isinstance(parsed, dict):
-            continue
+            raise VerificationError(
+                f"malformed manifest_accepted detail at sequence {seq}: "
+                "detail must be a JSON object"
+            )
+        if "manifest_hash" not in parsed:
+            raise VerificationError(
+                f"legacy unbound manifest_accepted detail at sequence {seq}: "
+                "detail has no manifest_hash; pre-#11 acceptances fail closed "
+                "and must be re-recorded with a manifest binding"
+            )
         try:
             value = validate_checkpoint_seq(parsed.get("release_seq"))
-        except ValueError:
-            continue
+        except ValueError as exc:
+            raise VerificationError(
+                f"malformed manifest_accepted detail at sequence {seq}: "
+                f"release_seq is invalid: {exc}"
+            ) from exc
+        release_id = parsed.get("release_id")
+        if not isinstance(release_id, str) or not release_id:
+            raise VerificationError(
+                f"malformed manifest_accepted detail at sequence {seq}: "
+                "release_id must be a non-empty string"
+            )
+        _check_manifest_hash(parsed.get("manifest_hash"))
         if value > maximum:
             maximum = value
     return maximum

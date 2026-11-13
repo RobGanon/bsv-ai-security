@@ -85,7 +85,10 @@ from subprocess import SubprocessError
 from typing import Callable, Mapping, NamedTuple, NoReturn, Sequence
 
 from .checkpoint_cache import (
+    _read_records,
     assert_checkpoint_cache_isolation,
+    cache_key_path,
+    load_cache_key,
     read_checkpoint_cache,
     verify_checkpoint_against_journal,
 )
@@ -711,6 +714,7 @@ def _enforce_v2_rollback(
     *,
     journal_identity: JournalIdentity | None,
     uid: int | None,
+    cache_key: Path | None = None,
 ) -> int:
     """Apply the v2 anchored-checkpoint rollback rule (§8).
 
@@ -724,7 +728,11 @@ def _enforce_v2_rollback(
     trusted: bootstrap enforced them when the cache was written, but
     nothing stopped the file from moving or loosening afterwards. A
     missing cache file skips the check and takes the first-launch path
-    below.
+    below. The deployment key that authenticates the cache records is
+    loaded from beside the cache (``<cache-dir>/cache.key``, or
+    ``cache_key`` when given) and gets the same placement re-check; a
+    missing or unreadable key refuses — verification is never silently
+    skipped (§5.2).
 
     First-launch exception: bootstrap derives the journal identity from the
     journal's nonce-bearing v2 events, so a journal with no such event
@@ -736,7 +744,8 @@ def _enforce_v2_rollback(
     :data:`V2_FIRST_LAUNCH_NOTICE`; the written ``v2_launch`` event seeds
     the identity. Once any nonce-bearing v2 event exists, a missing cache
     still refuses exactly as before — a missing cache is never read as 0
-    for a journal that already has a v2 identity.
+    for a journal that already has a v2 identity. No key is needed on
+    that path: nothing is trusted from a cache that names no file.
     """
 
     def refuse(reason: str, original: BaseException | None = None) -> NoReturn:
@@ -795,12 +804,14 @@ def _enforce_v2_rollback(
         cache_present = (
             checkpoint_cache.is_symlink() or checkpoint_cache.exists()
         )
+        key_path = cache_key_path(checkpoint_cache, cache_key)
         if cache_present:
             # A present cache is trusted only if the dropped child could
             # not have written it (§5.7): ownership, mode bits, ACLs, and
             # filesystem, re-checked at launch time against the placement
             # bootstrap enforced. A cache path that names no file takes
-            # the first-launch exception instead and is not checked.
+            # the first-launch exception instead and is not checked. The
+            # deployment key lives under the same placement rules.
             try:
                 assert_checkpoint_cache_isolation(checkpoint_cache, uid)
             except VerificationError as exc:
@@ -809,14 +820,39 @@ def _enforce_v2_rollback(
                     f"{exc}",
                     exc,
                 )
-        try:
-            record = read_checkpoint_cache(checkpoint_cache)
-            checkpoint = verify_checkpoint_against_journal(record, journal)
-        except VerificationError as exc:
-            if cache_present or journal_is_seeded():
+            try:
+                assert_checkpoint_cache_isolation(key_path, uid)
+            except VerificationError as exc:
+                refuse(
+                    "checkpoint cache key isolation refused the launch: "
+                    f"{exc}",
+                    exc,
+                )
+            try:
+                key = load_cache_key(key_path)
+                record = read_checkpoint_cache(checkpoint_cache, key=key)
+                checkpoint = verify_checkpoint_against_journal(record, journal)
+            except VerificationError as exc:
                 refuse(f"rollback check refused the launch: {exc}", exc)
-            print(V2_FIRST_LAUNCH_NOTICE)
-            checkpoint = 0
+        else:
+            # The cache names no file, so no record can be trusted and no
+            # key is loaded (§7 decision b): the read below can only
+            # refuse, which keeps the missing-cache diagnosis identical to
+            # the pre-signing behaviour while the first-launch exception
+            # stays untouched.
+            try:
+                _read_records(checkpoint_cache)
+            except VerificationError as exc:
+                if journal_is_seeded():
+                    refuse(f"rollback check refused the launch: {exc}", exc)
+                print(V2_FIRST_LAUNCH_NOTICE)
+                checkpoint = 0
+            else:
+                refuse(
+                    "checkpoint cache appeared after the presence check "
+                    "found no file; refusing rather than trusting a cache "
+                    "that races the launch"
+                )
 
     if minimum < checkpoint:
         refuse(
@@ -1274,6 +1310,7 @@ def launch(
     *,
     min_release_seq: int | None = None,
     checkpoint_cache: Path | None = None,
+    cache_key: Path | None = None,
     seal: bool = False,
     uid: int | None = None,
     gid: int | None = None,
@@ -1303,8 +1340,11 @@ def launch(
     ``checkpoint_cache`` (§8, freeze decision 4). ``checkpoint_cache`` is
     the append-only anchored checkpoint store read by
     :func:`sealrun.checkpoint_cache.read_checkpoint_cache`; the launcher
-    binds its anchored prefix to the journal and requires the manifest's
-    sequence to be at least the anchored ``release_seq``. Omitting either
+    verifies every record's ``record_mac`` under the deployment key (by
+    default ``<cache-dir>/cache.key``, overridden with ``cache_key``),
+    binds its anchored prefix and journal identity to the journal, and
+    requires the manifest's sequence to be at least the anchored
+    ``release_seq``. Omitting either
     value, or supplying ``min_release_seq`` below the anchored checkpoint,
     refuses the launch and records ``v2_launch_failed`` without running the
     child. A missing cache is never treated as checkpoint 0.
@@ -1366,6 +1406,11 @@ def launch(
                 "--checkpoint-cache is only valid with --mode v2; v1 "
                 "launches consume no anchored release checkpoint"
             )
+        if cache_key is not None:
+            raise VerificationError(
+                "--cache-key is only valid with --mode v2; v1 launches "
+                "consume no anchored release checkpoint"
+            )
     else:
         if journal is None:
             raise VerificationError(
@@ -1418,6 +1463,7 @@ def launch(
             checkpoint_cache,
             journal_identity=journal_identity,
             uid=uid,
+            cache_key=cache_key,
         )
 
     reraise_signal = 0

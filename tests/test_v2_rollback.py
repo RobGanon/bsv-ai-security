@@ -26,6 +26,7 @@ hidden here.
 """
 
 import json
+import secrets
 import subprocess
 import types
 import uuid
@@ -40,8 +41,12 @@ import sealrun.launcher as launcher
 from sealrun.checkpoint_cache import (
     anchored_release_seq,
     append_checkpoint_cache,
+    cache_key_path,
+    compute_record_mac,
+    load_cache_key,
     read_checkpoint_cache,
     verify_checkpoint_against_journal,
+    write_cache_key,
 )
 from sealrun.cli import main
 from sealrun.core import (
@@ -55,6 +60,7 @@ from sealrun.core import (
     canonical_json_bytes,
     create_manifest,
     journal_genesis_identity,
+    journal_has_genesis_nonce,
     manifest_hash,
     read_journal_prefix,
     record_manifest_acceptance,
@@ -119,6 +125,33 @@ def bypass_isolation(monkeypatch) -> None:
     )
 
 
+def deployment_key(cache: Path) -> bytes:
+    """The deployment key for a fixture cache, beside it like bootstrap writes."""
+    key_path = cache_key_path(cache)
+    if key_path.exists():
+        return load_cache_key(key_path)
+    key = secrets.token_bytes(32)
+    write_cache_key(key_path, key)
+    return key
+
+
+def signed_record(
+    key: bytes, journal_identity: str, *, checkpoint_seq: int, release_seq: int,
+    anchor_end_seq: int, head_hash: str,
+) -> dict:
+    """A hand-built record that carries a valid MAC (the fixture stands in
+    for bootstrap; forging without the key is covered in the signing tests)."""
+    record = {
+        "checkpoint_seq": checkpoint_seq,
+        "release_seq": release_seq,
+        "anchor_end_seq": anchor_end_seq,
+        "head_hash": head_hash,
+        "journal_identity": journal_identity,
+    }
+    record["record_mac"] = compute_record_mac(key, record)
+    return record
+
+
 def write_cache(
     path: Path,
     journal: Path,
@@ -128,6 +161,12 @@ def write_cache(
     head_hash: str | None = None,
 ) -> Path:
     events, _fragment = read_journal_prefix(journal)
+    if not journal_has_genesis_nonce(events):
+        # A signed cache cannot exist for a journal with no v2 identity
+        # (§7 decision d): production bootstrap refuses, so seed the
+        # identity the way the first v2 launch would.
+        seed_launch_event(journal)
+        events, _fragment = read_journal_prefix(journal)
     if anchor_end_seq is None:
         anchor_end_seq = len(events)
     if head_hash is None:
@@ -137,6 +176,8 @@ def write_cache(
         release_seq=release_seq,
         anchor_end_seq=anchor_end_seq,
         head_hash=head_hash,
+        key=deployment_key(path),
+        journal_identity=journal_genesis_identity(events)["identity"],
     )
     return path
 
@@ -465,9 +506,19 @@ def test_tampered_head_hash_refuses(v2_launch):
     accept(journal, bundle[1], 10)
     cache = write_cache(tmp_path / "checkpoint.jsonl", journal, 10)
 
-    record = read_checkpoint_cache(cache)
+    record = read_checkpoint_cache(cache, key=deployment_key(cache))
     forged = "1" * 64 if record["head_hash"] != "1" * 64 else "2" * 64
-    forged_record = dict(record, head_hash=forged)
+    # The tampered record is re-signed so the journal binding itself is
+    # exercised here; tampering *without* re-signing is covered by the
+    # record_mac tests (a forged record cannot be re-signed without the key).
+    forged_record = signed_record(
+        deployment_key(cache),
+        record["journal_identity"],
+        checkpoint_seq=record["checkpoint_seq"],
+        release_seq=record["release_seq"],
+        anchor_end_seq=record["anchor_end_seq"],
+        head_hash=forged,
+    )
     cache.write_text(
         canonical_json_bytes(forged_record).decode("utf-8") + "\n",
         encoding="utf-8",
@@ -522,23 +573,25 @@ def test_cache_with_a_decreasing_release_seq_refuses(v2_launch):
     journal = tmp_path / "audit.jsonl"
     accept(journal, bundle[1], 10)
     cache = tmp_path / "checkpoint.jsonl"
+    key = deployment_key(cache)
+    identity = "e" * 64
     cache.write_text(
         canonical_json_bytes(
-            {
-                "checkpoint_seq": 1,
-                "release_seq": 10,
-                "anchor_end_seq": len(read_journal_prefix(journal)[0]),
-                "head_hash": "a" * 64,
-            }
+            signed_record(
+                key, identity,
+                checkpoint_seq=1, release_seq=10,
+                anchor_end_seq=len(read_journal_prefix(journal)[0]),
+                head_hash="a" * 64,
+            )
         ).decode("utf-8")
         + "\n"
         + canonical_json_bytes(
-            {
-                "checkpoint_seq": 2,
-                "release_seq": 5,
-                "anchor_end_seq": len(read_journal_prefix(journal)[0]),
-                "head_hash": "b" * 64,
-            }
+            signed_record(
+                key, identity,
+                checkpoint_seq=2, release_seq=5,
+                anchor_end_seq=len(read_journal_prefix(journal)[0]),
+                head_hash="b" * 64,
+            )
         ).decode("utf-8")
         + "\n",
         encoding="utf-8",
@@ -553,12 +606,18 @@ def test_cache_with_a_decreasing_release_seq_refuses(v2_launch):
 
 def test_append_writer_refuses_an_older_checkpoint(tmp_path):
     cache = tmp_path / "checkpoint.jsonl"
+    key = deployment_key(cache)
+    # The append path validates the identity field's format only; the
+    # journal binding happens at launch (there is no journal here).
+    identity = "e" * 64
     append_checkpoint_cache(
-        cache, release_seq=10, anchor_end_seq=5, head_hash="a" * 64
+        cache, release_seq=10, anchor_end_seq=5, head_hash="a" * 64,
+        key=key, journal_identity=identity,
     )
     with pytest.raises(VerificationError, match="older than the cache's current release_seq"):
         append_checkpoint_cache(
-            cache, release_seq=5, anchor_end_seq=6, head_hash="b" * 64
+            cache, release_seq=5, anchor_end_seq=6, head_hash="b" * 64,
+            key=key, journal_identity=identity,
         )
 
 
@@ -577,8 +636,10 @@ def test_launch_and_finish_events_do_not_advance_the_checkpoint(
     assert do_launch(
         bundle, journal, min_release_seq=0, checkpoint_cache=cache
     ) == 0
+    # write_cache seeded the journal identity (a signed cache cannot exist
+    # without one), so the first launch records the second v2_launch event.
     assert [event["event_type"] for event in read_events(journal)] == [
-        V2_LAUNCH_EVENT_TYPE, V2_FINISH_EVENT_TYPE
+        V2_LAUNCH_EVENT_TYPE, V2_LAUNCH_EVENT_TYPE, V2_FINISH_EVENT_TYPE
     ]
 
     # Anchor a second checkpoint at the post-run prefix. If launch/finish

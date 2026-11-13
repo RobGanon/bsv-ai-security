@@ -13,6 +13,7 @@ privileged launcher is required; the predicate itself is tested directly.
 import hashlib
 import json
 import os
+import secrets
 import subprocess
 import types
 import uuid
@@ -23,7 +24,12 @@ from sealrun.bsv import PrivKey
 
 import sealrun.core as core
 import sealrun.launcher as launcher
-from sealrun.checkpoint_cache import append_checkpoint_cache
+from sealrun.checkpoint_cache import (
+    append_checkpoint_cache,
+    cache_key_path,
+    load_cache_key,
+    write_cache_key,
+)
 from sealrun.cli import main
 from sealrun.core import (
     V2_FINISH_EVENT_TYPE,
@@ -35,6 +41,8 @@ from sealrun.core import (
     assert_journal_writer_isolation,
     create_manifest,
     generate_keypair,
+    journal_genesis_identity,
+    journal_has_genesis_nonce,
     load_private_key,
     manifest_hash,
     read_journal_prefix,
@@ -119,15 +127,35 @@ def bypass_isolation(monkeypatch) -> None:
     )
 
 
+def deployment_key(cache: Path) -> bytes:
+    """The deployment key for a fixture cache, beside it like bootstrap writes."""
+    key_path = cache_key_path(cache)
+    if key_path.exists():
+        return load_cache_key(key_path)
+    key = secrets.token_bytes(32)
+    write_cache_key(key_path, key)
+    return key
+
+
 def write_checkpoint(tmp_path: Path, journal: Path, release_seq: int = 0) -> Path:
-    """Create an anchored checkpoint cache matching the journal's current prefix."""
+    """Create an anchored checkpoint cache matching the journal's current prefix.
+
+    A signed cache cannot exist for a journal with no v2 identity (§7
+    decision d): when the journal is not yet seeded the cache is left
+    unwritten and the launch takes the first-launch exception, exactly as
+    a deployment does before its first bootstrap.
+    """
     path = tmp_path / "checkpoint.jsonl"
     events, _fragment = read_journal_prefix(journal)
+    if not journal_has_genesis_nonce(events):
+        return path
     append_checkpoint_cache(
         path,
         release_seq=release_seq,
         anchor_end_seq=len(events),
         head_hash=events[-1]["event_hash"] if events else "0" * 64,
+        key=deployment_key(path),
+        journal_identity=journal_genesis_identity(events)["identity"],
     )
     return path
 

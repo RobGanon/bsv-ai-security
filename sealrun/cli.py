@@ -151,6 +151,9 @@ def main(argv=None):
     p.add_argument("--checkpoint-cache", type=Path, default=None,
                    help="v2 only: append-only anchored release checkpoint cache; "
                         "required in v2 mode (a missing cache is not checkpoint 0)")
+    p.add_argument("--cache-key", type=Path, default=None,
+                   help="v2 only: deployment key file that authenticates the "
+                        "checkpoint cache records (default: <cache-dir>/cache.key)")
     p.add_argument("--mode", choices=("v1", "v2"), default="v1",
                    help="launch mode (default: v1, unchanged); v2 is the "
                         "explicit per-launch opt-in that writes strict journal events")
@@ -314,6 +317,10 @@ def main(argv=None):
     p.add_argument("--checkpoint-cache", required=True, type=Path,
                    help="append-only checkpoint cache to write (its directory "
                         "must already satisfy the §5.7 isolation rules)")
+    p.add_argument("--cache-key", type=Path, default=None,
+                   help="deployment key file that authenticates the cache "
+                        "records (default: <cache-dir>/cache.key; generated "
+                        "on first bootstrap)")
     p.add_argument("--genesis-txid", required=True,
                    help="trusted genesis anchor txid from operator-pinned "
                         "config; never inferred from the anchors being checked")
@@ -480,6 +487,7 @@ def main(argv=None):
                 args.command_argv,
                 min_release_seq=args.min_release_seq,
                 checkpoint_cache=args.checkpoint_cache,
+                cache_key=args.cache_key,
                 seal=args.seal,
                 uid=resolve_uid(args.uid),
                 gid=resolve_gid(args.gid),
@@ -1123,6 +1131,7 @@ def main(argv=None):
                 manifests=manifests,
                 public_key=public_key,
                 child_uid=child_uid,
+                cache_key=args.cache_key,
             )
             record = result["checkpoint"]
             print(json.dumps(result, indent=2, sort_keys=True))

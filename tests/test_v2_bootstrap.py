@@ -14,6 +14,7 @@ than hidden.
 """
 
 import os
+import secrets
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,8 +32,11 @@ from sealrun.checkpoint_cache import (
     append_checkpoint_cache,
     assert_checkpoint_cache_isolation,
     bootstrap_checkpoint,
+    cache_key_path,
+    load_cache_key,
     read_checkpoint_cache,
     verify_checkpoint_against_journal,
+    write_cache_key,
 )
 from sealrun.cli import main
 from sealrun.core import (
@@ -41,6 +45,7 @@ from sealrun.core import (
     VerificationError,
     append_v2_event,
     create_manifest,
+    journal_genesis_identity,
     manifest_hash,
     read_journal_prefix,
     record_manifest_acceptance,
@@ -323,7 +328,8 @@ def test_bootstrap_authenticates_anchor_chain_and_records_bound_checkpoint(
     assert record["release_seq"] == 10
     assert record["checkpoint_seq"] == 1
     assert record["anchor_end_seq"] == len(read_journal_prefix(journal)[0])
-    assert read_checkpoint_cache(isolated_cache) == record
+    key = load_cache_key(cache_key_path(isolated_cache))
+    assert read_checkpoint_cache(isolated_cache, key=key) == record
 
     events, _fragment = read_journal_prefix(journal)
     assert anchored_release_seq(events, record["anchor_end_seq"]) == 10
@@ -709,25 +715,30 @@ def test_truncation_to_an_older_internally_valid_prefix_is_a_stated_residual(
     events, _fragment = read_journal_prefix(journal)
     prefix_end = len(events) - 1
 
+    key = secrets.token_bytes(32)
     append_checkpoint_cache(
         isolated_cache,
         release_seq=0,
         anchor_end_seq=prefix_end,
         head_hash=events[prefix_end - 1]["event_hash"],
+        key=key,
+        journal_identity=journal_genesis_identity(events)["identity"],
     )
     append_checkpoint_cache(
         isolated_cache,
         release_seq=10,
         anchor_end_seq=len(events),
         head_hash=events[-1]["event_hash"],
+        key=key,
+        journal_identity=journal_genesis_identity(events)["identity"],
     )
-    newest = read_checkpoint_cache(isolated_cache)
+    newest = read_checkpoint_cache(isolated_cache, key=key)
     assert newest["release_seq"] == 10
 
     lines = isolated_cache.read_text(encoding="utf-8").splitlines(keepends=True)
     isolated_cache.write_text(lines[0], encoding="utf-8")
 
-    truncated = read_checkpoint_cache(isolated_cache)
+    truncated = read_checkpoint_cache(isolated_cache, key=key)
     assert truncated["release_seq"] == 0
     assert verify_checkpoint_against_journal(truncated, journal) == 0
 

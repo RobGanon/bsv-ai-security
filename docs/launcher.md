@@ -224,6 +224,21 @@ and unknown types refuse). The cache is written append-only with a
 contiguous `checkpoint_seq` and non-decreasing `release_seq` /
 `anchor_end_seq`.
 
+Every cache record is also signed. Bootstrap generates a 32-byte
+deployment key on first run and stores it as a root-only file beside the
+cache (`<cache-dir>/cache.key`, e.g. `/srv/sealrun/cache.key`); each
+record carries a `record_mac` (HMAC-SHA256 over the record's other
+fields) and the journal's v2 identity, `journal_identity`, inside the
+signed payload. At launch the key is loaded and every record verified; a
+missing or unreadable key refuses the launch rather than skipping
+verification. An optional `--cache-key <path>` overrides the default
+path on both `bootstrap` and `launch`. Bootstrap on a journal that has
+no v2 identity yet is not supported: run a first v2 launch to seed the
+identity, then bootstrap. Caches written before this fix are refused:
+remove the stale cache and re-bootstrap (the journal and anchors are
+untouched). There is no compatibility path, and key rotation means
+re-bootstrap.
+
 ```bash
 sudo sealrun bootstrap \
   --journal /srv/sealrun/audit.jsonl \

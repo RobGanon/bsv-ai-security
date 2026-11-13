@@ -8,6 +8,7 @@ chain passes the item 8 anchor-only predicate while the network is
 available):
 
     {"anchor_end_seq": 42, "checkpoint_seq": 1, "head_hash": "<64 hex>",
+     "journal_identity": "<64 hex>", "record_mac": "<64 hex>",
      "release_seq": 10}
 
 ``checkpoint_seq`` is the cache's own monotonic 1-based sequence. It is
@@ -19,11 +20,22 @@ does not match, whose anchored prefix is missing (journal truncation),
 or whose ``release_seq`` is not the max over the ``manifest_accepted``
 events inside that prefix.
 
-Trust boundary: this module checks structural integrity and consistency
-with the journal. It does not verify an on-chain anchor, and it does not
-re-check that each acceptance is bound to a signed manifest — that is
-the anchor workflow's job. The cache must therefore live in protected
-storage the child cannot write.
+Every record is also authenticated: ``bootstrap_checkpoint`` signs each
+record with HMAC-SHA256 under a deployment key stored root-only beside
+the cache (``<cache-dir>/cache.key``), and carries the journal's v2
+identity inside the signed payload. ``record_mac`` covers
+``checkpoint_seq``, ``release_seq``, ``anchor_end_seq``, ``head_hash``,
+and ``journal_identity``, so a hand-written or tampered record —
+including the trivial "checkpoint 0" forgery — is refused at launch
+unless the attacker also holds the key. The launcher loads the key at
+launch time; a missing or unreadable key refuses, it never silences the
+verification.
+
+Trust boundary: this module checks structural integrity, record
+authenticity, and consistency with the journal. It does not verify an
+on-chain anchor, and it does not re-check that each acceptance is bound
+to a signed manifest — that is the anchor workflow's job. The cache and
+its key must therefore live in protected storage the child cannot write.
 
 Rollback limits, stated plainly: the reader refuses a cache whose
 ``checkpoint_seq`` is not contiguous from 1 or whose ``release_seq``
@@ -35,9 +47,12 @@ inherent to a local cache.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import stat
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -52,12 +67,31 @@ from .core import (
     _parse_jsonl_bytes,
     _verify_audit_events,
     canonical_json_bytes,
+    journal_genesis_identity,
+    journal_has_genesis_nonce,
     read_journal_prefix,
 )
 
 _CACHE_FIELDS = frozenset(
-    {"checkpoint_seq", "release_seq", "anchor_end_seq", "head_hash"}
+    {
+        "checkpoint_seq",
+        "release_seq",
+        "anchor_end_seq",
+        "head_hash",
+        "journal_identity",
+        "record_mac",
+    }
 )
+#: The fields ``record_mac`` covers: the record without ``record_mac``.
+_SIGNED_FIELDS = (
+    "checkpoint_seq",
+    "release_seq",
+    "anchor_end_seq",
+    "head_hash",
+    "journal_identity",
+)
+_CACHE_KEY_FILENAME = "cache.key"
+_CACHE_KEY_BYTES = 32
 _HEX_64 = re.compile(r"[0-9a-f]{64}")
 _ZERO_HASH = "0" * 64
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -81,7 +115,163 @@ def _head_hash(value: Any) -> str:
     return value
 
 
-def _read_records(path: Path) -> list[dict[str, Any]]:
+def _hex64(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not _HEX_64.fullmatch(value):
+        raise VerificationError(
+            f"checkpoint cache {field} must be 64 lowercase hex characters"
+        )
+    return value
+
+
+def _key_bytes(key: Any) -> bytes:
+    if not isinstance(key, bytes | bytearray) or len(key) != _CACHE_KEY_BYTES:
+        raise VerificationError(
+            f"the checkpoint cache deployment key must be "
+            f"{_CACHE_KEY_BYTES} bytes"
+        )
+    return bytes(key)
+
+
+def compute_record_mac(key: bytes, record: Mapping[str, Any]) -> str:
+    """Return the record MAC: HMAC-SHA256 under ``key`` over the record.
+
+    The MAC covers the canonical JSON bytes of the record without
+    ``record_mac`` — ``checkpoint_seq``, ``release_seq``,
+    ``anchor_end_seq``, ``head_hash``, and ``journal_identity`` — so
+    tampering with any signed field, including the journal identity,
+    invalidates it.
+    """
+    payload = {name: record[name] for name in _SIGNED_FIELDS}
+    return hmac.new(
+        _key_bytes(key), canonical_json_bytes(payload), hashlib.sha256
+    ).hexdigest()
+
+
+def cache_key_path(cache_path: Path, override: Path | None = None) -> Path:
+    """Return the deployment-key path for a checkpoint cache.
+
+    The default is derived from the cache path (§5.2): the key file lives
+    beside the cache, ``<cache-dir>/cache.key``. An explicit override (the
+    CLI's ``--cache-key``) replaces the derived path on both bootstrap and
+    launch.
+    """
+    if override is not None:
+        return Path(override)
+    return Path(cache_path).parent / _CACHE_KEY_FILENAME
+
+
+def load_cache_key(path: Path) -> bytes:
+    """Load and validate a 32-byte deployment key file.
+
+    Raises :class:`VerificationError` for a missing, unreadable, symlinked,
+    or wrong-sized key: the launcher must refuse rather than silently skip
+    record verification (§5.2).
+    """
+    path = Path(path)
+    if path.is_symlink() or not path.exists() or not path.is_file():
+        raise VerificationError(
+            f"checkpoint cache key {path} is missing or not a regular "
+            "non-symlink file; re-bootstrap to (re)generate the deployment "
+            "key and write a signed cache"
+        )
+    try:
+        fd = os.open(os.fspath(path), os.O_RDONLY | _O_NOFOLLOW)
+    except OSError as exc:
+        raise VerificationError(
+            f"cannot open checkpoint cache key {path}: {exc}; re-bootstrap "
+            "to (re)generate the deployment key and write a signed cache"
+        ) from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise VerificationError(
+                f"checkpoint cache key {path} is not a regular non-symlink "
+                "file; re-bootstrap to (re)generate the deployment key"
+            )
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    key = b"".join(chunks)
+    if len(key) != _CACHE_KEY_BYTES:
+        raise VerificationError(
+            f"checkpoint cache key {path} is {len(key)} bytes, expected "
+            f"{_CACHE_KEY_BYTES}; re-bootstrap to regenerate the deployment "
+            "key and write a signed cache"
+        )
+    return key
+
+
+def write_cache_key(path: Path, key: bytes) -> None:
+    """Write a deployment key as a root-only file, refusing to overwrite.
+
+    The key is stored ``0600`` and never replaced in place: rotation means
+    re-bootstrap (§5.2), which the caller performs against a fresh cache.
+    """
+    key = _key_bytes(key)
+    path = Path(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW
+    try:
+        fd = os.open(os.fspath(path), flags, 0o600)
+    except OSError as exc:
+        raise VerificationError(
+            f"cannot create checkpoint cache key {path}: {exc}"
+        ) from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise VerificationError(
+                f"checkpoint cache key {path} must be a regular non-symlink file"
+            )
+        os.fchmod(fd, 0o600)
+        data = key
+        while data:
+            written = os.write(fd, data)
+            if written == 0:
+                raise VerificationError("short write writing the cache key")
+            data = data[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def get_or_create_cache_key(path: Path) -> bytes:
+    """Load the deployment key, generating it on first bootstrap (§5.2).
+
+    The key is 32 bytes from ``secrets.token_bytes``. The caller runs the
+    §5.7 placement checks on ``path`` first (bootstrap reuses
+    :func:`assert_checkpoint_cache_isolation`, the same ruleset as the
+    cache); creation refuses to overwrite an existing key.
+    """
+    path = Path(path)
+    if path.exists() or path.is_symlink():
+        return load_cache_key(path)
+    key = secrets.token_bytes(_CACHE_KEY_BYTES)
+    try:
+        write_cache_key(path, key)
+    except VerificationError as exc:
+        # A concurrent bootstrap won the creation race; load its key rather
+        # than failing the deployment.
+        if path.exists() and not path.is_symlink():
+            return load_cache_key(path)
+        raise VerificationError(
+            f"cannot generate the checkpoint cache deployment key: {exc}"
+        ) from exc
+    return load_cache_key(path)
+
+
+def _read_records(path: Path, *, key: bytes | None = None) -> list[dict[str, Any]]:
+    """Parse and validate the cache, returning every record in order.
+
+    With ``key`` set, every record's ``record_mac`` is verified. With
+    ``key=None`` the read is structural only: the caller must say so
+    explicitly and must not trust the returned records (the launcher uses
+    this only to diagnose a cache path it already knows names no file, and
+    the append path passes the deployment key). The whole file is
+    validated, not only the last line — the existing rule.
+    """
     path = Path(path)
     if path.is_symlink():
         raise VerificationError("checkpoint cache must be a regular non-symlink file")
@@ -132,6 +322,17 @@ def _read_records(path: Path) -> list[dict[str, Any]]:
     for index, record in enumerate(records, 1):
         if not isinstance(record, dict):
             raise VerificationError("checkpoint cache record must be a JSON object")
+        unsigned = {"journal_identity", "record_mac"}.isdisjoint(record)
+        if unsigned:
+            # §5.5 migration: a record with neither new field was written
+            # before record signing. Refuse with the remedy named, and
+            # keep the diagnosis distinct from a forged record (which has
+            # the fields but fails the MAC below).
+            raise VerificationError(
+                f"checkpoint cache record {index} predates record signing: "
+                "missing field(s) journal_identity, record_mac; remove the "
+                "stale cache and re-bootstrap to write a signed record"
+            )
         missing = sorted(_CACHE_FIELDS - set(record))
         unknown = sorted(set(record) - _CACHE_FIELDS)
         if missing or unknown:
@@ -147,6 +348,16 @@ def _read_records(path: Path) -> list[dict[str, Any]]:
         release_seq = _seq(record["release_seq"], "release_seq")
         anchor_end_seq = _seq(record["anchor_end_seq"], "anchor_end_seq")
         head_hash = _head_hash(record["head_hash"])
+        journal_identity = _hex64(record["journal_identity"], "journal_identity")
+        record_mac = _hex64(record["record_mac"], "record_mac")
+        if key is not None:
+            expected_mac = compute_record_mac(key, record)
+            if not hmac.compare_digest(expected_mac, record_mac):
+                raise VerificationError(
+                    f"checkpoint cache record {index} failed record_mac "
+                    "verification: the record is forged or was tampered "
+                    "with after signing"
+                )
         if checkpoint_seq != index:
             raise VerificationError(
                 "checkpoint cache sequence is not monotonic: expected "
@@ -174,21 +385,24 @@ def _read_records(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def read_checkpoint_cache(path: Path) -> dict[str, Any]:
-    """Return the latest validated checkpoint record from ``path``.
+def read_checkpoint_cache(path: Path, *, key: bytes) -> dict[str, Any]:
+    """Return the latest validated, MAC-verified checkpoint record.
 
     The whole file is validated, not only the last line, so a tampered or
-    rolled-back earlier record is not silently ignored. Raises
-    :class:`VerificationError` for a missing, empty, torn, malformed, or
-    non-monotonic cache.
+    rolled-back earlier record is not silently ignored, and every record's
+    ``record_mac`` is verified under the deployment ``key``. Raises
+    :class:`VerificationError` for a missing, empty, torn, malformed,
+    non-monotonic, unsigned, or unauthenticated cache.
     """
-    records = _read_records(path)
+    records = _read_records(path, key=key)
     record = records[-1]
     return {
         "checkpoint_seq": record["checkpoint_seq"],
         "release_seq": record["release_seq"],
         "anchor_end_seq": record["anchor_end_seq"],
         "head_hash": record["head_hash"],
+        "journal_identity": record["journal_identity"],
+        "record_mac": record["record_mac"],
     }
 
 
@@ -276,9 +490,11 @@ def verify_checkpoint_against_journal(
 ) -> int:
     """Bind a cache record to the journal and return its checkpoint.
 
-    The anchored prefix must still exist, its head hash must match, and
-    the cache's ``release_seq`` must equal the max accepted sequence in
-    that prefix. Any mismatch refuses.
+    The record's ``journal_identity`` must equal the journal's recomputed
+    v2 identity (a record signed for journal A is refused against journal
+    B), the anchored prefix must still exist, its head hash must match,
+    and the cache's ``release_seq`` must equal the max accepted sequence
+    in that prefix. Any mismatch refuses.
     """
     events, _fragment = read_journal_prefix(journal)
     try:
@@ -306,6 +522,26 @@ def verify_checkpoint_against_journal(
             "checkpoint cache does not match the journal: anchored release_seq "
             f"{record['release_seq']} is not the max accepted sequence "
             f"({derived}) inside the anchored prefix"
+        )
+    # The identity binding runs after the unchanged prefix checks so a
+    # truncated journal still reports the truncation, not the identity.
+    try:
+        identity = journal_genesis_identity(events)
+    except VerificationError as exc:
+        raise VerificationError(
+            "cannot bind the checkpoint cache to the journal: the journal "
+            f"has no v2 identity to match the record against: {exc}"
+        ) from exc
+    record_identity = record.get("journal_identity")
+    if not isinstance(record_identity, str) or not _HEX_64.fullmatch(record_identity):
+        raise VerificationError(
+            "checkpoint cache record carries no valid journal_identity; "
+            "remove the stale cache and re-bootstrap"
+        )
+    if record_identity != identity["identity"]:
+        raise VerificationError(
+            "checkpoint cache does not match the journal: the record's "
+            "journal_identity belongs to a different journal"
         )
     return record["release_seq"]
 
@@ -410,6 +646,7 @@ def bootstrap_checkpoint(
     child_uid: int | None,
     launcher_euid: int | None = None,
     require_isolation: bool = True,
+    cache_key: Path | None = None,
 ) -> dict[str, Any]:
     """Verify an anchor chain online and record its checkpoint offline.
 
@@ -425,15 +662,44 @@ def bootstrap_checkpoint(
     The cache record is written with
     :func:`append_checkpoint_cache`, so the cache stays append-only with
     a contiguous ``checkpoint_seq`` and non-decreasing ``release_seq`` /
-    ``anchor_end_seq``. When ``require_isolation`` is true (the default)
-    the cache directory and file are checked against the §5.7 rules
-    before and after the append.
+    ``anchor_end_seq``. Every record is signed with the deployment key
+    (§5.2): the key is generated beside the cache on first bootstrap
+    (``<cache-dir>/cache.key``, or ``cache_key`` when given) and the
+    journal's v2 identity is carried inside the signed payload. When
+    ``require_isolation`` is true (the default) the cache and key
+    directory and files are checked against the §5.7 rules before and
+    after the append.
     """
     journal = Path(journal)
     cache_path = Path(cache_path)
     if require_isolation:
         assert_checkpoint_cache_isolation(
             cache_path, child_uid, launcher_euid=launcher_euid
+        )
+
+    # Decision (d): bootstrap before first launch is not supported. A
+    # journal with no nonce-bearing v2 event has no v2 identity, so there
+    # is nothing to bind a signed record to; refuse with the remedy
+    # instead of recording a null identity (which would reopen the hole
+    # for exactly that record).
+    seed_events, _seed_fragment = read_journal_prefix(journal)
+    try:
+        _verify_audit_events(seed_events)
+    except VerificationError as exc:
+        raise VerificationError(
+            f"bootstrap cannot verify the journal: {exc}"
+        ) from exc
+    if not journal_has_genesis_nonce(seed_events):
+        raise VerificationError(
+            "bootstrap refused: the journal has no nonce-bearing v2 event, "
+            "so it has no v2 identity to bind the cache record to; run a "
+            "first v2 launch to seed the journal identity, then bootstrap"
+        )
+
+    key_path = cache_key_path(cache_path, cache_key)
+    if require_isolation:
+        assert_checkpoint_cache_isolation(
+            key_path, child_uid, launcher_euid=launcher_euid
         )
 
     # Imported lazily so the cache reader stays importable without the
@@ -549,17 +815,35 @@ def bootstrap_checkpoint(
                     "journal event at the anchored prefix end"
                 )
 
+    identity_info = result.get("journal_identity")
+    identity_hex = (
+        identity_info.get("identity") if isinstance(identity_info, dict) else None
+    )
+    if not isinstance(identity_hex, str) or not _HEX_64.fullmatch(identity_hex):
+        raise VerificationError(
+            "bootstrap refused: the anchor verifier returned no usable "
+            "journal identity to bind the cache record to"
+        )
+
+    key = get_or_create_cache_key(key_path)
+    if require_isolation:
+        assert_checkpoint_cache_isolation(
+            key_path, child_uid, launcher_euid=launcher_euid
+        )
+
     record = append_checkpoint_cache(
         cache_path,
         release_seq=derived,
         anchor_end_seq=last_seq,
         head_hash=head_hash,
+        key=key,
+        journal_identity=identity_hex,
     )
     if require_isolation:
         assert_checkpoint_cache_isolation(
             cache_path, child_uid, launcher_euid=launcher_euid
         )
-    stored = read_checkpoint_cache(cache_path)
+    stored = read_checkpoint_cache(cache_path, key=key)
     verify_checkpoint_against_journal(stored, journal)
     return {
         "checkpoint": record,
@@ -580,20 +864,30 @@ def append_checkpoint_cache(
     release_seq: int,
     anchor_end_seq: int,
     head_hash: str,
+    key: bytes,
+    journal_identity: str,
 ) -> dict[str, Any]:
-    """Append one checkpoint snapshot, preserving the monotonic sequence.
+    """Append one signed checkpoint snapshot, preserving the sequence.
 
     This is the producer primitive for the anchoring workflow. It refuses
     a new checkpoint older than the current one, which is what makes an
     *appended* rollback detectable. It cannot detect deletion of the whole
     file or truncation to an older prefix; see the module docstring.
+
+    The record is signed with the deployment ``key`` (§5.1): ``record_mac``
+    covers the canonical record without ``record_mac``, including the
+    ``journal_identity`` carried inside the signed payload. Existing
+    records are re-verified under the same key before the append, so a
+    pre-signing or tampered cache is never extended.
     """
     path = Path(path)
     release_seq = _seq(release_seq, "release_seq")
     anchor_end_seq = _seq(anchor_end_seq, "anchor_end_seq")
     head_hash = _head_hash(head_hash)
+    journal_identity = _hex64(journal_identity, "journal_identity")
+    _key_bytes(key)
     try:
-        existing = _read_records(path)
+        existing = _read_records(path, key=key)
     except VerificationError as exc:
         if not path.exists() and "is missing" in str(exc):
             existing = []
@@ -619,7 +913,9 @@ def append_checkpoint_cache(
         "release_seq": release_seq,
         "anchor_end_seq": anchor_end_seq,
         "head_hash": head_hash,
+        "journal_identity": journal_identity,
     }
+    record["record_mac"] = compute_record_mac(key, record)
     line = canonical_json_bytes(record).decode("utf-8") + "\n"
     parent = path.parent
     parent.mkdir(parents=True, exist_ok=True)

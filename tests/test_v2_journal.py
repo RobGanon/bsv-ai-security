@@ -10,6 +10,7 @@ that reserves two slots for launch + finish.
 import hashlib
 import json
 import os
+import secrets
 import uuid
 from pathlib import Path
 
@@ -17,7 +18,12 @@ import pytest
 
 import sealrun.core as core
 import sealrun.launcher as launcher
-from sealrun.checkpoint_cache import append_checkpoint_cache
+from sealrun.checkpoint_cache import (
+    append_checkpoint_cache,
+    cache_key_path,
+    load_cache_key,
+    write_cache_key,
+)
 from sealrun.cli import main
 from sealrun.core import (
     V2_FINISH_EVENT_TYPE,
@@ -28,6 +34,8 @@ from sealrun.core import (
     canonical_json_bytes,
     create_manifest,
     generate_keypair,
+    journal_genesis_identity,
+    journal_has_genesis_nonce,
     load_channel_list,
     load_private_key,
     pin_journal_identity,
@@ -119,12 +127,26 @@ class Bundle:
 
     def _write_checkpoint(self) -> None:
         events, _fragment = read_journal_prefix(self.journal)
+        if not journal_has_genesis_nonce(events):
+            # No v2 identity yet: the cache cannot exist (§7 decision d),
+            # so the first launch below takes the first-launch exception.
+            return
         append_checkpoint_cache(
             self.checkpoint,
             release_seq=0,
             anchor_end_seq=len(events),
             head_hash=events[-1]["event_hash"] if events else "0" * 64,
+            key=self._deployment_key(),
+            journal_identity=journal_genesis_identity(events)["identity"],
         )
+
+    def _deployment_key(self) -> bytes:
+        key_path = cache_key_path(self.checkpoint)
+        if key_path.exists():
+            return load_cache_key(key_path)
+        key = secrets.token_bytes(32)
+        write_cache_key(key_path, key)
+        return key
 
     def run(self, command=("true",), **kwargs):
         self._write_checkpoint()

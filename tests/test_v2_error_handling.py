@@ -12,6 +12,7 @@ are still fail-closed: the child never runs.
 """
 
 import json
+import secrets
 import subprocess
 from pathlib import Path
 
@@ -19,12 +20,19 @@ import pytest
 from sealrun.bsv import PrivKey
 
 import sealrun.launcher as launcher
-from sealrun.checkpoint_cache import append_checkpoint_cache
+from sealrun.checkpoint_cache import (
+    append_checkpoint_cache,
+    cache_key_path,
+    load_cache_key,
+    write_cache_key,
+)
 from sealrun.core import (
     V2_LAUNCH_EVENT_TYPE,
     V2_LAUNCH_FAILED_EVENT_TYPE,
     VerificationError,
     create_manifest,
+    journal_genesis_identity,
+    journal_has_genesis_nonce,
     read_journal_prefix,
     sign_manifest,
     verify_audit_journal,
@@ -62,14 +70,30 @@ def bypass_isolation(monkeypatch) -> None:
     )
 
 
+def deployment_key(cache: Path) -> bytes:
+    """The deployment key for a fixture cache, beside it like bootstrap writes."""
+    key_path = cache_key_path(cache)
+    if key_path.exists():
+        return load_cache_key(key_path)
+    key = secrets.token_bytes(32)
+    write_cache_key(key_path, key)
+    return key
+
+
 def write_checkpoint(tmp_path: Path, journal: Path) -> Path:
     path = tmp_path / "checkpoint.jsonl"
     events, _fragment = read_journal_prefix(journal)
+    if not journal_has_genesis_nonce(events):
+        # No v2 identity yet: the cache cannot exist (§7 decision d), so
+        # the launch below takes the first-launch exception.
+        return path
     append_checkpoint_cache(
         path,
         release_seq=0,
         anchor_end_seq=len(events),
         head_hash=events[-1]["event_hash"] if events else "0" * 64,
+        key=deployment_key(path),
+        journal_identity=journal_genesis_identity(events)["identity"],
     )
     return path
 

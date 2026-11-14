@@ -53,8 +53,8 @@ the run, and edited history is detectable.
   evidence rather than a team's word.
 - Maintained by: Rob Ganon.
 - Wait if: you need an independently reviewed, beta-or-better tool today.
-  This is a research preview, not beta, not 1.0, not independently
-  reviewed, and mainnet anchoring is gated.
+  This is a research preview, not beta, not 1.0. The v2 launch flow hasn't
+  had an independent review yet, and mainnet anchoring is gated.
 - When: no beta/1.0 date is promised.
 - Where it runs / where evidence lives: Linux, on the machine running
   the AI, stdlib-only offline core; manifest and journal are files you
@@ -386,7 +386,7 @@ pipeline. Details: [`docs/pilot-brief.md`](docs/pilot-brief.md).
 
 ## Roadmap (high level)
 
-1. Independent review of Phase 1 (in progress — see `REVIEW.md`).
+1. Independent review of Phase 1 (requested — see `REVIEW.md`).
 2. ~~Implement Phase 2 payload creation + local verification~~ — done.
 3. ~~Implement publishing interfaces with explicit network selection
    (testnet default; mainnet behind separate confirmation)~~ — done.

@@ -100,6 +100,49 @@ def _inclusion_verified(
     raise VerificationError(f"unknown inclusion method: {inclusion!r}")
 
 
+def _binding_verified(
+    summaries: Sequence[Mapping[str, Any]],
+    inclusion: str,
+) -> bool:
+    """True only when every anchor's inclusion block is the header-chain tip.
+
+    Inclusion and the header-chain walk each ask the provider which block
+    the tx is in. The two answers must be the same block: the inclusion
+    blockhash (from the selected method's per-anchor dict) must equal the
+    tip hash the walk started from. A missing or mismatched hash withholds
+    authentication — a split-view provider, or a reorg between the two
+    fetches, must not authenticate.
+    """
+    if inclusion == INCLUSION_SPV:
+        field = "chain_inclusion"
+    elif inclusion == INCLUSION_BUMP:
+        field = "bump_inclusion"
+    elif inclusion == INCLUSION_BEEF:
+        field = "beef_inclusion"
+    else:
+        raise VerificationError(f"unknown inclusion method: {inclusion!r}")
+    if not summaries:
+        return False
+    for summary in summaries:
+        inclusion_block = summary.get(field)
+        header_chain = summary.get("header_chain")
+        if not isinstance(inclusion_block, Mapping) or not isinstance(
+            header_chain, Mapping
+        ):
+            return False
+        blockhash = inclusion_block.get("blockhash")
+        tip_hash = header_chain.get("tip_hash")
+        if (
+            not isinstance(blockhash, str)
+            or not isinstance(tip_hash, str)
+            or not blockhash
+            or not tip_hash
+            or blockhash.lower() != tip_hash.lower()
+        ):
+            return False
+    return True
+
+
 def _identity_matches(
     journal_identity: Mapping[str, Any] | None,
     expected: str | None,
@@ -178,6 +221,7 @@ def evaluate_anchor_acceptance(
     header_chain = bool(result.get("header_chain_verified")) and (
         _all_verified(summaries, "header_chain_verified")
     )
+    binding_ok = _binding_verified(summaries, inclusion)
     identity_ok, identity_reasons = _identity_matches(
         journal_identity, expected_journal_identity
     )
@@ -207,6 +251,10 @@ def evaluate_anchor_acceptance(
         reasons.append(f"block inclusion is not verified ({inclusion})")
     if not header_chain:
         reasons.append("header chain back to the pinned checkpoint is not verified")
+    if not binding_ok:
+        reasons.append(
+            "inclusion block does not match the header-chain tip block"
+        )
     if not identity_ok:
         reasons.append("journal identity is not verified")
     if unanchored is None:
@@ -223,6 +271,7 @@ def evaluate_anchor_acceptance(
         and anchor_signature
         and inclusion_ok
         and header_chain
+        and binding_ok
         and identity_ok
         and unanchored is not None
     )
@@ -263,6 +312,7 @@ def evaluate_anchor_acceptance(
             "anchor_signature": anchor_signature,
             "inclusion": inclusion_ok,
             "header_chain": header_chain,
+            "binding": binding_ok,
             "journal_identity": identity_ok,
         },
         "authenticated_prefix_end": authenticated_prefix_end,

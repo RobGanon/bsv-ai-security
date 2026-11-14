@@ -1278,6 +1278,7 @@ class HeaderChainResult:
     verified: bool
     txid: str
     tip_height: int | None = None
+    tip_hash: str | None = None
     checkpoint_height: int | None = None
     headers_checked: int = 0
     reason: str = ""
@@ -1511,6 +1512,7 @@ class HeaderChainVerifier:
         return HeaderChainResult(
             verified, txid,
             tip_height=tip_height,
+            tip_hash=str(blockhash),
             checkpoint_height=self.checkpoint_height,
             headers_checked=checked,
             reason=reason,

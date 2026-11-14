@@ -223,6 +223,7 @@ class FakeHeaderVerifier:
             self.verified,
             txid,
             tip_height=10,
+            tip_hash="66" * 32,
             checkpoint_height=1,
             headers_checked=1,
             reason="fake header chain",

@@ -1,0 +1,17 @@
+# SealRun
+
+> Verify an AI run before it starts, prove it afterwards. A signed manifest pins the exact model, code, data, and config bytes; verification checks the signature before launch; every security event goes into a hash-chained audit journal. Research preview; the v2 launch flow hasn't had an independent review yet.
+
+## Docs
+
+- [README](https://github.com/RobGanon/bsv-ai-security/blob/main/README.md): overview, quick start, what it proves and doesn't prove
+- [Using SealRun](https://github.com/RobGanon/bsv-ai-security/blob/main/docs/using-sealrun.md): worked example — keygen, manifest-create, manifest-sign, verify, launch
+- [Launcher](https://github.com/RobGanon/bsv-ai-security/blob/main/docs/launcher.md): launch contract, verified handles, residual limits
+- [Anchoring protocol](https://github.com/RobGanon/bsv-ai-security/blob/main/docs/anchoring-protocol.md): optional BSV anchoring (testnet)
+- [Technical writeup](https://github.com/RobGanon/bsv-ai-security/blob/main/docs/technical-writeup.md): design writeup
+- [Landing page](https://robganon.github.io/bsv-ai-security/): overview, demo video
+- [Demo video (19s)](https://youtu.be/6z6a17UsD4g): three tamper attempts, all caught
+
+## Optional
+
+- [Issue #4](https://github.com/RobGanon/bsv-ai-security/issues/4): request for independent review and external testing

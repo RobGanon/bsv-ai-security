@@ -1175,6 +1175,7 @@ def apply_header_chain(result: dict, verifier: Any) -> dict:
                     "header_chain": {
                         "verified": chain_result.verified,
                         "tip_height": chain_result.tip_height,
+                        "tip_hash": chain_result.tip_hash,
                         "checkpoint_height": chain_result.checkpoint_height,
                         "headers_checked": chain_result.headers_checked,
                         "reason": chain_result.reason,
@@ -1199,6 +1200,7 @@ def apply_header_chain(result: dict, verifier: Any) -> dict:
                 "header_chain": {
                     "verified": chain_result.verified,
                     "tip_height": chain_result.tip_height,
+                    "tip_hash": chain_result.tip_hash,
                     "checkpoint_height": chain_result.checkpoint_height,
                     "headers_checked": chain_result.headers_checked,
                     "reason": chain_result.reason,

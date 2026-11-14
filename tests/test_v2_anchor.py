@@ -32,13 +32,17 @@ from sealrun.core import (
 )
 import sealrun.cli as cli_module
 from sealrun.spv import (
+    BlockHeader,
     DAAParams,
     DEFAULT_MAX_HEADERS,
     HeaderChainResult,
     HeaderChainVerifier,
     InclusionResult,
     SPVUnavailable,
+    SPVVerifier,
+    header_hash,
     verify_chain_to_checkpoint,
+    verify_pow,
 )
 from sealrun.v2_anchor import (
     AUTHENTICATION_ACCEPTED,
@@ -188,6 +192,7 @@ class FakeHeaderVerifier:
             self.verified,
             txid,
             tip_height=10,
+            tip_hash="66" * 32,
             checkpoint_height=1,
             headers_checked=1,
             reason=self.reason,
@@ -205,20 +210,37 @@ def composed_result(
     last_seq=3,
     unanchored=0,
     beef_status="bump",
+    binding=True,
 ):
     summary = {
         "txid": "77" * 32,
         "payload_binding_verified": payload,
         "anchor_signature_verified": signature,
         "chain_inclusion_verified": inclusion,
+        "chain_inclusion": {
+            "verified": inclusion,
+            "blockheight": 10,
+            "blockhash": "66" * 32,
+        },
         "bump_inclusion_verified": inclusion,
+        "bump_inclusion": {
+            "verified": inclusion,
+            "blockheight": 10,
+            "blockhash": "66" * 32,
+        },
         "beef_inclusion_verified": inclusion,
         "beef_inclusion": {
             "verified": inclusion,
             "status": beef_status,
             "blockheight": 10 if beef_status == "bump" else None,
+            "blockhash": "66" * 32 if beef_status == "bump" else None,
         },
         "header_chain_verified": header,
+        "header_chain": {
+            "verified": header,
+            "tip_height": 10,
+            "tip_hash": "66" * 32 if binding else "77" * 32,
+        },
     }
     chain_result = {
         "verified": chain,
@@ -359,6 +381,7 @@ def test_full_predicate_is_accepted_with_two_named_verdicts():
         "anchor_signature": True,
         "inclusion": True,
         "header_chain": True,
+        "binding": True,
         "journal_identity": True,
     }
     assert result["verdicts"] == [
@@ -375,6 +398,7 @@ def test_full_predicate_is_accepted_with_two_named_verdicts():
         ("inclusion", "block inclusion"),
         ("header", "header chain"),
         ("chain", "chain continuity"),
+        ("binding", "does not match the header-chain tip"),
     ],
 )
 def test_removing_any_single_predicate_withholds_authentication(
@@ -689,6 +713,156 @@ def test_verify_v2_requires_a_journal_identity(tmp_path):
             inclusion_verifier=FakeInclusionVerifier(),
             header_verifier=FakeHeaderVerifier(),
         )
+
+
+# --------------------------------------------------------------------------
+# inclusion/header-chain binding: the two checks must agree on the block
+# --------------------------------------------------------------------------
+
+# Real Teratestnet headers (tests/test_spv.py fixtures). The header-chain
+# walk in the tests below runs on these genuine headers.
+_BIND_36721 = {
+    "hash": "0000000048cb33f8f96e4927e4e8066742076b180d7091c013e7e36d4b246eae",
+    "prev": "000000002f9d0b6a01c151cd796a9ce6fd6f9a967da4ed7a12ff4a83ef38d67a",
+    "root": "63b2cda9b315b4532bf532ae2d9a0500a326a56597ae4ee7dbed1bad77ffe0d6",
+    "version": 536870912, "time": 1792196982, "bits": 0x1C55AD80,
+    "nonce": 87798228,
+}
+_BIND_36722 = {
+    "hash": "000000001d8a81abcf3b84b3d610cb1cc9161dce73c8a1c2bb512ae27ef46daf",
+    "prev": "0000000048cb33f8f96e4927e4e8066742076b180d7091c013e7e36d4b246eae",
+    "root": "8e55225402e64109e0974b4e0dc810c4d4ca3c2e61800d7559e05d04d175f4bb",
+    "version": 536870912, "time": 1792198024, "bits": 0x1C55DEB0,
+    "nonce": 21614930,
+}
+
+
+def _bind_header(block):
+    return BlockHeader(
+        version=block["version"], prev_hash=block["prev"],
+        merkle_root=block["root"], time=block["time"], bits=block["bits"],
+        nonce=block["nonce"], height=None, hash=block["hash"],
+    )
+
+
+def _bind_fake_block(txid, *, height, prev_hash):
+    """Self-consistent fabricated block containing txid; trivial bits."""
+    header = BlockHeader(
+        version=536870912, prev_hash=prev_hash, merkle_root=txid,
+        time=1792198024, bits=0x207FFFFF, nonce=0, height=height, hash=None,
+    )
+    nonce = 0
+    while not verify_pow(header.to_bytes(), header.bits):
+        nonce += 1
+        header = BlockHeader(
+            version=header.version, prev_hash=header.prev_hash,
+            merkle_root=header.merkle_root, time=header.time,
+            bits=header.bits, nonce=nonce, height=height, hash=None,
+        )
+    fake_hash = header_hash(header.to_bytes())
+    return BlockHeader(
+        version=header.version, prev_hash=header.prev_hash,
+        merkle_root=header.merkle_root, time=header.time,
+        bits=header.bits, nonce=header.nonce, height=height, hash=fake_hash,
+    ), fake_hash
+
+
+class _SplitViewFetcher:
+    """A provider that answers the two fetch_tx calls differently.
+
+    split=True: the inclusion check sees a fabricated block at height
+    999999; the header-chain walk sees the real block 36722. Both
+    predicates pass on their own — only the binding must refuse.
+    split=False: both checks see one fabricated block at height 36722
+    whose prev_hash is the real checkpoint 36721, so the walk reaches
+    the checkpoint from the same block inclusion verified.
+    """
+
+    def __init__(self, txid, *, split: bool):
+        self.txid = txid
+        self.split = split
+        self.calls = 0
+        self.fake999999, self.fake999999_hash = _bind_fake_block(
+            txid, height=999999, prev_hash="00" * 32
+        )
+        self.fake36722, self.fake36722_hash = _bind_fake_block(
+            txid, height=36722, prev_hash=_BIND_36721["hash"]
+        )
+
+    def fetch_tx(self, txid):
+        self.calls += 1
+        if self.split and self.calls == 1:
+            return {"blockheight": 999999, "blockhash": self.fake999999_hash}
+        if self.split:
+            return {"blockheight": 36722, "blockhash": _BIND_36722["hash"]}
+        return {"blockheight": 36722, "blockhash": self.fake36722_hash}
+
+    def fetch_block(self, height):
+        if height == 999999:
+            return self.fake999999, [self.txid]
+        if height == 36722 and not self.split:
+            return self.fake36722, [self.txid]
+        raise ValueError(f"no block at height {height}")
+
+    def fetch_header(self, height):
+        if height == 36722:
+            return self.fake36722 if not self.split else _bind_header(_BIND_36722)
+        if height == 36721:
+            return _bind_header(_BIND_36721)
+        raise ValueError(f"no header at height {height}")
+
+
+def test_verify_v2_withholds_when_inclusion_and_header_chain_disagree(tmp_path):
+    journal = make_journal(tmp_path / "journal.jsonl")
+    anchor, tx_json = synthetic_anchor(journal)
+    fetcher = _SplitViewFetcher(anchor["txid"], split=True)
+
+    result = verify_v2_anchor_chain(
+        journal, [anchor], GENESIS,
+        payload_fetcher=FakePayloadFetcher({anchor["txid"]: tx_json}),
+        signature_verifier=FakeSignatureVerifier(),
+        inclusion="spv",
+        inclusion_verifier=SPVVerifier(fetcher),
+        header_verifier=HeaderChainVerifier(
+            fetcher, checkpoint_hash=_BIND_36721["hash"],
+            checkpoint_height=36721),
+    )
+    acceptance = result["acceptance"]
+    summary = result["chain"]["anchors"][0]
+
+    assert summary["chain_inclusion_verified"] is True
+    assert summary["header_chain_verified"] is True
+    assert acceptance["predicate"]["inclusion"] is True
+    assert acceptance["predicate"]["header_chain"] is True
+    assert acceptance["predicate"]["binding"] is False
+    assert acceptance["accepted"] is False
+    assert acceptance["authentication"] == AUTHENTICATION_WITHHELD
+    assert any(
+        "does not match the header-chain tip" in reason
+        for reason in acceptance["reasons"]
+    )
+
+
+def test_verify_v2_accepts_when_inclusion_and_header_chain_agree(tmp_path):
+    journal = make_journal(tmp_path / "journal.jsonl")
+    anchor, tx_json = synthetic_anchor(journal)
+    fetcher = _SplitViewFetcher(anchor["txid"], split=False)
+
+    result = verify_v2_anchor_chain(
+        journal, [anchor], GENESIS,
+        payload_fetcher=FakePayloadFetcher({anchor["txid"]: tx_json}),
+        signature_verifier=FakeSignatureVerifier(),
+        inclusion="spv",
+        inclusion_verifier=SPVVerifier(fetcher),
+        header_verifier=HeaderChainVerifier(
+            fetcher, checkpoint_hash=_BIND_36721["hash"],
+            checkpoint_height=36721),
+    )
+    acceptance = result["acceptance"]
+
+    assert acceptance["predicate"]["binding"] is True
+    assert acceptance["accepted"] is True
+    assert acceptance["authentication"] == AUTHENTICATION_ACCEPTED
 
 
 # --------------------------------------------------------------------------

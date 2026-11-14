@@ -25,6 +25,8 @@ This project gives you the evidence.
 
 ## See it work in 2 minutes
 
+Watch the 19-second demo: [SealRun — verify an AI run before it starts, prove it afterwards](https://youtu.be/6z6a17UsD4g) — three tamper attempts, all caught.
+
 SealRun proves what your AI actually ran — not whether it behaved well,
 and not whether its outputs were true. Try it, then try breaking it:
 

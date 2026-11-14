@@ -131,6 +131,11 @@
   .verdict.ok{color:var(--term-green)} .verdict.bad{color:var(--term-red)} .verdict.idle{color:#aebbb2}
   .demo-caption{font-size:13px; color:#8a9a90; margin-left:auto; max-width:34em}
   @media (max-width:640px){ .demo-caption{margin-left:0} }
+  .video-strip{margin-top:14px; display:flex; flex-wrap:wrap; align-items:center; gap:10px 16px; background:var(--teal-soft); border:1px solid var(--line); border-radius:12px; padding:14px 16px}
+  .video-link{display:inline-flex; align-items:center; gap:10px; font-weight:700; font-size:16px; color:var(--ink); text-decoration:none}
+  .video-link:hover{color:var(--teal); text-decoration:underline; text-underline-offset:3px}
+  .video-link .play{display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; flex:0 0 32px; border-radius:50%; background:var(--seal); color:#fff; font-size:13px; padding-left:2px}
+  .video-desc{font-size:14.5px; color:var(--ink-2); line-height:1.5}
 
   /* Sections */
   section{padding:64px 0 0}
@@ -267,6 +272,14 @@
           <span class="verdict idle" id="verdict">No session yet.</span>
           <span class="demo-caption">Simplified demo in your browser (shortened hashes). The real tool does the same thing with full cryptographic hashes, a signed manifest, and an optional on-chain anchor.</span>
         </div>
+      </div>
+
+      <div class="video-strip">
+        <a class="video-link" href="https://youtu.be/6z6a17UsD4g" target="_blank" rel="noopener">
+          <span class="play" aria-hidden="true">▶</span>
+          Watch the real demo — 19 seconds on YouTube
+        </a>
+        <span class="video-desc">“SealRun — verify an AI run before it starts, prove it afterwards” — three tamper attempts, all caught.</span>
       </div>
     </div>
 

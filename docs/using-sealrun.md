@@ -261,6 +261,7 @@ to run the whole ceremony yourself on testnet play money.
 
 ## Where to go next
 
+- [`docs/high-assurance-profile.md`](high-assurance-profile.md) — the strongest launch configuration: v2 + sealed artifacts + verified executable binding.
 - [`docs/launcher.md`](launcher.md) — the `launch` contract in
   detail, including privilege dropping and residual limits.
 - [`docs/reviewer-quickstart.md`](reviewer-quickstart.md) — verify

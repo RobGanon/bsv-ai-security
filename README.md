@@ -291,7 +291,8 @@ pointing at `/proc/self/fd/N`.
   group and supplementary groups are cleared.
 - The launcher pins *what bytes are launched*; it does not sandbox the
   child. See [`docs/launcher.md`](docs/launcher.md) for the contract and
-  the residual limits.
+  the residual limits. For the strongest launch configuration, see
+  [`docs/high-assurance-profile.md`](docs/high-assurance-profile.md).
 
 ## Audit journal
 

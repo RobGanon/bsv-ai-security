@@ -26,6 +26,7 @@ hidden here.
 """
 
 import json
+import os
 import secrets
 import subprocess
 import types
@@ -449,6 +450,13 @@ def test_launch_refuses_a_cache_that_fails_isolation(v2_launch, monkeypatch):
     store.mkdir(mode=0o700)
     cache = write_cache(store / "checkpoint.jsonl", journal, 5)
     cache.chmod(0o666)
+    real_lstat = core.os.lstat
+
+    def launcher_owned_lstat(candidate, *args, **kwargs):
+        info = real_lstat(candidate, *args, **kwargs)
+        if Path(candidate) in (store, cache):
+            return os.stat_result((*info[:4], 0, *info[5:]))
+        return info
 
     # The §5.7 predicate needs a privileged launcher; tests run
     # unprivileged, so inject the euid the production call site already
@@ -462,6 +470,7 @@ def test_launch_refuses_a_cache_that_fails_isolation(v2_launch, monkeypatch):
         "assert_checkpoint_cache_isolation",
         lambda path, child_uid: real_isolation(path, child_uid, launcher_euid=0),
     )
+    monkeypatch.setattr(core.os, "lstat", launcher_owned_lstat)
     monkeypatch.setattr(core, "_ancestor_directories", lambda path: [])
     monkeypatch.setattr(core, "_filesystem_type", lambda path: "btrfs")
 

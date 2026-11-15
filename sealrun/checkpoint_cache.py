@@ -556,10 +556,11 @@ def assert_checkpoint_cache_isolation(
 
     The cache is a second trust store, so it follows the same placement
     rules as the journal: a privileged deployment, an explicit non-root
-    child uid, an existing parent directory, no path owned by the child,
-    no group/other write bit, no ACLs, and an ownership-enforcing local
-    filesystem. A missing cache file is allowed (bootstrap creates it),
-    but its directory must already be isolated.
+    child uid, an existing parent directory, every path component owned by
+    the launcher and not the child, no group/other write bit, no ACLs, and
+    an ownership-enforcing local filesystem. A missing cache file is
+    allowed (bootstrap creates it), but its directory must already be
+    isolated.
     """
     if launcher_euid is None:
         launcher_euid = os.geteuid()
@@ -590,6 +591,7 @@ def assert_checkpoint_cache_isolation(
     _core._check_isolated_path(
         parent,
         child_uid,
+        launcher_euid=launcher_euid,
         role="checkpoint cache directory",
         require_directory=True,
     )
@@ -597,6 +599,7 @@ def assert_checkpoint_cache_isolation(
         _core._check_isolated_path(
             ancestor,
             child_uid,
+            launcher_euid=launcher_euid,
             role="checkpoint cache ancestor",
             require_directory=True,
         )
@@ -604,6 +607,7 @@ def assert_checkpoint_cache_isolation(
         _core._check_isolated_path(
             path,
             child_uid,
+            launcher_euid=launcher_euid,
             role="checkpoint cache file",
             require_directory=False,
         )

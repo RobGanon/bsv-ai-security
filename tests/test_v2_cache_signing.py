@@ -26,6 +26,7 @@ bypassed only where a real privileged launcher would be required.
 """
 
 import json
+import os
 import secrets
 import stat
 import subprocess
@@ -228,6 +229,19 @@ class FakeHeaderVerifier:
         )
 
 
+def simulate_path_owner(monkeypatch, path, owner):
+    real_lstat = core.os.lstat
+
+    def lstat(candidate, *args, **kwargs):
+        info = real_lstat(candidate, *args, **kwargs)
+        candidate = Path(candidate)
+        if candidate == path or path in candidate.parents:
+            return os.stat_result((*info[:4], owner, *info[5:]))
+        return info
+
+    monkeypatch.setattr(core.os, "lstat", lstat)
+
+
 @pytest.fixture
 def isolated_dir(tmp_path, monkeypatch) -> Path:
     """A directory that passes the injected §5.7 checks."""
@@ -235,6 +249,7 @@ def isolated_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(core, "_filesystem_type", lambda path: "btrfs")
     parent = tmp_path / "isolated"
     parent.mkdir(mode=0o700)
+    simulate_path_owner(monkeypatch, parent, 0)
     return parent
 
 

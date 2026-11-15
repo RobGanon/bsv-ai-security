@@ -618,14 +618,35 @@ def isolated_paths(tmp_path, monkeypatch):
     journal = isolated / "audit.jsonl"
     journal.write_text("", encoding="utf-8")
     journal.chmod(0o600)
+    simulate_path_owner(monkeypatch, isolated, 0)
+    simulate_path_owner(monkeypatch, journal, 0)
     monkeypatch.setattr(core, "_ancestor_directories", lambda path: [])
     monkeypatch.setattr(core, "_filesystem_type", lambda path: "btrfs")
     return isolated, journal
 
 
+def simulate_path_owner(monkeypatch, path, owner):
+    real_lstat = core.os.lstat
+
+    def lstat(candidate, *args, **kwargs):
+        info = real_lstat(candidate, *args, **kwargs)
+        if Path(candidate) == path:
+            return os.stat_result((*info[:4], owner, *info[5:]))
+        return info
+
+    monkeypatch.setattr(core.os, "lstat", lstat)
+
+
 def test_isolation_predicate_accepts_a_safe_placement(tmp_path, monkeypatch):
     _, journal = isolated_paths(tmp_path, monkeypatch)
     assert_journal_writer_isolation(journal, 65534, launcher_euid=0)
+
+
+def test_isolation_refuses_a_third_party_owned_path(tmp_path, monkeypatch):
+    isolated, journal = isolated_paths(tmp_path, monkeypatch)
+    simulate_path_owner(monkeypatch, isolated, 1001)
+    with pytest.raises(VerificationError, match="launcher uid 0"):
+        assert_journal_writer_isolation(journal, 65534, launcher_euid=0)
 
 
 def test_isolation_refuses_unprivileged_launcher(tmp_path, monkeypatch):
@@ -649,6 +670,7 @@ def test_isolation_refuses_child_uid_zero(tmp_path, monkeypatch):
 def test_isolation_refuses_child_uid_equal_to_file_owner(tmp_path, monkeypatch):
     _, journal = isolated_paths(tmp_path, monkeypatch)
     owner = journal.stat().st_uid
+    simulate_path_owner(monkeypatch, journal, owner)
     with pytest.raises(VerificationError, match="owned by the child uid"):
         assert_journal_writer_isolation(journal, owner, launcher_euid=0)
 

@@ -27,6 +27,8 @@ This project gives you the evidence.
 
 Watch the 19-second demo: [SealRun — verify an AI run before it starts, prove it afterwards](https://youtu.be/6z6a17UsD4g) — three tamper attempts, all caught.
 
+The demo shows the v1 launch flow with a stand-in workload — a small script, not a real model run — and the audit-journal check afterwards. It doesn't show the current v2 launch flow or BSV anchoring.
+
 SealRun proves what your AI actually ran — not whether it behaved well,
 and not whether its outputs were true. Try it, then try breaking it:
 

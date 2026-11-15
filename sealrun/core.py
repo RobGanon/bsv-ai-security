@@ -1990,7 +1990,11 @@ def write_detached_channel_list(
     if journal_identity is not None:
         _assert_parent_identity(parent, journal_identity)
     _check_isolated_path(
-        parent, child_uid, role="journal directory", require_directory=True
+        parent,
+        child_uid,
+        launcher_euid=os.geteuid(),
+        role="journal directory",
+        require_directory=True,
     )
 
     name = _channel_list_name(journal, run_id)
@@ -2014,7 +2018,11 @@ def write_detached_channel_list(
             ) from exc
         os.fsync(fd)
         _check_isolated_path(
-            path, child_uid, role="channel list file", require_directory=False
+            path,
+            child_uid,
+            launcher_euid=os.geteuid(),
+            role="channel list file",
+            require_directory=False,
         )
         _fsync_directory(parent)
     except BaseException:
@@ -2080,6 +2088,7 @@ def load_channel_list(journal: Path, launch_detail: dict) -> dict:
         _check_isolated_path(
             journal.parent,
             isolated_child_uid,
+            launcher_euid=os.geteuid(),
             role="journal directory",
             require_directory=True,
         )
@@ -2328,7 +2337,12 @@ def _refuse_acl(path: Path, role: str) -> None:
 
 
 def _check_isolated_path(
-    path: Path, child_uid: int, *, role: str, require_directory: bool
+    path: Path,
+    child_uid: int,
+    *,
+    launcher_euid: int,
+    role: str,
+    require_directory: bool,
 ) -> None:
     """Apply the ownership/mode/ACL checks for one journal path component."""
     try:
@@ -2346,6 +2360,11 @@ def _check_isolated_path(
         raise VerificationError(
             f"{role} {path} is owned by the child uid {child_uid}; "
             "the child could write or replace it"
+        )
+    if info.st_uid != launcher_euid:
+        raise VerificationError(
+            f"{role} {path} is owned by uid {info.st_uid}, not launcher "
+            f"uid {launcher_euid}; refusing"
         )
     # Group/other write is refused even when the child's gid differs: the
     # rule is a property of the path, not of a guess about group membership.
@@ -2414,15 +2433,27 @@ def assert_journal_writer_isolation(
         )
 
     _check_isolated_path(
-        parent, child_uid, role="journal directory", require_directory=True
+        parent,
+        child_uid,
+        launcher_euid=launcher_euid,
+        role="journal directory",
+        require_directory=True,
     )
     for ancestor in _ancestor_directories(parent.parent):
         _check_isolated_path(
-            ancestor, child_uid, role="journal ancestor", require_directory=True
+            ancestor,
+            child_uid,
+            launcher_euid=launcher_euid,
+            role="journal ancestor",
+            require_directory=True,
         )
     if journal.exists() or journal.is_symlink():
         _check_isolated_path(
-            journal, child_uid, role="journal file", require_directory=False
+            journal,
+            child_uid,
+            launcher_euid=launcher_euid,
+            role="journal file",
+            require_directory=False,
         )
 
     filesystem = _filesystem_type(parent)

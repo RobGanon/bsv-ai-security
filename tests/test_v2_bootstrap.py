@@ -264,6 +264,7 @@ def isolated_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(core, "_filesystem_type", lambda path: "btrfs")
     parent = tmp_path / "isolated"
     parent.mkdir(mode=0o700)
+    simulate_path_owner(monkeypatch, parent, 0)
     return parent / "checkpoint.jsonl"
 
 
@@ -566,12 +567,35 @@ def make_safe_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(core, "_filesystem_type", lambda path: "btrfs")
     parent = tmp_path / "store"
     parent.mkdir(mode=0o700)
-    return parent / "checkpoint.jsonl"
+    cache = parent / "checkpoint.jsonl"
+    simulate_path_owner(monkeypatch, parent, 0)
+    simulate_path_owner(monkeypatch, cache, 0)
+    return cache
+
+
+def simulate_path_owner(monkeypatch, path, owner):
+    real_lstat = core.os.lstat
+
+    def lstat(candidate, *args, **kwargs):
+        info = real_lstat(candidate, *args, **kwargs)
+        candidate = Path(candidate)
+        if candidate == path or path in candidate.parents:
+            return os.stat_result((*info[:4], owner, *info[5:]))
+        return info
+
+    monkeypatch.setattr(core.os, "lstat", lstat)
 
 
 def test_cache_isolation_accepts_a_safe_placement(tmp_path, monkeypatch):
     cache = make_safe_cache(tmp_path, monkeypatch)
     assert_checkpoint_cache_isolation(cache, 65534, launcher_euid=0)
+
+
+def test_cache_isolation_refuses_a_third_party_owned_path(tmp_path, monkeypatch):
+    cache = make_safe_cache(tmp_path, monkeypatch)
+    simulate_path_owner(monkeypatch, cache.parent, 1001)
+    with pytest.raises(VerificationError, match="launcher uid 0"):
+        assert_checkpoint_cache_isolation(cache, 65534, launcher_euid=0)
 
 
 def test_cache_isolation_refuses_unprivileged_deployment(tmp_path, monkeypatch):
@@ -591,6 +615,7 @@ def test_cache_isolation_refuses_missing_or_root_child_uid(tmp_path, monkeypatch
 def test_cache_isolation_refuses_a_child_owned_path(tmp_path, monkeypatch):
     cache = make_safe_cache(tmp_path, monkeypatch)
     cache.write_text("", encoding="utf-8")
+    simulate_path_owner(monkeypatch, cache, os.getuid())
     with pytest.raises(VerificationError, match="owned by the child uid"):
         assert_checkpoint_cache_isolation(
             cache, os.getuid(), launcher_euid=0

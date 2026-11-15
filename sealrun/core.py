@@ -2397,9 +2397,10 @@ def assert_journal_writer_isolation(
 
     Implements the §5.7 launcher decision procedure: privileged launcher,
     explicit non-root drop uid different from every journal path owner,
-    pre-existing journal directory, no group/other write bit on the file,
-    its directory, or any ancestor, no ACLs, and an ownership-enforcing
-    local filesystem. Anything unverifiable fails closed.
+    pre-existing journal directory, every path component owned by the
+    launcher and not the child, no group/other write bit on the file, its
+    directory, or any ancestor, no ACLs, and an ownership-enforcing local
+    filesystem. Anything unverifiable fails closed.
 
     ``launcher_euid`` is injectable so the predicate can be unit-tested
     without real privilege; production callers omit it.

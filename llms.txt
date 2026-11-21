@@ -10,7 +10,8 @@
 - [Anchoring protocol](https://github.com/RobGanon/bsv-ai-security/blob/main/docs/anchoring-protocol.md): optional BSV anchoring (testnet)
 - [Technical writeup](https://github.com/RobGanon/bsv-ai-security/blob/main/docs/technical-writeup.md): design writeup
 - [Landing page](https://robganon.github.io/bsv-ai-security/): overview, demo video
-- [Demo video (19s)](https://youtu.be/6z6a17UsD4g): three tamper attempts, all caught
+- [Demo video (90s, v2)](https://youtu.be/4wpYB-3izyQ): complete v2 flow — sealing, tamper refusal, real local model run, on-chain anchor, verifications
+- [Demo video (19s, v1)](https://youtu.be/6z6a17UsD4g): three tamper attempts, all caught
 
 ## Optional
 

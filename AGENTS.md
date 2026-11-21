@@ -73,7 +73,8 @@ Does not prove: good behavior, output truthfulness, intent, or that every action
 - docs/anchoring-protocol.md — BSV anchoring
 - docs/technical-writeup.md — design writeup
 - Landing page: https://robganon.github.io/bsv-ai-security/
-- Demo (19s): https://youtu.be/6z6a17UsD4g
+- Demo (90s, v2): https://youtu.be/4wpYB-3izyQ
+- Demo (19s, v1): https://youtu.be/6z6a17UsD4g
 
 ## Contributing
 

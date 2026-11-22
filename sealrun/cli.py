@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import stat
+import subprocess
 import struct
 import sys
+from importlib import import_module
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 
 from .anchor import (
@@ -107,10 +112,173 @@ def _write_json(path: Path, obj):
     path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _check_setup_environment() -> tuple[bool, bool, bool, bool]:
+    python_ok = sys.version_info >= (3, 10)
+    python_version = ".".join(str(part) for part in sys.version_info[:3])
+    print(
+        f"{'PASS' if python_ok else 'FAIL'}: Python >= 3.10 "
+        f"(found {python_version})"
+    )
+
+    try:
+        pip_result = subprocess.run(
+            [sys.executable, "-m", "pip", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        pip_available = pip_result.returncode == 0
+        pip_detail = (
+            pip_result.stdout.strip()
+            if pip_available
+            else (pip_result.stderr.strip() or pip_result.stdout.strip())
+        )
+    except OSError as exc:
+        pip_available = False
+        pip_detail = str(exc)
+    print(
+        f"{'PASS' if pip_available else 'FAIL'}: pip available"
+        + (f" ({pip_detail})" if pip_detail else "")
+    )
+
+    try:
+        distribution("sealrun")
+        installed = True
+        install_detail = "installed"
+    except PackageNotFoundError:
+        installed = False
+        install_detail = "not installed"
+
+    try:
+        import_module("sealrun")
+        importable = True
+        import_detail = "importable"
+    except ImportError as exc:
+        importable = False
+        import_detail = f"not importable ({exc})"
+
+    sealrun_ok = installed and importable
+    detail = f"{install_detail}, {import_detail}"
+    print(
+        f"{'PASS' if sealrun_ok else 'FAIL'}: "
+        f"SealRun installed and importable ({detail})"
+    )
+    return python_ok, pip_available, installed, sealrun_ok
+
+
+def _confirm_setup(prompt: str) -> bool:
+    try:
+        response = input(prompt).strip().lower()
+    except EOFError:
+        return False
+    return response in {"y", "yes"}
+
+
+def _setup(args) -> int:
+    python_ok, pip_available, installed, sealrun_ok = _check_setup_environment()
+    if not installed:
+        print(
+            "Recommended install command (run from the repository root): "
+            "pip install -e ."
+        )
+    if not python_ok:
+        print(
+            "Setup stopped: SealRun requires Python 3.10 or newer.",
+            file=sys.stderr,
+        )
+        return 1
+    if not pip_available:
+        print(
+            "Setup stopped: pip is unavailable for this Python interpreter.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not sealrun_ok:
+        if installed:
+            print(
+                "Setup stopped: SealRun is installed but could not be imported. "
+                "Fix the installation before continuing.",
+                file=sys.stderr,
+            )
+            return 1
+        if not _confirm_setup("Install SealRun now with pip? [y/N]: "):
+            print("Setup stopped: SealRun installation was not approved.", file=sys.stderr)
+            return 1
+
+        print("Installing SealRun with the current Python interpreter...")
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-e", "."],
+                cwd=Path(__file__).resolve().parent.parent,
+                check=False,
+            )
+        except OSError as exc:
+            print(f"FAIL: SealRun installation ({exc})", file=sys.stderr)
+            return 1
+        if result.returncode != 0:
+            print(
+                f"FAIL: SealRun installation (pip exited with status {result.returncode})",
+                file=sys.stderr,
+            )
+            return 1
+
+        python_ok, pip_available, _, sealrun_ok = _check_setup_environment()
+        if not python_ok or not pip_available or not sealrun_ok:
+            print(
+                "Setup stopped: the required environment checks did not pass "
+                "after installation.",
+                file=sys.stderr,
+            )
+            return 1
+
+    print()
+    print(
+        "WARNING: These are DEMONSTRATION keys. Production keys stay offline "
+        "or in an HSM and outside this workflow."
+    )
+    existing_paths = [
+        path for path in (args.private_key, args.public_key) if os.path.lexists(path)
+    ]
+    force = False
+    if existing_paths:
+        print("Existing key file(s) found: " + ", ".join(str(path) for path in existing_paths))
+        if not _confirm_setup("Overwrite existing key file(s) and generate a new demo keypair? [y/N]: "):
+            print("Setup stopped: existing key files were not changed.", file=sys.stderr)
+            return 1
+        force = True
+
+    try:
+        generate_keypair(args.private_key, args.public_key, force=force)
+        public_key = load_public_key(args.public_key)
+        private_key = load_private_key(args.private_key)
+        if private_key.pubkey_compressed() != public_key:
+            raise VerificationError("generated public and private keys do not match")
+        private_mode = stat.S_IMODE(args.private_key.stat().st_mode)
+    except (OSError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"Demo keypair generated. Private key: {args.private_key} "
+        f"(mode {private_mode:04o})"
+    )
+    print(f"Public key: {public_key.hex()}")
+    print("Key info: secp256k1; compressed 33-byte public key; testnet WIF encoding.")
+    print(f"Public key SHA-256: {hashlib.sha256(public_key).hexdigest()}")
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="sealrun", description="Local AI artifact trust core")
     parser.add_argument("--version", action="version", version=f"sealrun {_SEALRUN_VERSION}")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser(
+        "setup", help="check the environment and create a demo keypair"
+    )
+    p.add_argument("--private-key", type=Path, default=Path("keys/private.wif"))
+    p.add_argument("--public-key", type=Path, default=Path("keys/public.pub"))
 
     p = sub.add_parser("keygen", help="generate a development secp256k1 keypair")
     p.add_argument("--private-key", required=True, type=Path)
@@ -460,7 +628,9 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     try:
-        if args.command == "keygen":
+        if args.command == "setup":
+            return _setup(args)
+        elif args.command == "keygen":
             generate_keypair(args.private_key, args.public_key, force=args.force)
             print("Development keypair generated. Protect the private key.")
         elif args.command == "manifest-create":

@@ -24,6 +24,25 @@ sealrun command is the real one you would use with a real model.
 pip install -e .
 ```
 
+## Guided setup (environment check and demo keypair)
+
+Run the first two setup stages with:
+
+```bash
+sealrun setup
+```
+
+The wizard checks Python 3.10+, pip, and that SealRun is installed and
+importable. If SealRun is not installed, it displays `pip install -e .`
+and asks before running the install. Declining stops the setup.
+
+After the checks pass, it creates a demo keypair at
+`keys/private.wif` and `keys/public.pub`. If either file already exists,
+the wizard asks before overwriting. It displays the public key and key
+information, but never displays the private key or signs a manifest.
+These are **demonstration keys**; production keys must stay offline or
+in an HSM and outside this workflow.
+
 ## The example setup
 
 A toy support agent in a folder called `my-ai/`:

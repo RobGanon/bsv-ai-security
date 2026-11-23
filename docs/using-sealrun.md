@@ -49,7 +49,15 @@ with spaces can be quoted. The wizard checks that each selected file
 exists and is readable, displays the final list, and asks you to confirm
 it. The demo set is written to a temporary directory and clearly marked
 as demo content. Declining the list stops setup. This stage only
-collects artifacts; it does not create a manifest.
+collects artifacts; manifest creation is Stage 4.
+
+Stage 4 asks for a release ID and sequence, then creates the unsigned
+manifest at `state/manifest.json` using the confirmed artifact files. It
+stops if that file already exists. The wizard displays the saved path,
+the exact manifest JSON payload that a later stage will sign, and the
+public key separately for later verification. The existing manifest
+format keeps the public key out of the signed payload; it is supplied
+out of band. Stage 4 does not sign the manifest.
 
 ## The example setup
 

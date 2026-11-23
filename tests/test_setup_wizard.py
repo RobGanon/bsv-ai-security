@@ -45,8 +45,23 @@ def _setup_args(private_path, public_path):
     ]
 
 
+def _set_responses(monkeypatch, responses):
+    answers = iter(responses)
+
+    def answer(prompt):
+        try:
+            return next(answers)
+        except StopIteration:
+            pytest.fail(f"unexpected setup prompt: {prompt}")
+
+    monkeypatch.setattr("builtins.input", answer)
+
+
 def test_setup_checks_environment_and_generates_demo_keypair(tmp_path, monkeypatch, capsys):
     _set_environment(monkeypatch)
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("demo", encoding="utf-8")
+    _set_responses(monkeypatch, ["1", str(artifact), "yes"])
     private_path = tmp_path / "keys" / "private.wif"
     public_path = tmp_path / "keys" / "public.pub"
 
@@ -141,9 +156,11 @@ def test_setup_installs_only_after_approval_and_rechecks(tmp_path, monkeypatch, 
         return run(command, **kwargs)
 
     monkeypatch.setattr(cli.subprocess, "run", run_with_pip_check)
-    monkeypatch.setattr("builtins.input", lambda prompt: "yes")
     private_path = tmp_path / "private.wif"
     public_path = tmp_path / "public.pub"
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("demo", encoding="utf-8")
+    _set_responses(monkeypatch, ["yes", "1", str(artifact), "yes"])
 
     assert cli.main(_setup_args(private_path, public_path)) == 0
 
@@ -183,7 +200,9 @@ def test_setup_overwrites_existing_keys_only_after_approval(tmp_path, monkeypatc
     public_path = tmp_path / "public.pub"
     private_path.write_bytes(b"old private")
     public_path.write_bytes(b"old public")
-    monkeypatch.setattr("builtins.input", lambda prompt: "yes")
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("demo", encoding="utf-8")
+    _set_responses(monkeypatch, ["yes", "1", str(artifact), "yes"])
 
     assert cli.main(_setup_args(private_path, public_path)) == 0
     assert (
@@ -207,3 +226,181 @@ def test_setup_does_not_install_when_installed_package_is_not_importable(
     assert "installed but could not be imported" in output.err
     assert not private_path.exists()
     assert not public_path.exists()
+
+
+def _run_setup_with_responses(tmp_path, monkeypatch, responses):
+    _set_environment(monkeypatch)
+    _set_responses(monkeypatch, responses)
+    private_path = tmp_path / "private.wif"
+    public_path = tmp_path / "public.pub"
+    return cli.main(_setup_args(private_path, public_path)), private_path, public_path
+
+
+def test_setup_collects_recursive_directory_artifacts_and_confirms_list(
+    tmp_path, monkeypatch, capsys
+):
+    root = tmp_path / "artifacts"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    first = root / "first.txt"
+    second = nested / "second.txt"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+    monkeypatch.setattr(
+        cli,
+        "create_manifest",
+        lambda *args, **kwargs: pytest.fail("Stage 3 must not create a manifest"),
+    )
+
+    result, _, _ = _run_setup_with_responses(
+        tmp_path, monkeypatch, ["1", str(root), "yes"]
+    )
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert f"- {first}" in output
+    assert f"- {second}" in output
+    assert "Stage 3 complete: 2 artifact(s) confirmed." in output
+    assert "Manifest creation is not part of this stage." in output
+
+
+def test_setup_accepts_quoted_file_paths(tmp_path, monkeypatch, capsys):
+    first = tmp_path / "one file.txt"
+    second = tmp_path / "two file.txt"
+    first.write_text("one", encoding="utf-8")
+    second.write_text("two", encoding="utf-8")
+    raw_paths = f'"{first}" "{second}"'
+
+    result, _, _ = _run_setup_with_responses(
+        tmp_path, monkeypatch, ["1", raw_paths, "yes"]
+    )
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert f"- {first}" in output
+    assert f"- {second}" in output
+
+
+def test_setup_reports_missing_path_and_allows_retry(tmp_path, monkeypatch, capsys):
+    missing = tmp_path / "missing.txt"
+    existing = tmp_path / "existing.txt"
+    existing.write_text("content", encoding="utf-8")
+
+    result, _, _ = _run_setup_with_responses(
+        tmp_path,
+        monkeypatch,
+        ["1", str(missing), "r", str(existing), "yes"],
+    )
+
+    assert result == 0
+    output = capsys.readouterr()
+    assert f"path does not exist: {missing}" in output.err
+    assert f"- {existing}" in output.out
+    assert f"- {missing}" not in output.out
+
+
+def test_setup_reports_unreadable_file_and_stops_cleanly(
+    tmp_path, monkeypatch, capsys
+):
+    unreadable = tmp_path / "unreadable.txt"
+    unreadable.write_text("content", encoding="utf-8")
+    check_path = cli._artifact_path_error
+
+    def reject_file(path):
+        if path == unreadable:
+            return f"file is not readable: {path} (permission denied)"
+        return check_path(path)
+
+    monkeypatch.setattr(cli, "_artifact_path_error", reject_file)
+
+    result, _, _ = _run_setup_with_responses(
+        tmp_path, monkeypatch, ["1", str(unreadable), "q"]
+    )
+
+    assert result == 1
+    output = capsys.readouterr()
+    assert f"file is not readable: {unreadable}" in output.err
+    assert "no valid artifacts were provided" in output.err
+
+
+def test_setup_rejects_empty_directory_and_allows_stop(tmp_path, monkeypatch, capsys):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+
+    result, _, _ = _run_setup_with_responses(
+        tmp_path, monkeypatch, ["1", str(empty), "q"]
+    )
+
+    assert result == 1
+    output = capsys.readouterr()
+    assert f"directory contains no files: {empty}" in output.err
+    assert "no valid artifacts were provided" in output.err
+
+
+def test_setup_creates_and_confirms_marked_demo_artifacts(
+    tmp_path, monkeypatch, capsys
+):
+    demo_root = tmp_path / "demo-artifacts"
+
+    def make_demo_directory(prefix):
+        demo_root.mkdir()
+        return str(demo_root)
+
+    monkeypatch.setattr(cli.tempfile, "mkdtemp", make_demo_directory)
+    monkeypatch.setattr(
+        cli,
+        "create_manifest",
+        lambda *args, **kwargs: pytest.fail("Stage 3 must not create a manifest"),
+    )
+
+    result, _, _ = _run_setup_with_responses(
+        tmp_path, monkeypatch, ["2", "yes"]
+    )
+
+    assert result == 0
+    demo_files = sorted(demo_root.iterdir())
+    assert len(demo_files) == 3
+    assert all(
+        "DEMO CONTENT ONLY" in path.read_text(encoding="utf-8")
+        for path in demo_files
+    )
+    output = capsys.readouterr().out
+    assert "Created three DEMO CONTENT ONLY text artifacts." in output
+    assert all(str(path) in output for path in demo_files)
+    assert "Manifest creation is not part of this stage." in output
+
+
+def test_setup_removes_unconfirmed_demo_artifacts(tmp_path, monkeypatch, capsys):
+    demo_root = tmp_path / "demo-artifacts"
+
+    def make_demo_directory(prefix):
+        demo_root.mkdir()
+        return str(demo_root)
+
+    monkeypatch.setattr(cli.tempfile, "mkdtemp", make_demo_directory)
+
+    result, _, _ = _run_setup_with_responses(
+        tmp_path, monkeypatch, ["2", "no"]
+    )
+
+    assert result == 1
+    assert not demo_root.exists()
+    assert "artifact list was not confirmed" in capsys.readouterr().err
+
+
+def test_setup_stops_when_user_declines_artifact_list(tmp_path, monkeypatch, capsys):
+    artifact = tmp_path / "sample.txt"
+    artifact.write_text("content", encoding="utf-8")
+    monkeypatch.setattr(
+        cli,
+        "create_manifest",
+        lambda *args, **kwargs: pytest.fail("Stage 3 must not create a manifest"),
+    )
+
+    result, _, _ = _run_setup_with_responses(
+        tmp_path, monkeypatch, ["1", str(artifact), "no"]
+    )
+
+    assert result == 1
+    assert "artifact list was not confirmed" in capsys.readouterr().err
+    assert artifact.is_file()

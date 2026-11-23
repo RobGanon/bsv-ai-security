@@ -43,6 +43,14 @@ information, but never displays the private key or signs a manifest.
 These are **demonstration keys**; production keys must stay offline or
 in an HSM and outside this workflow.
 
+Stage 3 asks you to select either your own directory or file paths, or
+a built-in demo set. Directories are searched recursively; file paths
+with spaces can be quoted. The wizard checks that each selected file
+exists and is readable, displays the final list, and asks you to confirm
+it. The demo set is written to a temporary directory and clearly marked
+as demo content. Declining the list stops setup. This stage only
+collects artifacts; it does not create a manifest.
+
 ## The example setup
 
 A toy support agent in a folder called `my-ai/`:

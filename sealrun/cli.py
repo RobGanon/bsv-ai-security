@@ -4,10 +4,13 @@ import argparse
 import hashlib
 import json
 import os
+import shlex
+import shutil
 import stat
 import subprocess
 import struct
 import sys
+import tempfile
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
@@ -174,6 +177,211 @@ def _confirm_setup(prompt: str) -> bool:
     return response in {"y", "yes"}
 
 
+def _artifact_path_error(path: Path) -> str | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return f"path does not exist: {path}"
+    except OSError as exc:
+        return f"cannot inspect path {path}: {exc}"
+
+    if stat.S_ISLNK(info.st_mode):
+        return f"symbolic links are not allowed: {path}"
+    if not stat.S_ISREG(info.st_mode):
+        return f"path is not a regular file: {path}"
+    try:
+        with path.open("rb") as artifact:
+            artifact.read(1)
+    except OSError as exc:
+        return f"file is not readable: {path} ({exc})"
+    return None
+
+
+def _directory_artifacts(root: Path) -> tuple[list[Path], list[str]]:
+    artifacts: list[Path] = []
+    errors: list[str] = []
+
+    def visit(directory: Path) -> None:
+        try:
+            with os.scandir(directory) as entries:
+                children = sorted(entries, key=lambda entry: entry.name)
+        except OSError as exc:
+            errors.append(f"cannot read directory {directory}: {exc}")
+            return
+
+        for entry in children:
+            path = Path(entry.path)
+            try:
+                mode = entry.stat(follow_symlinks=False).st_mode
+            except OSError as exc:
+                errors.append(f"cannot inspect path {path}: {exc}")
+                continue
+            if stat.S_ISLNK(mode):
+                errors.append(f"symbolic links are not allowed: {path}")
+            elif stat.S_ISDIR(mode):
+                visit(path)
+            elif stat.S_ISREG(mode):
+                error = _artifact_path_error(path)
+                if error:
+                    errors.append(error)
+                else:
+                    artifacts.append(path)
+            else:
+                errors.append(f"path is not a regular file: {path}")
+
+    visit(root)
+    if not artifacts and not errors:
+        errors.append(f"directory contains no files: {root}")
+    elif not artifacts:
+        errors.append(f"directory contains no readable files: {root}")
+    return artifacts, errors
+
+
+def _user_artifact_paths(raw_paths: str) -> tuple[list[Path], list[str]]:
+    try:
+        words = shlex.split(raw_paths)
+    except ValueError as exc:
+        return [], [f"invalid path list: {exc}"]
+    if not words:
+        return [], ["no artifact paths were provided"]
+
+    paths = [Path(os.path.abspath(Path(word).expanduser())) for word in words]
+    path_info: list[tuple[Path, os.stat_result | None]] = []
+    errors = []
+    for path in paths:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            errors.append(f"path does not exist: {path}")
+            path_info.append((path, None))
+        except OSError as exc:
+            errors.append(f"cannot inspect path {path}: {exc}")
+            path_info.append((path, None))
+        else:
+            path_info.append((path, info))
+
+    directories = [path for path, info in path_info
+                   if info is not None and stat.S_ISDIR(info.st_mode)]
+    if directories:
+        if len(paths) == 1 and len(directories) == 1:
+            root = directories[0]
+            artifacts, directory_errors = _directory_artifacts(root)
+            return artifacts, errors + directory_errors
+        errors.extend(
+            f"choose one directory by itself, not with other paths: {path}"
+            for path in directories
+        )
+        return [], errors
+
+    artifacts = []
+    seen = set()
+    for path, info in path_info:
+        if info is None:
+            continue
+        if path in seen:
+            errors.append(f"duplicate artifact path: {path}")
+            continue
+        seen.add(path)
+        error = _artifact_path_error(path)
+        if error:
+            errors.append(error)
+        else:
+            artifacts.append(path)
+    return artifacts, errors
+
+
+def _retry_artifacts() -> bool:
+    while True:
+        try:
+            response = input("Retry artifact selection or stop? [r/q]: ").strip().lower()
+        except EOFError:
+            return False
+        if response in {"r", "retry"}:
+            return True
+        if response in {"q", "quit"}:
+            return False
+        print("Enter 'r' to retry or 'q' to stop.")
+
+
+def _choose_artifact_source() -> str | None:
+    print("\nStage 3 — Artifacts")
+    print("1) Use your own directory or files")
+    print("2) Use the built-in demo set")
+    print("q) Stop setup")
+    while True:
+        try:
+            choice = input("Choose an artifact source [1/2/q]: ").strip().lower()
+        except EOFError:
+            return None
+        if choice in {"1", "2"}:
+            return choice
+        if choice in {"q", "quit"}:
+            return None
+        print("Choose 1, 2, or q.")
+
+
+def _collect_user_artifacts() -> list[Path] | None:
+    while True:
+        try:
+            raw_paths = input(
+                "Enter one directory (searched recursively) or file paths "
+                "(quote paths with spaces): "
+            )
+        except EOFError:
+            return None
+        artifacts, errors = _user_artifact_paths(raw_paths)
+        if not errors and artifacts:
+            return artifacts
+        for error in errors:
+            print(f"ERROR: {error}", file=sys.stderr)
+        if not _retry_artifacts():
+            return None
+
+
+def _create_demo_artifacts() -> tuple[Path, list[Path]] | None:
+    contents = {
+        "demo-model-description.txt": (
+            "DEMO CONTENT ONLY\n"
+            "Placeholder description; this is not a model.\n"
+        ),
+        "demo-run-config.txt": (
+            "DEMO CONTENT ONLY\n"
+            "mode=example\n"
+            "temperature=0.2\n"
+        ),
+        "demo-sample-input.txt": (
+            "DEMO CONTENT ONLY\n"
+            "Sample input for the SealRun setup wizard.\n"
+        ),
+    }
+    try:
+        root = Path(tempfile.mkdtemp(prefix="sealrun-demo-artifacts-"))
+    except OSError as exc:
+        print(f"ERROR: cannot create demo artifact directory: {exc}", file=sys.stderr)
+        return None
+
+    print(f"Creating clearly marked demo content in: {root}")
+    artifacts = []
+    try:
+        for name, content in contents.items():
+            path = root / name
+            path.write_text(content, encoding="utf-8")
+            artifacts.append(path)
+    except OSError as exc:
+        try:
+            shutil.rmtree(root)
+        except OSError as cleanup_error:
+            print(
+                f"ERROR: could not remove incomplete demo directory {root}: "
+                f"{cleanup_error}",
+                file=sys.stderr,
+            )
+        print(f"ERROR: could not create demo artifact {path}: {exc}", file=sys.stderr)
+        return None
+    print("Created three DEMO CONTENT ONLY text artifacts.")
+    return root, artifacts
+
+
 def _setup(args) -> int:
     python_ok, pip_available, installed, sealrun_ok = _check_setup_environment()
     if not installed:
@@ -266,6 +474,44 @@ def _setup(args) -> int:
     print(f"Public key: {public_key.hex()}")
     print("Key info: secp256k1; compressed 33-byte public key; testnet WIF encoding.")
     print(f"Public key SHA-256: {hashlib.sha256(public_key).hexdigest()}")
+
+    artifact_source = _choose_artifact_source()
+    if artifact_source is None:
+        print("Setup stopped: no artifact source was selected.", file=sys.stderr)
+        return 1
+
+    demo_root = None
+    if artifact_source == "1":
+        artifacts = _collect_user_artifacts()
+        if artifacts is None:
+            print("Setup stopped: no valid artifacts were provided.", file=sys.stderr)
+            return 1
+    else:
+        demo_artifacts = _create_demo_artifacts()
+        if demo_artifacts is None:
+            return 1
+        demo_root, artifacts = demo_artifacts
+
+    print("\nArtifacts to seal:")
+    for artifact in artifacts:
+        print(f"- {artifact}")
+    if not _confirm_setup("Continue with this artifact list? [y/N]: "):
+        print("Setup stopped: the artifact list was not confirmed.", file=sys.stderr)
+        if demo_root is not None:
+            try:
+                shutil.rmtree(demo_root)
+            except OSError as exc:
+                print(
+                    f"ERROR: could not remove unconfirmed demo directory "
+                    f"{demo_root}: {exc}",
+                    file=sys.stderr,
+                )
+        return 1
+
+    print(f"Stage 3 complete: {len(artifacts)} artifact(s) confirmed.")
+    if demo_root is not None:
+        print(f"Demo artifacts remain in: {demo_root}")
+    print("Manifest creation is not part of this stage.")
     return 0
 
 

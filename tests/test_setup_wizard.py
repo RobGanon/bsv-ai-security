@@ -1,4 +1,5 @@
 import hashlib
+import json
 import stat
 from pathlib import Path
 from types import SimpleNamespace
@@ -59,9 +60,12 @@ def _set_responses(monkeypatch, responses):
 
 def test_setup_checks_environment_and_generates_demo_keypair(tmp_path, monkeypatch, capsys):
     _set_environment(monkeypatch)
+    monkeypatch.chdir(tmp_path)
     artifact = tmp_path / "artifact.txt"
     artifact.write_text("demo", encoding="utf-8")
-    _set_responses(monkeypatch, ["1", str(artifact), "yes"])
+    _set_responses(
+        monkeypatch, ["1", str(artifact), "yes", "demo-release", "1"]
+    )
     private_path = tmp_path / "keys" / "private.wif"
     public_path = tmp_path / "keys" / "public.pub"
 
@@ -156,11 +160,15 @@ def test_setup_installs_only_after_approval_and_rechecks(tmp_path, monkeypatch, 
         return run(command, **kwargs)
 
     monkeypatch.setattr(cli.subprocess, "run", run_with_pip_check)
+    monkeypatch.chdir(tmp_path)
     private_path = tmp_path / "private.wif"
     public_path = tmp_path / "public.pub"
     artifact = tmp_path / "artifact.txt"
     artifact.write_text("demo", encoding="utf-8")
-    _set_responses(monkeypatch, ["yes", "1", str(artifact), "yes"])
+    _set_responses(
+        monkeypatch,
+        ["yes", "1", str(artifact), "yes", "demo-release", "1"],
+    )
 
     assert cli.main(_setup_args(private_path, public_path)) == 0
 
@@ -196,13 +204,16 @@ def test_setup_does_not_overwrite_existing_keys_without_approval(tmp_path, monke
 
 def test_setup_overwrites_existing_keys_only_after_approval(tmp_path, monkeypatch):
     _set_environment(monkeypatch)
+    monkeypatch.chdir(tmp_path)
     private_path = tmp_path / "private.wif"
     public_path = tmp_path / "public.pub"
     private_path.write_bytes(b"old private")
     public_path.write_bytes(b"old public")
     artifact = tmp_path / "artifact.txt"
     artifact.write_text("demo", encoding="utf-8")
-    _set_responses(monkeypatch, ["yes", "1", str(artifact), "yes"])
+    _set_responses(
+        monkeypatch, ["yes", "1", str(artifact), "yes", "demo-release", "1"]
+    )
 
     assert cli.main(_setup_args(private_path, public_path)) == 0
     assert (
@@ -230,6 +241,7 @@ def test_setup_does_not_install_when_installed_package_is_not_importable(
 
 def _run_setup_with_responses(tmp_path, monkeypatch, responses):
     _set_environment(monkeypatch)
+    monkeypatch.chdir(tmp_path)
     _set_responses(monkeypatch, responses)
     private_path = tmp_path / "private.wif"
     public_path = tmp_path / "public.pub"
@@ -246,14 +258,10 @@ def test_setup_collects_recursive_directory_artifacts_and_confirms_list(
     second = nested / "second.txt"
     first.write_text("first", encoding="utf-8")
     second.write_text("second", encoding="utf-8")
-    monkeypatch.setattr(
-        cli,
-        "create_manifest",
-        lambda *args, **kwargs: pytest.fail("Stage 3 must not create a manifest"),
-    )
-
     result, _, _ = _run_setup_with_responses(
-        tmp_path, monkeypatch, ["1", str(root), "yes"]
+        tmp_path,
+        monkeypatch,
+        ["1", str(root), "yes", "demo-release", "1"],
     )
 
     assert result == 0
@@ -261,7 +269,11 @@ def test_setup_collects_recursive_directory_artifacts_and_confirms_list(
     assert f"- {first}" in output
     assert f"- {second}" in output
     assert "Stage 3 complete: 2 artifact(s) confirmed." in output
-    assert "Manifest creation is not part of this stage." in output
+    manifest = json.loads((tmp_path / "state" / "manifest.json").read_text())
+    assert [item["path"] for item in manifest["artifacts"]] == [
+        "first.txt",
+        "nested/second.txt",
+    ]
 
 
 def test_setup_accepts_quoted_file_paths(tmp_path, monkeypatch, capsys):
@@ -272,7 +284,7 @@ def test_setup_accepts_quoted_file_paths(tmp_path, monkeypatch, capsys):
     raw_paths = f'"{first}" "{second}"'
 
     result, _, _ = _run_setup_with_responses(
-        tmp_path, monkeypatch, ["1", raw_paths, "yes"]
+        tmp_path, monkeypatch, ["1", raw_paths, "yes", "demo-release", "1"]
     )
 
     assert result == 0
@@ -289,7 +301,7 @@ def test_setup_reports_missing_path_and_allows_retry(tmp_path, monkeypatch, caps
     result, _, _ = _run_setup_with_responses(
         tmp_path,
         monkeypatch,
-        ["1", str(missing), "r", str(existing), "yes"],
+        ["1", str(missing), "r", str(existing), "yes", "demo-release", "1"],
     )
 
     assert result == 0
@@ -347,14 +359,8 @@ def test_setup_creates_and_confirms_marked_demo_artifacts(
         return str(demo_root)
 
     monkeypatch.setattr(cli.tempfile, "mkdtemp", make_demo_directory)
-    monkeypatch.setattr(
-        cli,
-        "create_manifest",
-        lambda *args, **kwargs: pytest.fail("Stage 3 must not create a manifest"),
-    )
-
     result, _, _ = _run_setup_with_responses(
-        tmp_path, monkeypatch, ["2", "yes"]
+        tmp_path, monkeypatch, ["2", "yes", "demo-release", "1"]
     )
 
     assert result == 0
@@ -367,7 +373,7 @@ def test_setup_creates_and_confirms_marked_demo_artifacts(
     output = capsys.readouterr().out
     assert "Created three DEMO CONTENT ONLY text artifacts." in output
     assert all(str(path) in output for path in demo_files)
-    assert "Manifest creation is not part of this stage." in output
+    assert (tmp_path / "state" / "manifest.json").is_file()
 
 
 def test_setup_removes_unconfirmed_demo_artifacts(tmp_path, monkeypatch, capsys):
@@ -391,12 +397,6 @@ def test_setup_removes_unconfirmed_demo_artifacts(tmp_path, monkeypatch, capsys)
 def test_setup_stops_when_user_declines_artifact_list(tmp_path, monkeypatch, capsys):
     artifact = tmp_path / "sample.txt"
     artifact.write_text("content", encoding="utf-8")
-    monkeypatch.setattr(
-        cli,
-        "create_manifest",
-        lambda *args, **kwargs: pytest.fail("Stage 3 must not create a manifest"),
-    )
-
     result, _, _ = _run_setup_with_responses(
         tmp_path, monkeypatch, ["1", str(artifact), "no"]
     )
@@ -404,3 +404,89 @@ def test_setup_stops_when_user_declines_artifact_list(tmp_path, monkeypatch, cap
     assert result == 1
     assert "artifact list was not confirmed" in capsys.readouterr().err
     assert artifact.is_file()
+
+
+def test_setup_stage4_shows_exact_unsigned_manifest_and_public_key(
+    tmp_path, monkeypatch, capsys
+):
+    artifact = tmp_path / "model-notes.txt"
+    artifact.write_text("demo artifact", encoding="utf-8")
+    monkeypatch.setattr(
+        cli,
+        "sign_manifest",
+        lambda *args, **kwargs: pytest.fail("Stage 4 must not sign the manifest"),
+    )
+
+    result, private_path, public_path = _run_setup_with_responses(
+        tmp_path,
+        monkeypatch,
+        ["1", str(artifact), "yes", "", "1"],
+    )
+
+    assert result == 0
+    output = capsys.readouterr().out
+    manifest_path = tmp_path / "state" / "manifest.json"
+    manifest_text = manifest_path.read_text(encoding="utf-8")
+    manifest = json.loads(manifest_text)
+    public_key = load_public_key(public_path)
+    assert f"Unsigned manifest written: {Path('state/manifest.json')}" in output
+    assert (
+        "Public key for later verification (out of band; not embedded in "
+        f"the signed manifest): {public_key.hex()}"
+    ) in output
+    assert "Unsigned manifest contents (the exact payload Stage 5 will sign):" in output
+    assert manifest_text in output
+    assert manifest["release_id"] == "local-dev-release"
+    assert manifest["release_seq"] == 1
+    assert manifest["artifacts"] == [
+        {
+            "path": artifact.name,
+            "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            "size": len(artifact.read_bytes()),
+        }
+    ]
+    assert "public_key" not in manifest
+    assert "signature" not in manifest
+    assert private_path.is_file()
+
+
+def test_setup_stage4_refuses_existing_manifest_without_overwriting(
+    tmp_path, monkeypatch, capsys
+):
+    artifact = tmp_path / "input.txt"
+    artifact.write_text("input", encoding="utf-8")
+    manifest_path = tmp_path / "state" / "manifest.json"
+    manifest_path.parent.mkdir()
+    existing = b"existing manifest bytes\n"
+    manifest_path.write_bytes(existing)
+
+    result, _, _ = _run_setup_with_responses(
+        tmp_path, monkeypatch, ["1", str(artifact), "yes"]
+    )
+
+    assert result == 1
+    assert manifest_path.read_bytes() == existing
+    assert f"manifest file already exists: {Path('state/manifest.json')}" in (
+        capsys.readouterr().err
+    )
+
+
+def test_setup_stage4_reports_manifest_creation_errors(tmp_path, monkeypatch, capsys):
+    artifact = tmp_path / "input.txt"
+    artifact.write_text("input", encoding="utf-8")
+
+    def fail_manifest(*args, **kwargs):
+        raise cli.VerificationError("synthetic manifest failure")
+
+    monkeypatch.setattr(cli, "create_manifest", fail_manifest)
+    result, _, _ = _run_setup_with_responses(
+        tmp_path,
+        monkeypatch,
+        ["1", str(artifact), "yes", "demo-release", "1"],
+    )
+
+    assert result == 1
+    assert "manifest creation failed: synthetic manifest failure" in (
+        capsys.readouterr().err
+    )
+    assert not (tmp_path / "state" / "manifest.json").exists()

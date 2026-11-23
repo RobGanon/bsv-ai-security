@@ -115,6 +115,29 @@ def _write_json(path: Path, obj):
     path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _write_json_new(path: Path, obj) -> str:
+    content = json.dumps(obj, indent=2, sort_keys=True) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    created = False
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            created = True
+            handle.write(content)
+    except FileExistsError as exc:
+        raise VerificationError(f"manifest file already exists: {path}") from exc
+    except OSError as exc:
+        if created:
+            try:
+                path.unlink()
+            except OSError as cleanup_error:
+                raise VerificationError(
+                    f"could not write manifest {path}: {exc}; "
+                    f"could not remove incomplete file: {cleanup_error}"
+                ) from exc
+        raise VerificationError(f"could not write manifest {path}: {exc}") from exc
+    return content
+
+
 def _check_setup_environment() -> tuple[bool, bool, bool, bool]:
     python_ok = sys.version_info >= (3, 10)
     python_version = ".".join(str(part) for part in sys.version_info[:3])
@@ -511,7 +534,45 @@ def _setup(args) -> int:
     print(f"Stage 3 complete: {len(artifacts)} artifact(s) confirmed.")
     if demo_root is not None:
         print(f"Demo artifacts remain in: {demo_root}")
-    print("Manifest creation is not part of this stage.")
+
+    manifest_path = Path("state/manifest.json")
+    if os.path.lexists(manifest_path):
+        print(
+            f"Setup stopped: manifest file already exists: {manifest_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        release_id = input("Release ID [local-dev-release]: ").strip()
+        release_id = release_id or "local-dev-release"
+        release_seq_text = input("Release sequence (required integer): ").strip()
+    except EOFError:
+        print("Setup stopped: release details were not provided.", file=sys.stderr)
+        return 1
+    try:
+        release_seq = int(release_seq_text)
+    except ValueError:
+        print("ERROR: release sequence must be an integer.", file=sys.stderr)
+        return 1
+
+    try:
+        root = Path(os.path.commonpath([os.fspath(path.parent) for path in artifacts]))
+        relative_paths = [path.relative_to(root).as_posix() for path in artifacts]
+        manifest = create_manifest(root, relative_paths, release_id, release_seq)
+        manifest_json = _write_json_new(manifest_path, manifest)
+    except (OSError, ValueError) as exc:
+        print(f"ERROR: manifest creation failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Unsigned manifest written: {manifest_path}")
+    print(
+        "Public key for later verification (out of band; not embedded in "
+        f"the signed manifest): {public_key.hex()}"
+    )
+    print("Unsigned manifest contents (the exact payload Stage 5 will sign):")
+    print(manifest_json, end="")
+    print("Stage 4 complete. The manifest is unsigned; signing was not run.")
     return 0
 
 

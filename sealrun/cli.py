@@ -200,6 +200,107 @@ def _confirm_setup(prompt: str) -> bool:
     return response in {"y", "yes"}
 
 
+def _setup_manual_signing(
+    manifest_path: Path, signed_manifest_path: Path, private_key_path: Path
+) -> int:
+    try:
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+        _read_json(manifest_path)
+    except (OSError, VerificationError) as exc:
+        print(f"ERROR: cannot review unsigned manifest: {exc}", file=sys.stderr)
+        return 1
+
+    print("\nStage 5 — Manual manifest signing")
+    print("Review the unsigned manifest. This exact payload will be signed:")
+    print(manifest_text, end="" if manifest_text.endswith("\n") else "\n")
+    print("Stage 5 will not run the signing command or access the private key.")
+
+    existing_fingerprint = None
+    if os.path.lexists(signed_manifest_path):
+        try:
+            info = signed_manifest_path.stat()
+        except OSError as exc:
+            print(
+                f"ERROR: cannot inspect existing signed manifest: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+        existing_fingerprint = (info.st_mtime_ns, info.st_size)
+        print(f"Existing signed manifest found: {signed_manifest_path}")
+        if not _confirm_setup(
+            "Allow the manual manifest-sign command to overwrite it? [y/N]: "
+        ):
+            print(
+                "Setup stopped: existing signed manifest was not approved "
+                "for overwrite.",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            "The existing signed manifest must be refreshed by the manual "
+            "command before it can be handed off."
+        )
+
+    command = [
+        "sealrun",
+        "manifest-sign",
+        "--manifest",
+        os.fspath(manifest_path),
+        "--private-key",
+        os.fspath(private_key_path),
+        "--output",
+        os.fspath(signed_manifest_path),
+    ]
+    print("Run this existing SealRun command manually:")
+    print(" ".join(shlex.quote(part) for part in command))
+    if not _confirm_setup(
+        "After running it successfully, continue with the signed manifest? [y/N]: "
+    ):
+        print(
+            "Setup stopped: manual signing was refused or not confirmed. "
+            "No verification, launch, or anchoring was run.",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        if not signed_manifest_path.is_file():
+            print(
+                f"ERROR: signed manifest was not produced: {signed_manifest_path}",
+                file=sys.stderr,
+            )
+            return 1
+        signed_manifest = signed_manifest_path.read_bytes()
+        if existing_fingerprint is not None:
+            info = signed_manifest_path.stat()
+    except OSError as exc:
+        print(f"ERROR: cannot read signed manifest: {exc}", file=sys.stderr)
+        return 1
+    if existing_fingerprint is not None and (
+        info.st_mtime_ns,
+        info.st_size,
+    ) == existing_fingerprint:
+        print(
+            f"ERROR: signed manifest was not refreshed: {signed_manifest_path}",
+            file=sys.stderr,
+        )
+        return 1
+    if not signed_manifest.strip():
+        print(
+            f"ERROR: signed manifest is empty: {signed_manifest_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"Signed manifest received: {signed_manifest_path}")
+    print(
+        "NOT VERIFIED. Stage 6 must verify the signature and artifact hashes "
+        "before any launch or anchoring. This stage does not verify, launch, "
+        "or anchor."
+    )
+    return 0
+
+
 def _artifact_path_error(path: Path) -> str | None:
     try:
         info = path.lstat()
@@ -573,7 +674,11 @@ def _setup(args) -> int:
     print("Unsigned manifest contents (the exact payload Stage 5 will sign):")
     print(manifest_json, end="")
     print("Stage 4 complete. The manifest is unsigned; signing was not run.")
-    return 0
+    return _setup_manual_signing(
+        manifest_path,
+        Path("state/manifest.signed.json"),
+        args.private_key,
+    )
 
 
 def main(argv=None):

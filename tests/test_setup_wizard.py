@@ -46,14 +46,33 @@ def _setup_args(private_path, public_path):
     ]
 
 
-def _set_responses(monkeypatch, responses):
+def _set_responses(
+    monkeypatch,
+    responses,
+    *,
+    signed_manifest_bytes=b'{"payload": {}, "signature": "manual"}\n',
+):
     answers = iter(responses)
 
     def answer(prompt):
         try:
-            return next(answers)
+            response = next(answers)
         except StopIteration:
             pytest.fail(f"unexpected setup prompt: {prompt}")
+        if (
+            prompt.startswith("After running it successfully")
+            and response.strip().lower() in {"y", "yes"}
+        ):
+            signed_path = Path("state/manifest.signed.json")
+            signed_path.parent.mkdir(parents=True, exist_ok=True)
+            content = (
+                signed_manifest_bytes()
+                if callable(signed_manifest_bytes)
+                else signed_manifest_bytes
+            )
+            if content is not None:
+                signed_path.write_bytes(content)
+        return response
 
     monkeypatch.setattr("builtins.input", answer)
 
@@ -64,7 +83,8 @@ def test_setup_checks_environment_and_generates_demo_keypair(tmp_path, monkeypat
     artifact = tmp_path / "artifact.txt"
     artifact.write_text("demo", encoding="utf-8")
     _set_responses(
-        monkeypatch, ["1", str(artifact), "yes", "demo-release", "1"]
+        monkeypatch,
+        ["1", str(artifact), "yes", "demo-release", "1", "yes"],
     )
     private_path = tmp_path / "keys" / "private.wif"
     public_path = tmp_path / "keys" / "public.pub"
@@ -167,7 +187,7 @@ def test_setup_installs_only_after_approval_and_rechecks(tmp_path, monkeypatch, 
     artifact.write_text("demo", encoding="utf-8")
     _set_responses(
         monkeypatch,
-        ["yes", "1", str(artifact), "yes", "demo-release", "1"],
+        ["yes", "1", str(artifact), "yes", "demo-release", "1", "yes"],
     )
 
     assert cli.main(_setup_args(private_path, public_path)) == 0
@@ -212,7 +232,8 @@ def test_setup_overwrites_existing_keys_only_after_approval(tmp_path, monkeypatc
     artifact = tmp_path / "artifact.txt"
     artifact.write_text("demo", encoding="utf-8")
     _set_responses(
-        monkeypatch, ["yes", "1", str(artifact), "yes", "demo-release", "1"]
+        monkeypatch,
+        ["yes", "1", str(artifact), "yes", "demo-release", "1", "yes"],
     )
 
     assert cli.main(_setup_args(private_path, public_path)) == 0
@@ -239,10 +260,21 @@ def test_setup_does_not_install_when_installed_package_is_not_importable(
     assert not public_path.exists()
 
 
-def _run_setup_with_responses(tmp_path, monkeypatch, responses):
+def _run_setup_with_responses(
+    tmp_path,
+    monkeypatch,
+    responses,
+    *,
+    manual_sign_response="yes",
+    signed_manifest_bytes=b'{"payload": {}, "signature": "manual"}\n',
+):
     _set_environment(monkeypatch)
     monkeypatch.chdir(tmp_path)
-    _set_responses(monkeypatch, responses)
+    _set_responses(
+        monkeypatch,
+        [*responses, manual_sign_response],
+        signed_manifest_bytes=signed_manifest_bytes,
+    )
     private_path = tmp_path / "private.wif"
     public_path = tmp_path / "public.pub"
     return cli.main(_setup_args(private_path, public_path)), private_path, public_path
@@ -490,3 +522,179 @@ def test_setup_stage4_reports_manifest_creation_errors(tmp_path, monkeypatch, ca
         capsys.readouterr().err
     )
     assert not (tmp_path / "state" / "manifest.json").exists()
+
+
+def test_setup_stage5_displays_manual_command_and_hands_off_unverified_manifest(
+    tmp_path, monkeypatch, capsys
+):
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("contents", encoding="utf-8")
+    monkeypatch.setattr(
+        cli,
+        "sign_manifest",
+        lambda *args, **kwargs: pytest.fail("Stage 5 must not sign the manifest"),
+    )
+
+    result, private_path, _ = _run_setup_with_responses(
+        tmp_path,
+        monkeypatch,
+        ["1", str(artifact), "yes", "demo-release", "1"],
+    )
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert "Stage 5 — Manual manifest signing" in output
+    assert "Review the unsigned manifest. This exact payload will be signed:" in output
+    assert '"sha256":' in output
+    assert (
+        "sealrun manifest-sign --manifest state/manifest.json --private-key "
+        f"{private_path} --output state/manifest.signed.json"
+    ) in output
+    assert "Stage 5 will not run the signing command or access the private key." in output
+    assert f"Signed manifest received: {Path('state/manifest.signed.json')}" in output
+    assert "NOT VERIFIED. Stage 6 must verify the signature and artifact hashes" in output
+    assert "VERIFIED:" not in output
+    assert "sealrun launch" not in output
+    assert "sealrun anchor" not in output
+
+
+def test_setup_stage5_stops_when_manual_signing_is_refused(
+    tmp_path, monkeypatch, capsys
+):
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("contents", encoding="utf-8")
+
+    result, _, _ = _run_setup_with_responses(
+        tmp_path,
+        monkeypatch,
+        ["1", str(artifact), "yes", "demo-release", "1"],
+        manual_sign_response="no",
+    )
+
+    assert result == 1
+    assert not (tmp_path / "state" / "manifest.signed.json").exists()
+    assert "manual signing was refused or not confirmed" in capsys.readouterr().err
+
+
+def test_setup_stage5_stops_when_manual_signing_does_not_produce_a_file(
+    tmp_path, monkeypatch, capsys
+):
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("contents", encoding="utf-8")
+
+    result, _, _ = _run_setup_with_responses(
+        tmp_path,
+        monkeypatch,
+        ["1", str(artifact), "yes", "demo-release", "1"],
+        signed_manifest_bytes=None,
+    )
+
+    assert result == 1
+    assert not (tmp_path / "state" / "manifest.signed.json").exists()
+    assert "signed manifest was not produced" in capsys.readouterr().err
+
+
+def test_setup_stage5_hands_invalid_signature_to_mandatory_verify_gate(
+    tmp_path, monkeypatch, capsys
+):
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("contents", encoding="utf-8")
+    signed_manifest_bytes = (
+        b'{"payload": {"release_seq": 1}, "signature": "invalid-signature"}\n'
+    )
+
+    result, _, _ = _run_setup_with_responses(
+        tmp_path,
+        monkeypatch,
+        ["1", str(artifact), "yes", "demo-release", "1"],
+        signed_manifest_bytes=signed_manifest_bytes,
+    )
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert (tmp_path / "state" / "manifest.signed.json").read_bytes() == (
+        signed_manifest_bytes
+    )
+    assert "Signed manifest received:" in output
+    assert "NOT VERIFIED. Stage 6 must verify the signature and artifact hashes" in output
+    assert "VERIFIED:" not in output
+
+
+def test_setup_stage5_hands_tampered_signed_manifest_to_mandatory_verify_gate(
+    tmp_path, monkeypatch, capsys
+):
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("contents", encoding="utf-8")
+
+    def sign_then_tamper():
+        payload = cli._read_json(Path("state/manifest.json"))
+        signed = cli.sign_manifest(payload, load_private_key(Path("private.wif")))
+        signed["payload"]["release_id"] = "tampered-after-signing"
+        return json.dumps(signed).encode("utf-8")
+
+    result, _, _ = _run_setup_with_responses(
+        tmp_path,
+        monkeypatch,
+        ["1", str(artifact), "yes", "demo-release", "1"],
+        signed_manifest_bytes=sign_then_tamper,
+    )
+
+    output = capsys.readouterr().out
+    signed = json.loads(
+        (tmp_path / "state" / "manifest.signed.json").read_text(encoding="utf-8")
+    )
+    assert result == 0
+    assert signed["payload"]["release_id"] == "tampered-after-signing"
+    assert "signature" in signed
+    assert "Signed manifest received:" in output
+    assert "NOT VERIFIED. Stage 6 must verify the signature and artifact hashes" in output
+    assert "VERIFIED:" not in output
+
+
+def test_setup_stage5_does_not_overwrite_existing_signed_manifest_without_approval(
+    tmp_path, monkeypatch, capsys
+):
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("contents", encoding="utf-8")
+    signed_path = tmp_path / "state" / "manifest.signed.json"
+    signed_path.parent.mkdir()
+    existing = b'{"existing": "signed manifest"}\n'
+    signed_path.write_bytes(existing)
+
+    result, _, _ = _run_setup_with_responses(
+        tmp_path,
+        monkeypatch,
+        ["1", str(artifact), "yes", "demo-release", "1"],
+        manual_sign_response="no",
+    )
+
+    output = capsys.readouterr()
+    assert result == 1
+    assert signed_path.read_bytes() == existing
+    assert "Existing signed manifest found:" in output.out
+    assert "existing signed manifest was not approved for overwrite" in output.err
+
+
+def test_setup_stage5_rejects_unrefreshed_existing_signed_manifest(
+    tmp_path, monkeypatch, capsys
+):
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("contents", encoding="utf-8")
+    signed_path = tmp_path / "state" / "manifest.signed.json"
+    signed_path.parent.mkdir()
+    existing = b'{"existing": "signed manifest"}\n'
+    signed_path.write_bytes(existing)
+
+    result, _, _ = _run_setup_with_responses(
+        tmp_path,
+        monkeypatch,
+        ["1", str(artifact), "yes", "demo-release", "1", "yes"],
+        signed_manifest_bytes=None,
+    )
+
+    output = capsys.readouterr()
+    assert result == 1
+    assert signed_path.read_bytes() == existing
+    assert "signed manifest was not refreshed" in output.err
+    assert "Signed manifest received:" not in output.out
+    assert "NOT VERIFIED." not in output.out

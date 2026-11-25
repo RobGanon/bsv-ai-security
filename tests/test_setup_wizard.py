@@ -550,7 +550,7 @@ def test_setup_stage5_displays_manual_command_and_hands_off_unverified_manifest(
         "sealrun manifest-sign --manifest state/manifest.json --private-key "
         f"{private_path} --output state/manifest.signed.json"
     ) in output
-    assert "The wizard will not run the signing command or access the private key." in output
+    assert "Stage 5 will not run the signing command or access the private key." in output
     assert f"Signed manifest received: {Path('state/manifest.signed.json')}" in output
     assert "NOT VERIFIED. Stage 6 must verify the signature and artifact hashes" in output
     assert "VERIFIED:" not in output
@@ -673,3 +673,28 @@ def test_setup_stage5_does_not_overwrite_existing_signed_manifest_without_approv
     assert signed_path.read_bytes() == existing
     assert "Existing signed manifest found:" in output.out
     assert "existing signed manifest was not approved for overwrite" in output.err
+
+
+def test_setup_stage5_rejects_unrefreshed_existing_signed_manifest(
+    tmp_path, monkeypatch, capsys
+):
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("contents", encoding="utf-8")
+    signed_path = tmp_path / "state" / "manifest.signed.json"
+    signed_path.parent.mkdir()
+    existing = b'{"existing": "signed manifest"}\n'
+    signed_path.write_bytes(existing)
+
+    result, _, _ = _run_setup_with_responses(
+        tmp_path,
+        monkeypatch,
+        ["1", str(artifact), "yes", "demo-release", "1", "yes"],
+        signed_manifest_bytes=None,
+    )
+
+    output = capsys.readouterr()
+    assert result == 1
+    assert signed_path.read_bytes() == existing
+    assert "signed manifest was not refreshed" in output.err
+    assert "Signed manifest received:" not in output.out
+    assert "NOT VERIFIED." not in output.out

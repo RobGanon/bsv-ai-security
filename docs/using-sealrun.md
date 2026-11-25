@@ -69,11 +69,12 @@ sealrun manifest-sign \
   --output state/manifest.signed.json
 ```
 
-Run this command yourself; the wizard never runs it or accesses the
-private key. If `state/manifest.signed.json` already exists, the wizard
-requires explicit approval before showing the command. After you confirm
-that signing succeeded, setup checks that the signed manifest exists and
-is nonempty and readable, then hands off its path as **not verified**.
+Run this command yourself; Stage 5 will not run it or access the private
+key. If `state/manifest.signed.json` already exists, the wizard requires
+explicit approval before showing the command and checks that its mtime or
+size changed before handing it off. After you confirm that signing
+succeeded, setup checks that the signed manifest exists and is nonempty
+and readable, then hands off its path as **not verified**.
 Stage 5 does not validate the JSON or signature; Stage 6 must verify the
 signature and artifact hashes before any launch or anchoring. Stage 5
 does not verify, launch, or anchor, and stops if signing is refused or

@@ -213,11 +213,19 @@ def _setup_manual_signing(
     print("\nStage 5 — Manual manifest signing")
     print("Review the unsigned manifest. This exact payload will be signed:")
     print(manifest_text, end="" if manifest_text.endswith("\n") else "\n")
-    print(
-        "The wizard will not run the signing command or access the private key."
-    )
+    print("Stage 5 will not run the signing command or access the private key.")
 
+    existing_fingerprint = None
     if os.path.lexists(signed_manifest_path):
+        try:
+            info = signed_manifest_path.stat()
+        except OSError as exc:
+            print(
+                f"ERROR: cannot inspect existing signed manifest: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+        existing_fingerprint = (info.st_mtime_ns, info.st_size)
         print(f"Existing signed manifest found: {signed_manifest_path}")
         if not _confirm_setup(
             "Allow the manual manifest-sign command to overwrite it? [y/N]: "
@@ -228,6 +236,10 @@ def _setup_manual_signing(
                 file=sys.stderr,
             )
             return 1
+        print(
+            "The existing signed manifest must be refreshed by the manual "
+            "command before it can be handed off."
+        )
 
     command = [
         "sealrun",
@@ -259,8 +271,19 @@ def _setup_manual_signing(
             )
             return 1
         signed_manifest = signed_manifest_path.read_bytes()
+        if existing_fingerprint is not None:
+            info = signed_manifest_path.stat()
     except OSError as exc:
         print(f"ERROR: cannot read signed manifest: {exc}", file=sys.stderr)
+        return 1
+    if existing_fingerprint is not None and (
+        info.st_mtime_ns,
+        info.st_size,
+    ) == existing_fingerprint:
+        print(
+            f"ERROR: signed manifest was not refreshed: {signed_manifest_path}",
+            file=sys.stderr,
+        )
         return 1
     if not signed_manifest.strip():
         print(

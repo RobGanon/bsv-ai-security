@@ -24,7 +24,7 @@ sealrun command is the real one you would use with a real model.
 pip install -e .
 ```
 
-## Guided setup (environment check and demo keypair)
+## Guided setup (Stages 1–5)
 
 Run the first two setup stages with:
 
@@ -58,6 +58,26 @@ the exact manifest JSON payload that a later stage will sign, and the
 public key separately for later verification. The existing manifest
 format keeps the public key out of the signed payload; it is supplied
 out of band. Stage 4 does not sign the manifest.
+
+Stage 5 displays the unsigned manifest again for review and prints the
+existing manual signing command:
+
+```bash
+sealrun manifest-sign \
+  --manifest state/manifest.json \
+  --private-key keys/private.wif \
+  --output state/manifest.signed.json
+```
+
+Run this command yourself; the wizard never runs it or accesses the
+private key. If `state/manifest.signed.json` already exists, the wizard
+requires explicit approval before showing the command. After you confirm
+that signing succeeded, setup checks that the signed manifest exists and
+is nonempty and readable, then hands off its path as **not verified**.
+Stage 5 does not validate the JSON or signature; Stage 6 must verify the
+signature and artifact hashes before any launch or anchoring. Stage 5
+does not verify, launch, or anchor, and stops if signing is refused or
+the signed file is unavailable.
 
 ## The example setup
 

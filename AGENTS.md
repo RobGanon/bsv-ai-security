@@ -79,3 +79,13 @@ Does not prove: good behavior, output truthfulness, intent, or that every action
 ## Contributing
 
 Work on a branch, never commit directly to main. Run the test suite before opening a PR. General feedback goes to public GitHub issues; security findings via private vulnerability reporting only.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Domain documentation uses the single-context layout. See `docs/agents/domain.md`.
